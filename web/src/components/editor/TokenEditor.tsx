@@ -391,6 +391,50 @@ function isKeyboardPasteInput(event: InputEvent): boolean {
     || data.includes("\r");
 }
 
+function isAndroidWebViewLikeRuntime(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return false;
+  }
+  const userAgent = navigator.userAgent || "";
+  if (!/Android/i.test(userAgent)) {
+    return false;
+  }
+  const win = window as Window & {
+    Capacitor?: unknown;
+    __MIND_FS_NATIVE_PLATFORM__?: string;
+    MindFSNative?: unknown;
+  };
+  return !!win.Capacitor
+    || String(win.__MIND_FS_NATIVE_PLATFORM__ || "").toLowerCase() === "android"
+    || !!win.MindFSNative
+    || /\bwv\b/i.test(userAgent);
+}
+
+function isAndroidImeInput(event: InputEvent): boolean {
+  return event.inputType === "insertCompositionText"
+    || event.inputType === "insertFromComposition"
+    || event.inputType === "insertReplacementText"
+    || event.inputType === "deleteCompositionText"
+    || event.inputType === "deleteByComposition";
+}
+
+function nodeIsInside(root: Node, node: Node | null): boolean {
+  return !!node && (node === root || root.contains(node));
+}
+
+function collapseDOMSelectionInside(rootElement: HTMLElement): void {
+  const selection = window.getSelection?.();
+  if (
+    !selection ||
+    selection.isCollapsed ||
+    !nodeIsInside(rootElement, selection.anchorNode) ||
+    !nodeIsInside(rootElement, selection.focusNode)
+  ) {
+    return;
+  }
+  selection.collapseToEnd();
+}
+
 async function readClipboardTextFallback(): Promise<string> {
   try {
     const mod = await import("@capacitor/clipboard");
@@ -474,6 +518,7 @@ function EditorBridge({
   const [editor] = useLexicalComposerContext();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [rootElement, setRootElement] = useState<HTMLDivElement | null>(null);
+  const androidImeRepairTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return editor.registerRootListener((rootElement) => {
@@ -524,6 +569,34 @@ function EditorBridge({
     if (!rootElement) {
       return;
     }
+    const scheduleAndroidImeRepair = () => {
+      if (!isAndroidWebViewLikeRuntime()) {
+        return;
+      }
+      if (androidImeRepairTimerRef.current !== null) {
+        window.clearTimeout(androidImeRepairTimerRef.current);
+      }
+      const repairSelection = () => {
+        editor.update(() => {
+          const mutableEditor = editor as LexicalEditor & { _compositionKey?: string | null };
+          mutableEditor._compositionKey = null;
+          const selection = $getSelection();
+          if (!$isRangeSelection(selection) || selection.isCollapsed()) {
+            return;
+          }
+          const focus = selection.focus;
+          selection.anchor.set(focus.key, focus.offset, focus.type);
+          selection.dirty = true;
+        });
+        collapseDOMSelectionInside(rootElement);
+        rootElement.focus({ preventScroll: true });
+      };
+      window.requestAnimationFrame(repairSelection);
+      androidImeRepairTimerRef.current = window.setTimeout(() => {
+        androidImeRepairTimerRef.current = null;
+        repairSelection();
+      }, 80);
+    };
     const insertFromNativePaste = (event: ClipboardEvent | InputEvent) => {
       if (pasteEventHasFiles(event)) {
         return;
@@ -554,13 +627,31 @@ function EditorBridge({
     const handleBeforeInput = (event: InputEvent) => {
       if (isKeyboardPasteInput(event)) {
         insertFromNativePaste(event);
+        return;
+      }
+      if (isAndroidImeInput(event)) {
+        scheduleAndroidImeRepair();
       }
     };
+    const handleInput = (event: Event) => {
+      if (typeof InputEvent !== "undefined" && event instanceof InputEvent && isAndroidImeInput(event)) {
+        scheduleAndroidImeRepair();
+      }
+    };
+    const handleCompositionEnd = () => scheduleAndroidImeRepair();
     rootElement.addEventListener("paste", handlePaste, { capture: true });
     rootElement.addEventListener("beforeinput", handleBeforeInput, { capture: true });
+    rootElement.addEventListener("input", handleInput, { capture: true });
+    rootElement.addEventListener("compositionend", handleCompositionEnd, { capture: true });
     return () => {
+      if (androidImeRepairTimerRef.current !== null) {
+        window.clearTimeout(androidImeRepairTimerRef.current);
+        androidImeRepairTimerRef.current = null;
+      }
       rootElement.removeEventListener("paste", handlePaste, { capture: true });
       rootElement.removeEventListener("beforeinput", handleBeforeInput, { capture: true });
+      rootElement.removeEventListener("input", handleInput, { capture: true });
+      rootElement.removeEventListener("compositionend", handleCompositionEnd, { capture: true });
     };
   }, [editor, rootElement]);
 

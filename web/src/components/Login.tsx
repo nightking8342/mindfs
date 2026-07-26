@@ -18,6 +18,14 @@ import {
 } from "../services/appUpdate";
 import { downloadURL } from "../services/download";
 import { useI18n, type MessageKey, type MessageParams } from "../i18n";
+import {
+  DEFAULT_WEBVIEW_TEXT_ZOOM,
+  MAX_WEBVIEW_TEXT_ZOOM,
+  MIN_WEBVIEW_TEXT_ZOOM,
+  getNativeWebViewTextZoom,
+  hasNativeWebViewSettings,
+  setNativeWebViewTextZoom,
+} from "../services/webViewSettings";
 
 type LoginProps = {
   onOpenNode: (nodeURL: string) => void;
@@ -137,6 +145,9 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
     useState<AppUpdateState>(() => normalizeAppUpdateState(null));
   const [appUpdateNotesOpen, setAppUpdateNotesOpen] = useState(false);
   const [appUpdateBusy, setAppUpdateBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [webViewSettingsAvailable, setWebViewSettingsAvailable] = useState(false);
+  const [textZoom, setTextZoom] = useState(DEFAULT_WEBVIEW_TEXT_ZOOM);
 
   function persistNodes(nextNodes: LauncherNode[]): void {
     const sorted = sortNodes(nextNodes);
@@ -256,6 +267,10 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
     }
   }
 
+  function handleTextZoomChange(value: number): void {
+    setTextZoom(setNativeWebViewTextZoom(value));
+  }
+
   useEffect(() => {
     let cancelled = false;
     const timers: number[] = [];
@@ -318,6 +333,14 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
       window.removeEventListener("mindfs:launcher-nodes-updated", handleLauncherNodesUpdated);
       timers.forEach((timer) => window.clearTimeout(timer));
     };
+  }, []);
+
+  useEffect(() => {
+    const available = hasNativeWebViewSettings();
+    setWebViewSettingsAvailable(available);
+    if (available) {
+      setTextZoom(getNativeWebViewTextZoom());
+    }
   }, []);
 
   useEffect(() => {
@@ -400,6 +423,46 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
           gap: "8px",
         }}
       >
+        {webViewSettingsAvailable ? (
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              marginBottom: "2px",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setTextZoom(getNativeWebViewTextZoom());
+                setSettingsOpen(true);
+              }}
+              aria-label="打开设置"
+              style={{
+                border: `1px solid ${BORDER}`,
+                borderRadius: "999px",
+                background: SURFACE_STRONG,
+                color: TEXT,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 14px",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: "pointer",
+                boxShadow: SHADOW,
+                backdropFilter: "blur(20px)",
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+                <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.8 1.8 0 0 0 15 19.4a1.8 1.8 0 0 0-1 .6V20a2 2 0 1 1-4 0v-.09a1.8 1.8 0 0 0-1-.6 1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-.6-1H4a2 2 0 1 1 0-4h.09a1.8 1.8 0 0 0 .6-1 1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 9 4.6a1.8 1.8 0 0 0 1-.6V4a2 2 0 1 1 4 0v.09a1.8 1.8 0 0 0 1 .6 1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.8 1.8 0 0 0 19.4 9c.24.3.44.64.6 1H20a2 2 0 1 1 0 4h-.09c-.16.36-.36.7-.6 1Z" />
+              </svg>
+              设置
+            </button>
+          </div>
+        ) : null}
+
         <button
           type="button"
           onClick={() => onOpenNode(RELAY_URL)}
@@ -864,6 +927,204 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
               </button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {settingsOpen ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(17, 24, 39, 0.18)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "20px",
+            zIndex: 45,
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="设置"
+            style={{
+              width: "100%",
+              maxWidth: "420px",
+              borderRadius: "22px",
+              background: SURFACE_STRONG,
+              border: `1px solid var(--mindfs-launcher-modal-border)`,
+              boxShadow: SHADOW,
+              padding: "18px",
+              backdropFilter: "blur(20px)",
+              display: "grid",
+              gap: "18px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "18px",
+                  fontWeight: 700,
+                  color: TEXT,
+                  lineHeight: 1.2,
+                }}
+              >
+                设置
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                aria-label="关闭设置"
+                style={{
+                  border: "none",
+                  borderRadius: "999px",
+                  background: "var(--mindfs-launcher-surface-soft)",
+                  color: MUTED,
+                  width: "34px",
+                  height: "34px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <path d="M18 6 6 18" />
+                  <path d="m6 6 12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gap: "12px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                }}
+              >
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "4px",
+                    minWidth: 0,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "15px",
+                      fontWeight: 600,
+                      color: TEXT,
+                    }}
+                  >
+                    网页字体大小
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      lineHeight: 1.5,
+                      color: MUTED,
+                    }}
+                  >
+                    影响节点页和进入节点后的 WebView 显示比例
+                  </div>
+                </div>
+                <div
+                  style={{
+                    color: ACCENT,
+                    fontSize: "18px",
+                    fontWeight: 700,
+                    flex: "0 0 auto",
+                  }}
+                >
+                  {textZoom}%
+                </div>
+              </div>
+
+              <input
+                type="range"
+                min={MIN_WEBVIEW_TEXT_ZOOM}
+                max={MAX_WEBVIEW_TEXT_ZOOM}
+                step={1}
+                value={textZoom}
+                onChange={(event) => handleTextZoomChange(Number(event.target.value))}
+                style={{
+                  width: "100%",
+                  accentColor: ACCENT,
+                }}
+              />
+
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  color: MUTED,
+                  fontSize: "12px",
+                  lineHeight: 1,
+                }}
+              >
+                <span>{MIN_WEBVIEW_TEXT_ZOOM}%</span>
+                <span>{MAX_WEBVIEW_TEXT_ZOOM}%</span>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "10px",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => handleTextZoomChange(DEFAULT_WEBVIEW_TEXT_ZOOM)}
+                style={{
+                  border: `1px solid ${BORDER_STRONG}`,
+                  borderRadius: "14px",
+                  padding: "12px 16px",
+                  background: "transparent",
+                  color: MUTED,
+                  fontSize: "14px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  width: "100%",
+                }}
+              >
+                恢复默认
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                style={{
+                  border: "none",
+                  borderRadius: "14px",
+                  padding: "12px 16px",
+                  background: ACCENT,
+                  color: "#fff8f2",
+                  fontSize: "14px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  width: "100%",
+                }}
+              >
+                完成
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

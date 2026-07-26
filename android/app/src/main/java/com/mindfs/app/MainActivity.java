@@ -5,6 +5,7 @@ import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -19,14 +20,16 @@ import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebSettings;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
+import android.widget.FrameLayout;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
-import androidx.core.graphics.Insets;
 import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
@@ -36,7 +39,16 @@ import org.json.JSONObject;
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "MindFS";
     private static final int POST_NOTIFICATIONS_REQUEST_CODE = 19031;
+    private static final String WEBVIEW_SETTINGS_PREFS = "mindfs_webview_settings";
+    private static final String PREF_TEXT_ZOOM = "text_zoom";
+    private static final int DEFAULT_TEXT_ZOOM = 100;
+    private static final int MIN_TEXT_ZOOM = 50;
+    private static final int MAX_TEXT_ZOOM = 200;
     private boolean notificationPermissionRequested = false;
+    private int safeAreaTopPx = 0;
+    private int safeAreaBottomPx = 0;
+    private int imeBottomPx = 0;
+    private View statusBarScrim = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -51,6 +63,7 @@ public class MainActivity extends BridgeActivity {
         getBridge().getWebView().getSettings().setMixedContentMode(
             WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         );
+        applyStoredWebViewTextZoom();
         getBridge().getWebView().addJavascriptInterface(
             new LauncherNodeSyncBridge(),
             "MindFSLauncherNodeSync"
@@ -71,10 +84,19 @@ public class MainActivity extends BridgeActivity {
             new AppInfoBridge(),
             "MindFSAppInfo"
         );
+        getBridge().getWebView().addJavascriptInterface(
+            new SystemBarsBridge(),
+            "MindFSSystemBars"
+        );
+        getBridge().getWebView().addJavascriptInterface(
+            new WebViewSettingsBridge(),
+            "MindFSWebViewSettings"
+        );
         clearPendingWebViewCacheIfNeeded();
         requestPostNotificationsIfNeeded();
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         applySystemBarStyle();
+        ensureStatusBarScrim();
         installEdgeToEdgeInsetsOverride();
         fixWebViewMargin();
         dispatchReplySessionIntent(getIntent());
@@ -94,6 +116,7 @@ public class MainActivity extends BridgeActivity {
         pauseReplyPoller();
         clearCompletedReplyNotifications();
         applySystemBarStyle();
+        ensureStatusBarScrim();
         installEdgeToEdgeInsetsOverride();
         fixWebViewMargin();
     }
@@ -128,6 +151,100 @@ public class MainActivity extends BridgeActivity {
             controller.setAppearanceLightStatusBars(!darkMode);
             controller.setAppearanceLightNavigationBars(false);
         }
+        updateStatusBarScrimColor(darkMode ? Color.parseColor("#020617") : Color.WHITE);
+    }
+
+    private void ensureStatusBarScrim() {
+        if (statusBarScrim != null) {
+            return;
+        }
+        View decorView = getWindow().getDecorView();
+        if (!(decorView instanceof FrameLayout)) {
+            return;
+        }
+        statusBarScrim = new View(this);
+        statusBarScrim.setClickable(false);
+        statusBarScrim.setFocusable(false);
+        statusBarScrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        statusBarScrim.setBackgroundColor(Color.TRANSPARENT);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            0
+        );
+        params.gravity = android.view.Gravity.TOP;
+        ((FrameLayout) decorView).addView(statusBarScrim, params);
+    }
+
+    private SharedPreferences webViewSettingsPrefs() {
+        return getSharedPreferences(WEBVIEW_SETTINGS_PREFS, Context.MODE_PRIVATE);
+    }
+
+    private int clampTextZoom(int value) {
+        if (value < MIN_TEXT_ZOOM) {
+            return MIN_TEXT_ZOOM;
+        }
+        if (value > MAX_TEXT_ZOOM) {
+            return MAX_TEXT_ZOOM;
+        }
+        return value;
+    }
+
+    private int getStoredWebViewTextZoom() {
+        return clampTextZoom(webViewSettingsPrefs().getInt(PREF_TEXT_ZOOM, DEFAULT_TEXT_ZOOM));
+    }
+
+    private void applyStoredWebViewTextZoom() {
+        applyWebViewTextZoom(getStoredWebViewTextZoom());
+    }
+
+    private void setStoredWebViewTextZoom(int value) {
+        int zoom = clampTextZoom(value);
+        webViewSettingsPrefs().edit().putInt(PREF_TEXT_ZOOM, zoom).apply();
+        applyWebViewTextZoom(zoom);
+    }
+
+    private void applyWebViewTextZoom(int value) {
+        int zoom = clampTextZoom(value);
+        View webView = getBridge() == null ? null : getBridge().getWebView();
+        if (webView instanceof WebView) {
+            webView.post(() -> ((WebView) webView).getSettings().setTextZoom(zoom));
+        }
+    }
+
+    private void updateStatusBarScrimHeight(int heightPx) {
+        ensureStatusBarScrim();
+        if (statusBarScrim == null) {
+            return;
+        }
+        ViewGroup.LayoutParams params = statusBarScrim.getLayoutParams();
+        if (params == null || params.height == heightPx) {
+            return;
+        }
+        params.height = heightPx;
+        statusBarScrim.setLayoutParams(params);
+    }
+
+    private void updateStatusBarScrimColor(int color) {
+        ensureStatusBarScrim();
+        if (statusBarScrim != null) {
+            statusBarScrim.setBackgroundColor(color);
+        }
+        getWindow().setStatusBarColor(color);
+        WindowInsetsControllerCompat controller =
+            WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        if (controller != null) {
+            controller.setAppearanceLightStatusBars(!isDarkColor(color));
+        }
+    }
+
+    private boolean isDarkColor(int color) {
+        double r = Color.red(color) / 255.0;
+        double g = Color.green(color) / 255.0;
+        double b = Color.blue(color) / 255.0;
+        r = r <= 0.03928 ? r / 12.92 : Math.pow((r + 0.055) / 1.055, 2.4);
+        g = g <= 0.03928 ? g / 12.92 : Math.pow((g + 0.055) / 1.055, 2.4);
+        b = b <= 0.03928 ? b / 12.92 : Math.pow((b + 0.055) / 1.055, 2.4);
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.5;
     }
 
     private void fixWebViewMargin() {
@@ -141,8 +258,9 @@ public class MainActivity extends BridgeActivity {
             parent.setPadding(0, 0, 0, 0);
         }
 
-        ViewGroup.MarginLayoutParams params = (ViewGroup.MarginLayoutParams) webView.getLayoutParams();
-        if (params != null) {
+        ViewGroup.LayoutParams rawParams = webView.getLayoutParams();
+        if (rawParams instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams params = (ViewGroup.MarginLayoutParams) rawParams;
             params.topMargin = 0;
             params.bottomMargin = 0;
             params.leftMargin = 0;
@@ -152,6 +270,7 @@ public class MainActivity extends BridgeActivity {
 
         webView.post(() -> {
             ViewCompat.requestApplyInsets(webView);
+            injectCurrentSafeAreaInsets();
         });
     }
 
@@ -170,35 +289,76 @@ public class MainActivity extends BridgeActivity {
             Insets systemInsets = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
             );
-            Insets imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime());
-            int imeBottom = insets.isVisible(WindowInsetsCompat.Type.ime()) ? imeInsets.bottom : 0;
-            view.setPadding(0, 0, 0, 0);
+            safeAreaTopPx = 0;
+            safeAreaBottomPx = systemInsets.bottom;
+            // Android adjustResize already shrinks the WebView for the keyboard.
+            // Do not also expose IME height to the page, or the web layout can reserve it twice.
+            imeBottomPx = 0;
+            updateStatusBarScrimHeight(systemInsets.top);
+            view.setPadding(0, systemInsets.top, 0, 0);
             webView.setPadding(0, 0, 0, 0);
-            injectSafeAreaInsets(systemInsets.top, systemInsets.bottom, imeBottom);
+            injectCurrentSafeAreaInsets();
             return new WindowInsetsCompat.Builder(insets)
-                .setInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout(), androidx.core.graphics.Insets.NONE)
+                .setInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout(), Insets.NONE)
                 .build();
         });
 
         parent.post(() -> ViewCompat.requestApplyInsets(parent));
     }
 
+    private void injectCurrentSafeAreaInsets() {
+        injectSafeAreaInsets(safeAreaTopPx, safeAreaBottomPx, imeBottomPx);
+    }
+
+    private void injectCurrentSafeAreaInsetsAfterNavigation() {
+        View webView = getBridge() == null ? null : getBridge().getWebView();
+        if (!(webView instanceof WebView)) {
+            return;
+        }
+        webView.post(() -> {
+            injectCurrentSafeAreaInsets();
+            syncStatusBarColorFromPage();
+            webView.postDelayed(this::injectCurrentSafeAreaInsets, 120);
+            webView.postDelayed(this::syncStatusBarColorFromPage, 120);
+            webView.postDelayed(this::injectCurrentSafeAreaInsets, 360);
+            webView.postDelayed(this::syncStatusBarColorFromPage, 360);
+        });
+    }
+
+    private void syncStatusBarColorFromPage() {
+        View webView = getBridge() == null ? null : getBridge().getWebView();
+        if (!(webView instanceof WebView)) {
+            return;
+        }
+        String script =
+            "(function(){try{if(!window.MindFSSystemBars||!document||!document.elementFromPoint){return;}" +
+            "function hexFromColor(v){v=(v||'').trim();if(!v||v==='transparent'){return '';}" +
+            "if(/^#[0-9a-f]{6}$/i.test(v)){return v.toLowerCase();}" +
+            "var m=v.match(/^rgba?\\(([^)]+)\\)$/i);if(!m){return '';}" +
+            "var p=m[1].split(',').map(function(x){return parseFloat(x.trim());});" +
+            "if(p.length<3||p[3]===0){return '';}" +
+            "return '#'+p.slice(0,3).map(function(n){n=Math.max(0,Math.min(255,Math.round(n)||0));return n.toString(16).padStart(2,'0');}).join('');}" +
+            "var x=Math.max(1,Math.min(window.innerWidth-1,window.innerWidth/2));var y=8;" +
+            "var el=document.elementFromPoint(x,y);" +
+            "while(el){var c=hexFromColor(getComputedStyle(el).backgroundColor);if(c){window.MindFSSystemBars.setStatusBarColor(c);return;}el=el.parentElement;}" +
+            "var root=getComputedStyle(document.documentElement);var fallback=hexFromColor(root.getPropertyValue('--mindfs-topbar-bg'))||hexFromColor(root.getPropertyValue('--mindfs-system-bar-bg'));" +
+            "if(fallback){window.MindFSSystemBars.setStatusBarColor(fallback);}" +
+            "}catch(e){}})();";
+        ((WebView) webView).evaluateJavascript(script, null);
+    }
+
     private void injectSafeAreaInsets(int topPx, int bottomPx, int imeBottomPx) {
-        View webView = getBridge().getWebView();
-        if (webView == null) {
+        View webView = getBridge() == null ? null : getBridge().getWebView();
+        if (!(webView instanceof WebView)) {
             return;
         }
 
-        float density = getResources().getDisplayMetrics().density;
-        float topDp = topPx / density;
-        float bottomDp = bottomPx / density;
-        float imeBottomDp = imeBottomPx / density;
         String script = String.format(
             java.util.Locale.US,
-            "(function(){if(!document||!document.documentElement||!document.documentElement.style){return;}document.documentElement.style.setProperty('--mindfs-safe-area-top','%.2fpx');document.documentElement.style.setProperty('--mindfs-safe-area-bottom','%.2fpx');document.documentElement.style.setProperty('--mindfs-ime-bottom','%.2fpx');window.dispatchEvent(new CustomEvent('mindfs:safe-area-updated'));})();",
-            topDp,
-            bottomDp,
-            imeBottomDp
+            "(function(){if(!document||!document.documentElement||!document.documentElement.style){return;}var s=document.documentElement.style;s.setProperty('--mindfs-safe-area-top','%dpx');s.setProperty('--mindfs-safe-area-bottom','%dpx');s.setProperty('--mindfs-ime-bottom','%dpx');window.dispatchEvent(new CustomEvent('mindfs:safe-area-updated'));})();",
+            Math.max(0, topPx),
+            Math.max(0, bottomPx),
+            Math.max(0, imeBottomPx)
         );
         ((WebView) webView).evaluateJavascript(script, null);
     }
@@ -409,9 +569,25 @@ public class MainActivity extends BridgeActivity {
         return normalized.endsWith(".local");
     }
 
-    private static class MindFSWebViewClient extends BridgeWebViewClient {
+    private class MindFSWebViewClient extends BridgeWebViewClient {
         MindFSWebViewClient(Bridge bridge) {
             super(bridge);
+        }
+
+        @Override
+        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            Uri url = request == null ? null : request.getUrl();
+            String scheme = url == null ? "" : url.getScheme();
+            if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+                return false;
+            }
+            return super.shouldOverrideUrlLoading(view, request);
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            super.onPageFinished(view, url);
+            injectCurrentSafeAreaInsetsAfterNavigation();
         }
 
         @Override
@@ -590,6 +766,34 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ex) {
                 return "{\"version\":\"\",\"build\":\"\"}";
             }
+        }
+    }
+
+    private class SystemBarsBridge {
+        @JavascriptInterface
+        public void setStatusBarColor(String rawColor) {
+            try {
+                String value = rawColor == null ? "" : rawColor.trim();
+                if (!value.matches("^#[0-9a-fA-F]{6}$")) {
+                    return;
+                }
+                int color = Color.parseColor(value);
+                runOnUiThread(() -> updateStatusBarScrimColor(color));
+            } catch (Exception ex) {
+                Log.w(TAG, "failed to set status bar color from page: " + rawColor, ex);
+            }
+        }
+    }
+
+    private class WebViewSettingsBridge {
+        @JavascriptInterface
+        public int getTextZoom() {
+            return getStoredWebViewTextZoom();
+        }
+
+        @JavascriptInterface
+        public void setTextZoom(int value) {
+            setStoredWebViewTextZoom(value);
         }
     }
 }
