@@ -17,6 +17,7 @@
 | `CLAUDE.md` 的「Fork 说明」小节 | fork 独有小节；若上游日后自己加了 CLAUDE.md，合并其内容但保留本小节 | 手动合并 |
 | `web/package.json` 的 `allowScripts` 字段 | 允许 esbuild 安装脚本（本地构建需要） | 我方（版本号等其余字段随上游） |
 | Android WebView 文字缩放设置与 IME 选区修复（e587493） | fork 自研功能，上游未合入 | 我方 |
+| `web/src/App.tsx` 的 `TOKEN_STATION_ENABLED` 开关 | 置 `false` 隐藏官方 Token 加油站入口并停掉其后台轮询；恢复或指向自建中转站时置 `true` | 我方（开关及三处引用；面板 JSX 本体随上游） |
 | `release-notes.md` | 跟随上游发版记录，fork 不自行发版 | 上游 |
 | `go.mod` / `go.sum` 的 `replace` 指令 | 指向 `github.com/yandc/*`，由上游维护 | 上游 |
 

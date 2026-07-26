@@ -152,6 +152,9 @@ import { useI18n, type MessageKey, type MessageParams } from "./i18n";
 type SessionMode = "chat" | "plugin" | "command";
 type WSStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
+// fork: 官方 Token 加油站入口开关，恢复或指向自建中转站时置 true（见 FORK.md）
+const TOKEN_STATION_ENABLED = false;
+
 const CHILD_SESSION_PAGE_SIZE = 100;
 const MULTI_PROJECT_SESSION_LIMIT = 6;
 const SESSION_PAGE_SIZE = 50;
@@ -12998,6 +13001,9 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, startRelayBinding, relayStatus]);
 
   const refreshTokenStationInfo = useCallback(async () => {
+    if (!TOKEN_STATION_ENABLED) {
+      return;
+    }
     setTokenStationLoading(true);
     setTokenStationErrorOpen(false);
     try {
@@ -13638,7 +13644,7 @@ export function App({ onGoHome }: AppProps) {
             onUpdateAction={() => {
               void handleStartUpdate();
             }}
-            footerTopContent={tokenStationCard}
+            footerTopContent={TOKEN_STATION_ENABLED ? tokenStationCard : null}
             showEnterKeySendOption={isMobile}
             enterKeySends={mobileEnterKeySends}
             onEnterKeySendsChange={setMobileEnterKeySends}
