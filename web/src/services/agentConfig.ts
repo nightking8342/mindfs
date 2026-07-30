@@ -151,6 +151,23 @@ export async function fetchAgentConfigBackupEnv(id: string): Promise<{ id: strin
   return protectedJSON(appPath(`/api/agent-config/backups/env?${params.toString()}`));
 }
 
+export type AgentConfigSwitchStepKey =
+  | "restore_files"
+  | "claude_settings"
+  | "apply_env"
+  | "kill_sessions"
+  | "record_selection"
+  | "probe";
+
+export type AgentConfigSwitchStep = {
+  key: AgentConfigSwitchStepKey | string;
+  status: "ok" | "failed" | "running" | "skipped";
+  count?: number;
+  target?: string;
+  duration_ms: number;
+  error?: string;
+};
+
 export async function switchAgentConfig(input: {
   id: string;
   confirmOverwrite?: boolean;
@@ -158,6 +175,7 @@ export async function switchAgentConfig(input: {
   needs_confirm: boolean;
   message?: string;
   backup?: AgentConfigBackup;
+  steps?: AgentConfigSwitchStep[];
 }> {
   return protectedJSON(appPath("/api/agent-config/switch"), {
     method: "POST",
@@ -168,6 +186,34 @@ export async function switchAgentConfig(input: {
     }),
   });
 }
+
+// A failed switch answers 400 with the step list attached, so the caller can
+// show which stage stopped it. Returns [] when the error carries no steps.
+export function agentConfigSwitchStepsFromError(error: unknown): AgentConfigSwitchStep[] {
+  const payload = (error as { payload?: { steps?: unknown } } | null)?.payload;
+  const steps = payload?.steps;
+  return Array.isArray(steps) ? (steps as AgentConfigSwitchStep[]) : [];
+}
+
+// probe is "unknown" when no completion event arrived within the client-side
+// timeout. That is not the same as failure -- the server allows the probe up to
+// four minutes, so it may still be running.
+export type AgentConfigSwitchProbeState = "running" | "ok" | "failed" | "unknown";
+
+export type AgentConfigSwitchProgress = {
+  agent: string;
+  backupID: string;
+  backupName: string;
+  steps: AgentConfigSwitchStep[];
+  probe: AgentConfigSwitchProbeState;
+  probeError: string;
+  /** Set when the switch itself failed before the probe started. */
+  switchError: string;
+  startedAt: number;
+  finishedAt: number;
+};
+
+export const AGENT_CONFIG_SWITCH_PROBE_TIMEOUT_MS = 90_000;
 
 export async function fetchAgentAPIProviders(agent?: string): Promise<AgentAPIProvider[]> {
   const params = new URLSearchParams();

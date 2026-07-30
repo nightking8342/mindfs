@@ -33,7 +33,11 @@ import {
   startTokenStationBinding,
   type TokenStationInfo,
 } from "./services/tokenStation";
-import { syncAgentAPIProviders } from "./services/agentConfig";
+import {
+  syncAgentAPIProviders,
+  AGENT_CONFIG_SWITCH_PROBE_TIMEOUT_MS,
+  type AgentConfigSwitchProgress,
+} from "./services/agentConfig";
 import { syncNativeReplyPollerE2EE } from "./services/replyPoller";
 import {
   ProtectedAPIError,
@@ -2323,6 +2327,11 @@ export function App({ onGoHome }: AppProps) {
   const [relayStatus, setRelayStatus] = useState<RelayStatusPayload | null>(
     null,
   );
+  // Progress of an in-flight config switch. Lives here rather than in FileTree
+  // so it survives closing the popover, and so a switch made on another device
+  // can be surfaced from the same data.
+  const [agentConfigSwitchProgress, setAgentConfigSwitchProgress] =
+    useState<AgentConfigSwitchProgress | null>(null);
   const [tokenStationInfo, setTokenStationInfo] =
     useState<TokenStationInfo | null>(null);
   const [tokenStationLoading, setTokenStationLoading] = useState(false);
@@ -2455,6 +2464,52 @@ export function App({ onGoHome }: AppProps) {
     }
     return completionAudioContextRef.current;
   }, []);
+
+  // The completion broadcast is lost if the socket drops mid-switch. Instead of
+  // waiting forever, query agent status once the client deadline passes and only
+  // fall back to "unknown" when even that cannot decide.
+  useEffect(() => {
+    const progress = agentConfigSwitchProgress;
+    if (!progress || progress.probe !== "running") {
+      return;
+    }
+    const elapsed = Date.now() - progress.startedAt;
+    const remaining = Math.max(0, AGENT_CONFIG_SWITCH_PROBE_TIMEOUT_MS - elapsed);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        let resolved: "ok" | "failed" | "unknown" = "unknown";
+        let detail = "";
+        try {
+          const agents = await fetchAgents(true);
+          const match = agents.find((item) => item.name === progress.agent);
+          if (match) {
+            resolved = match.available ? "ok" : "failed";
+            detail = String(match.error || "");
+          }
+        } catch {
+          // Leave it "unknown" -- the outcome genuinely is not known.
+        }
+        if (cancelled) {
+          return;
+        }
+        setAgentConfigSwitchProgress((prev) => {
+          if (!prev || prev.agent !== progress.agent || prev.probe !== "running") {
+            return prev;
+          }
+          return { ...prev, probe: resolved, probeError: detail, finishedAt: Date.now() };
+        });
+      })();
+    }, remaining);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    agentConfigSwitchProgress?.agent,
+    agentConfigSwitchProgress?.probe,
+    agentConfigSwitchProgress?.startedAt,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -9922,6 +9977,41 @@ export function App({ onGoHome }: AppProps) {
         case "agent.status.changed":
           setAgentsVersion((v) => v + 1);
           break;
+        case "agent.config.switched": {
+          // Unlike agent.status.changed this always arrives, so it is the signal
+          // a waiting switch relies on.
+          const agentName = String(payload?.agent || "").trim();
+          if (!agentName) {
+            break;
+          }
+          const available = !!payload?.available;
+          const probeError = String(payload?.error || "");
+          const backupName = String(payload?.backup_name || "");
+          let matchedLocalSwitch = false;
+          setAgentConfigSwitchProgress((prev) => {
+            if (!prev || prev.agent !== agentName || prev.probe !== "running") {
+              return prev;
+            }
+            matchedLocalSwitch = true;
+            return {
+              ...prev,
+              probe: available ? "ok" : "failed",
+              probeError,
+              finishedAt: Date.now(),
+            };
+          });
+          setAgentsVersion((v) => v + 1);
+          // Switching kills every session of that agent across all clients, so
+          // explain to the other devices why theirs just restarted.
+          if (!matchedLocalSwitch && backupName) {
+            reportError(
+              "agent.config_switched",
+              t("agentConfig.switchedElsewhere", { agent: agentName, name: backupName }),
+              { severity: "info", recoverable: true },
+            );
+          }
+          break;
+        }
         case "app.update":
           setUpdateState(normalizeUpdateState(payload?.state as UpdateState));
           break;
@@ -13628,6 +13718,8 @@ export function App({ onGoHome }: AppProps) {
             renderRootRelatedContent={renderRootRelatedContent}
             projectTreeTabRequest={projectTreeTabRequest}
             agentConfigSwitchRequest={agentConfigSwitchRequest}
+            agentConfigSwitchProgress={agentConfigSwitchProgress}
+            onAgentConfigSwitchProgressChange={setAgentConfigSwitchProgress}
             onProjectTreeTabChange={setProjectTreeTab}
             relayActionLabel={relayActionLabel}
             relayActionDisabled={relayActionDisabled}

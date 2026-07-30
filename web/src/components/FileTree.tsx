@@ -22,7 +22,7 @@ import { AgentMenuList } from "./AgentMenuList";
 import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
-import { fetchAgentCatalog, fetchAgents, type AgentStatus } from "../services/agents";
+import { fetchAgentCatalog, fetchAgents, restartAgent, type AgentStatus } from "../services/agents";
 import {
   createAgentAPIProvider,
   createAgentConfigBackup,
@@ -39,9 +39,12 @@ import {
   switchAgentAPIProvider,
   switchAgentConfig,
   updateAgentConfigBackup,
+  agentConfigSwitchStepsFromError,
   type AgentAPIProvider,
   type AgentConfigBackup,
   type AgentConfigFileContent,
+  type AgentConfigSwitchProgress,
+  type AgentConfigSwitchStep,
 } from "../services/agentConfig";
 import {
   getWebPushStatus,
@@ -140,6 +143,10 @@ type FileTreeProps = {
   renderRootRelatedContent?: (rootId: string) => React.ReactNode;
   projectTreeTabRequest?: { tab: ProjectTreeTab; nonce: number } | null;
   agentConfigSwitchRequest?: AgentConfigSwitchRequest | null;
+  agentConfigSwitchProgress?: AgentConfigSwitchProgress | null;
+  onAgentConfigSwitchProgressChange?: (
+    update: AgentConfigSwitchProgress | null | ((prev: AgentConfigSwitchProgress | null) => AgentConfigSwitchProgress | null),
+  ) => void;
   onProjectTreeTabChange?: (tab: ProjectTreeTab) => void;
   creatingRootName?: string | null;
   creatingRootBusy?: boolean;
@@ -179,7 +186,7 @@ type FileTreeProps = {
 };
 
 type AgentConfigFlow = "backup" | "switch";
-type AgentConfigStep = "agent" | "details" | "confirm" | "edit" | "file";
+type AgentConfigStep = "agent" | "details" | "confirm" | "edit" | "file" | "switching";
 type AgentConfigAddTab = "backup" | "api";
 type AgentConfigSwitchTab = "backup" | "api_provider";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
@@ -868,6 +875,169 @@ function AgentConfigFileEditorDialog({
   );
 }
 
+// Renders the outcome of the six synchronous switch stages plus the live probe.
+// The stages themselves finish in milliseconds, so they arrive already done --
+// only the probe is a real wait.
+function AgentConfigSwitchProgressPanel({
+  progress,
+  busy,
+  onRetryProbe,
+  onBackground,
+  onClose,
+}: {
+  progress: AgentConfigSwitchProgress;
+  busy: boolean;
+  onRetryProbe: () => void;
+  onBackground: () => void;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const [now, setNow] = React.useState(() => Date.now());
+
+  const running = progress.probe === "running";
+  React.useEffect(() => {
+    if (!running) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  const elapsedSeconds = Math.max(
+    0,
+    Math.round(((running ? now : progress.finishedAt || now) - progress.startedAt) / 1000),
+  );
+
+  const stepLabel = (step: AgentConfigSwitchStep): string => {
+    switch (step.key) {
+      case "restore_files":
+        return t("agentConfig.stepRestoreFiles");
+      case "claude_settings":
+        return t("agentConfig.stepClaudeSettings");
+      case "apply_env":
+        return t("agentConfig.stepApplyEnv");
+      case "kill_sessions":
+        return t("agentConfig.stepKillSessions");
+      case "record_selection":
+        return t("agentConfig.stepRecordSelection");
+      case "probe":
+        return t("agentConfig.stepProbe");
+      default:
+        return step.key;
+    }
+  };
+
+  const stepDetail = (step: AgentConfigSwitchStep): string => {
+    if (step.status === "skipped") {
+      return t("agentConfig.stepSkipped");
+    }
+    if (step.key === "restore_files" && step.count) {
+      return t("agentConfig.stepRestoreFilesDetail", { count: String(step.count) });
+    }
+    if (step.key === "apply_env" && step.count) {
+      return t("agentConfig.stepApplyEnvDetail", { count: String(step.count) });
+    }
+    if (step.key === "probe") {
+      return running ? `${elapsedSeconds}s` : "";
+    }
+    return step.target ? String(step.target).split(/[\\/]/).pop() || "" : "";
+  };
+
+  const probeStep = progress.steps.find((step) => step.key === "probe");
+  const stepMark = (step: AgentConfigSwitchStep): { icon: string; color: string } => {
+    // The probe row tracks live state rather than the status baked in at HTTP time.
+    const status = step.key === "probe" && probeStep ? progress.probe : step.status;
+    switch (status) {
+      case "ok":
+        return { icon: "✓", color: "var(--accent-color)" };
+      case "failed":
+        return { icon: "✗", color: "#dc2626" };
+      case "running":
+        return { icon: "●", color: "var(--accent-color)" };
+      case "unknown":
+        return { icon: "?", color: "#d97706" };
+      default:
+        return { icon: "○", color: "var(--text-secondary)" };
+    }
+  };
+
+  return (
+    <>
+      <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }}>
+        {t("agentConfig.switchingTitle", { name: progress.backupName })}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+        {progress.steps.map((step, index) => {
+          const mark = stepMark(step);
+          const detail = stepDetail(step);
+          const isProbe = step.key === "probe";
+          const failure = isProbe ? progress.probeError : step.error || "";
+          return (
+            <div key={`${step.key}-${index}`} style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
+                <span style={{ color: mark.color, width: "12px", flexShrink: 0 }}>{mark.icon}</span>
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    color: step.status === "skipped" ? "var(--text-secondary)" : "var(--text-primary)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {stepLabel(step)}
+                </span>
+                {detail ? (
+                  <span style={{ fontSize: "11px", color: "var(--text-secondary)", flexShrink: 0 }}>{detail}</span>
+                ) : null}
+              </div>
+              {failure ? (
+                <div style={{ marginLeft: "20px", fontSize: "11px", color: "#dc2626", wordBreak: "break-word" }}>
+                  {failure}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {progress.switchError ? (
+        <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>
+          {t("agentConfig.switchHalfApplied")}
+        </div>
+      ) : progress.probe === "failed" ? (
+        <div style={{ ...agentConfigHintStyle, color: "#d97706" }}>{t("agentConfig.probeFailedHelp")}</div>
+      ) : progress.probe === "unknown" ? (
+        <div style={{ ...agentConfigHintStyle, color: "#d97706" }}>{t("agentConfig.probeUnknownHelp")}</div>
+      ) : null}
+      <div style={agentConfigActionRowStyle}>
+        {running ? (
+          <button type="button" disabled={busy} onClick={onBackground} style={agentConfigSecondaryButtonStyle(busy)}>
+            {t("agentConfig.runInBackground")}
+          </button>
+        ) : (
+          <button type="button" disabled={busy} onClick={onClose} style={agentConfigSecondaryButtonStyle(busy)}>
+            {t("common.close")}
+          </button>
+        )}
+        {progress.probe === "failed" || progress.probe === "unknown" ? (
+          <button type="button" disabled={busy} onClick={onRetryProbe} style={agentConfigPrimaryButtonStyle(busy)}>
+            {t("agentConfig.retryProbe")}
+          </button>
+        ) : running ? (
+          <button type="button" disabled style={agentConfigPrimaryButtonStyle(true)}>
+            {t("agentConfig.probeRunning")}
+          </button>
+        ) : (
+          <button type="button" disabled={busy} onClick={onClose} style={agentConfigPrimaryButtonStyle(busy)}>
+            {t("agentConfig.probeOk")}
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 function AgentConfigPopover({
   flow,
   step,
@@ -893,6 +1063,7 @@ function AgentConfigPopover({
   editedSourcePaths,
   editingBackup,
   fileEditor,
+  switchProgress,
   onChooseAgent,
   onAddTabChange,
   onSwitchTabChange,
@@ -920,6 +1091,9 @@ function AgentConfigPopover({
   onFileEditorChange,
   onFileEditorSave,
   onFileEditorCancel,
+  onRetryProbe,
+  onBackgroundSwitch,
+  onCloseSwitchProgress,
 }: {
   flow: AgentConfigFlow;
   step: AgentConfigStep;
@@ -945,6 +1119,7 @@ function AgentConfigPopover({
   editedSourcePaths: string[];
   editingBackup: AgentConfigBackup | null;
   fileEditor: AgentConfigFileEditor | null;
+  switchProgress: AgentConfigSwitchProgress | null;
   onChooseAgent: (name: string) => void;
   onAddTabChange: (tab: AgentConfigAddTab) => void;
   onSwitchTabChange: (tab: AgentConfigSwitchTab) => void;
@@ -972,6 +1147,9 @@ function AgentConfigPopover({
   onFileEditorChange: (content: string) => void;
   onFileEditorSave: () => void;
   onFileEditorCancel: () => void;
+  onRetryProbe: () => void;
+  onBackgroundSwitch: () => void;
+  onCloseSwitchProgress: () => void;
 }) {
   const { t } = useI18n();
   const agentTitle = flow === "backup"
@@ -1017,6 +1195,29 @@ function AgentConfigPopover({
               selectedAgent={selectedAgent}
               maxHeight="220px"
               renderEnd={(agent) => {
+                // A switch that was backgrounded still shows here, so the user
+                // can find their way back to it.
+                const switching =
+                  switchProgress && switchProgress.agent === agent.name && switchProgress.probe === "running";
+                if (switching) {
+                  return (
+                    <span
+                      title={t("agentConfig.switchingBadge", { name: switchProgress.backupName })}
+                      style={{
+                        maxWidth: "140px",
+                        minWidth: 0,
+                        flexShrink: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: "11px",
+                        color: "var(--accent-color)",
+                      }}
+                    >
+                      ● {t("agentConfig.switchingBadge", { name: switchProgress.backupName })}
+                    </span>
+                  );
+                }
                 const name = String(agent.last_config_selection?.name || "").trim();
                 if (!name) {
                   return null;
@@ -1057,6 +1258,18 @@ function AgentConfigPopover({
             </button>
           </div>
         </>
+      ) : step === "switching" ? (
+        switchProgress ? (
+          <AgentConfigSwitchProgressPanel
+            progress={switchProgress}
+            busy={busy}
+            onRetryProbe={onRetryProbe}
+            onBackground={onBackgroundSwitch}
+            onClose={onCloseSwitchProgress}
+          />
+        ) : (
+          <div style={agentConfigHintStyle}>{t("agentConfig.loading")}</div>
+        )
       ) : step === "file" ? (
         <div style={agentConfigHintStyle}>{t("agentConfig.fileEditorOpen")}</div>
       ) : step === "edit" ? (
@@ -1712,6 +1925,8 @@ export function FileTree({
   renderRootRelatedContent,
   projectTreeTabRequest = null,
   agentConfigSwitchRequest = null,
+  agentConfigSwitchProgress = null,
+  onAgentConfigSwitchProgressChange,
   onProjectTreeTabChange,
   creatingRootName = null,
   creatingRootBusy = false,
@@ -2746,6 +2961,7 @@ export function FileTree({
     }
     setAgentConfigBusy(true);
     setAgentConfigError("");
+    const selectedBackup = agentConfigBackups.find((item) => item.id === agentConfigSwitchSelection.id);
     try {
       if (agentConfigSwitchSelection.type === "api_provider") {
         await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: agentConfigSwitchSelection.id });
@@ -2758,13 +2974,78 @@ export function FileTree({
         setAgentConfigStep("confirm");
         return;
       }
-      closeAgentConfigFlow();
+      // The six stages are already done; only the probe is still running, and it
+      // completes over WS as agent.config.switched.
+      onAgentConfigSwitchProgressChange?.({
+        agent: agentConfigAgent,
+        backupID: agentConfigSwitchSelection.id,
+        backupName: selectedBackup?.name || agentConfigSwitchSelection.id,
+        steps: result.steps || [],
+        probe: "running",
+        probeError: "",
+        switchError: "",
+        startedAt: Date.now(),
+        finishedAt: 0,
+      });
+      setAgentConfigStep("switching");
     } catch (error) {
-      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.switchFailed"));
+      const steps = agentConfigSwitchStepsFromError(error);
+      const message = error instanceof Error ? error.message : t("agentConfig.switchFailed");
+      if (steps.length > 0) {
+        // Some stages already ran, so show where it stopped rather than a bare
+        // error line.
+        onAgentConfigSwitchProgressChange?.({
+          agent: agentConfigAgent,
+          backupID: agentConfigSwitchSelection.id,
+          backupName: selectedBackup?.name || agentConfigSwitchSelection.id,
+          steps,
+          probe: "failed",
+          probeError: "",
+          switchError: message,
+          startedAt: Date.now(),
+          finishedAt: Date.now(),
+        });
+        setAgentConfigStep("switching");
+        return;
+      }
+      setAgentConfigError(message);
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, t]);
+  }, [
+    agentConfigAgent,
+    agentConfigBackups,
+    agentConfigSwitchSelection,
+    closeAgentConfigFlow,
+    onAgentConfigSwitchProgressChange,
+    t,
+  ]);
+
+  const retryAgentConfigProbe = React.useCallback(async () => {
+    const progress = agentConfigSwitchProgress;
+    if (!progress) {
+      return;
+    }
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      await restartAgent(progress.agent);
+      onAgentConfigSwitchProgressChange?.((prev) =>
+        prev
+          ? { ...prev, probe: "running", probeError: "", switchError: "", startedAt: Date.now(), finishedAt: 0 }
+          : prev,
+      );
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.retryProbeFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentConfigSwitchProgress, onAgentConfigSwitchProgressChange, t]);
+
+  const closeAgentConfigSwitchProgress = React.useCallback(() => {
+    onAgentConfigSwitchProgressChange?.(null);
+    closeAgentConfigFlow();
+  }, [closeAgentConfigFlow, onAgentConfigSwitchProgressChange]);
 
   const deleteSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
@@ -3671,6 +3952,7 @@ export function FileTree({
               editedSourcePaths={Object.keys(agentConfigDraftFiles)}
               editingBackup={agentConfigEditingBackup}
               fileEditor={agentConfigFileEditor}
+              switchProgress={agentConfigSwitchProgress}
               onChooseAgent={(name) => {
                 void chooseAgentForConfig(name);
               }}
@@ -3730,6 +4012,11 @@ export function FileTree({
                 void saveAgentConfigFileEditor();
               }}
               onFileEditorCancel={closeAgentConfigFileEditor}
+              onRetryProbe={() => {
+                void retryAgentConfigProbe();
+              }}
+              onBackgroundSwitch={closeAgentConfigFlow}
+              onCloseSwitchProgress={closeAgentConfigSwitchProgress}
             />
           </div>
         ) : null}

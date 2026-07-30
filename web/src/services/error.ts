@@ -26,6 +26,7 @@ export type ErrorCode =
   | "agent.timeout"
   | "agent.crashed"
   | "agent.permission_denied"
+  | "agent.config_switched"
   // View errors
   | "view.invalid"
   | "view.render_failed"
@@ -212,6 +213,11 @@ class ErrorService {
       "agent.timeout": {
         messageKey: "error.agent.timeout",
         severity: "warning",
+        recoverable: true,
+      },
+      "agent.config_switched": {
+        messageKey: "agentConfig.switchedElsewhereFallback",
+        severity: "info",
         recoverable: true,
       },
       "agent.crashed": {
