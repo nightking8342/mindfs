@@ -32,7 +32,7 @@ assert.match(
 
 assert.match(
   enUS,
-  /"fileTree\.switchAgentConfig": "Switch and restart Agent config"/,
+  /"fileTree\.switchAgentConfig": "Agent config switch & restart"/,
   "English config switch menu label should mention restart",
 );
 
