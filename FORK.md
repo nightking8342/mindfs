@@ -20,6 +20,7 @@
 | `web/src/App.tsx` 的 `TOKEN_STATION_ENABLED` 开关 | 置 `false` 隐藏官方 Token 加油站入口并停掉其后台轮询；恢复或指向自建中转站时置 `true` | 我方（开关及三处引用；面板 JSX 本体随上游） |
 | 配置备份编辑 + Claude 单独 settings（`docs/agent-config-backup-edit-spec.md`） | 备份清单可更新；快照文件读写；Claude `isolatedClaudeSettings` 切换写独立路径并用 `WithSettingsPath`，不覆盖用户 `~/.claude/settings.json` | 我方（`server/internal/api/agent_config.go` + `http.go` 路由、`preferences/store.go`、`agent/claude/session.go` + `pool.go` + `types/types.go`、`api/usecase/session.go`、`web/src/services/agentConfig.ts`、`web/src/components/FileTree.tsx` 的 `AgentConfigPopover`、两份 i18n locale） |
 | 配置切换进度展示（`docs/agent-config-switch-progress-spec.md`） | `switchAgentConfig` 返回步骤清单（失败时也带）；探活结束无条件广播 `agent.config.switched`，因为 `agent.status.changed` 会被 `Prober.statusChanged` 过滤掉 | 我方（`agent_config.go`、`appcontext.go`、`helpers.go` 的 `respondErrorWithExtra`、`agent_api_provider.go` 调用处、`App.tsx`、`FileTree.tsx`、`services/agentConfig.ts`、`services/error.ts` 的 `agent.config_switched`） |
+| Agent 配置弹层点击外部关闭 | 上游只在「选择 Agent」一步监听外部点击；fork 扩展到全部步骤（全屏文件编辑器 `file` 步骤除外，避免丢草稿） | 我方（`web/src/components/FileTree.tsx` 的 click-outside effect） |
 | `release-notes.md` | 跟随上游发版记录，fork 不自行发版 | 上游 |
 | `go.mod` / `go.sum` 的 `replace` 指令 | 指向 `github.com/yandc/*`，由上游维护 | 上游 |
 

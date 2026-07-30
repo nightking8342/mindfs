@@ -2585,7 +2585,9 @@ export function FileTree({
   }, []);
 
   React.useEffect(() => {
-    if (!agentConfigFlow || agentConfigStep !== "agent") {
+    // The full-screen file editor covers the viewport, so there is no visible
+    // "outside" while it is open; closing here would also drop its draft.
+    if (!agentConfigFlow || agentConfigStep === "file") {
       return;
     }
     const handlePointerDown = (event: MouseEvent) => {
