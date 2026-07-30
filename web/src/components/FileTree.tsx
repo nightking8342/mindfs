@@ -29,12 +29,19 @@ import {
   deleteAgentAPIProvider,
   deleteAgentConfigBackup,
   fetchAgentAPIProviders,
+  fetchAgentConfigBackupEnv,
+  fetchAgentConfigBackupFile,
   fetchAgentConfigBackups,
   fetchAgentConfigDefaults,
+  isClaudeAgentName,
+  previewAgentConfigSourceFile,
+  saveAgentConfigBackupFile,
   switchAgentAPIProvider,
   switchAgentConfig,
+  updateAgentConfigBackup,
   type AgentAPIProvider,
   type AgentConfigBackup,
+  type AgentConfigFileContent,
 } from "../services/agentConfig";
 import {
   getWebPushStatus,
@@ -172,10 +179,30 @@ type FileTreeProps = {
 };
 
 type AgentConfigFlow = "backup" | "switch";
-type AgentConfigStep = "agent" | "details" | "confirm";
+type AgentConfigStep = "agent" | "details" | "confirm" | "edit" | "file";
 type AgentConfigAddTab = "backup" | "api";
 type AgentConfigSwitchTab = "backup" | "api_provider";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
+
+// Where the file editor writes on save. Creating a backup edits an in-memory
+// draft (the source file on disk is never touched); editing an existing backup
+// writes straight to the snapshot under agents-config/<id>/.
+type AgentConfigFileTarget =
+  | { kind: "draft-source"; sourcePath: string }
+  | { kind: "draft-claude-settings" }
+  | { kind: "snapshot"; backupID: string; backupPath: string }
+  | { kind: "snapshot-claude-settings"; backupID: string };
+
+type AgentConfigFileEditor = {
+  target: AgentConfigFileTarget;
+  label: string;
+  hint: string;
+  content: string;
+};
+
+function agentConfigParseLines(body: string): string[] {
+  return body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
 
 function isAgentConfigBackupConflict(error: unknown): boolean {
   const maybeError = error as { status?: unknown; message?: unknown; payload?: { error?: unknown; message?: unknown } } | null;
@@ -472,6 +499,131 @@ function TrashIcon() {
   );
 }
 
+function PencilIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  );
+}
+
+// One row per config source with an edit affordance. Editing a source while
+// creating a backup only fills the in-memory draft; the file on disk is left
+// alone (spec §6.1). Editing an existing backup writes the snapshot instead.
+function AgentConfigSourceList({
+  paths,
+  editedPaths,
+  busy,
+  onEdit,
+}: {
+  paths: string[];
+  editedPaths: string[];
+  busy: boolean;
+  onEdit: (path: string) => void;
+}) {
+  const { t } = useI18n();
+  if (paths.length === 0) {
+    return null;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+      {paths.map((path) => {
+        const edited = editedPaths.includes(path);
+        return (
+          <div key={path} style={agentConfigRowStyle}>
+            <span
+              title={path}
+              style={{
+                ...agentConfigPathTextStyle,
+                color: edited ? "var(--accent-color)" : "var(--text-secondary)",
+              }}
+            >
+              {/* bidi isolate keeps rtl-ellipsised paths readable */}
+              &#8296;{path}&#8297;
+            </span>
+            {edited ? (
+              <span style={{ fontSize: "10px", color: "var(--accent-color)", flexShrink: 0 }}>
+                {t("agentConfig.edited")}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              title={t("agentConfig.editFile")}
+              aria-label={t("agentConfig.editFile")}
+              disabled={busy}
+              onClick={() => onEdit(path)}
+              style={agentConfigNeutralIconButtonStyle(busy)}
+            >
+              <PencilIcon />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Claude-only: isolated settings.json toggle plus its path (spec §6.1 step 4).
+function AgentConfigClaudeSettingsField({
+  isolated,
+  settingsPath,
+  busy,
+  onIsolatedChange,
+  onSettingsPathChange,
+  onEditSettings,
+}: {
+  isolated: boolean;
+  settingsPath: string;
+  busy: boolean;
+  onIsolatedChange: (value: boolean) => void;
+  onSettingsPathChange: (value: string) => void;
+  onEditSettings: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div style={agentConfigFieldStyle}>
+      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: busy ? "default" : "pointer" }}>
+        <input
+          type="checkbox"
+          checked={isolated}
+          disabled={busy}
+          onChange={(event) => onIsolatedChange(event.target.checked)}
+          style={{ margin: 0, flexShrink: 0 }}
+        />
+        <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>
+          {t("agentConfig.isolatedClaudeSettings")}
+        </span>
+      </label>
+      <div style={agentConfigHintStyle}>{t("agentConfig.isolatedClaudeSettingsHelp")}</div>
+      {isolated ? (
+        <>
+          <label style={agentConfigLabelStyle}>{t("agentConfig.claudeSettingsPath")}</label>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <input
+              value={settingsPath}
+              disabled={busy}
+              onChange={(event) => onSettingsPathChange(event.target.value)}
+              placeholder={t("agentConfig.claudeSettingsPathPlaceholder")}
+              style={agentConfigInputStyle}
+            />
+            <button
+              type="button"
+              title={t("agentConfig.editClaudeSettings")}
+              aria-label={t("agentConfig.editClaudeSettings")}
+              disabled={busy}
+              onClick={onEditSettings}
+              style={agentConfigNeutralIconButtonStyle(busy)}
+            >
+              <PencilIcon />
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function AgentConfigLineEditor({
   value,
   onChange,
@@ -563,6 +715,159 @@ function AgentConfigLineEditor({
   );
 }
 
+// Config files run to several thousand bytes, which the sidebar popover cannot
+// show usefully, so editing happens in a full-screen overlay instead.
+function AgentConfigFileEditorDialog({
+  editor,
+  busy,
+  error,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  editor: AgentConfigFileEditor;
+  busy: boolean;
+  error: string;
+  onChange: (content: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const textAreaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  // Snapshot of what was loaded, so discarding can warn only when it matters.
+  const initialContentRef = React.useRef(editor.content);
+  const isDirty = editor.content !== initialContentRef.current;
+
+  const requestCancel = React.useCallback(() => {
+    if (isDirty && !window.confirm(t("agentConfig.discardFileChanges"))) {
+      return;
+    }
+    onCancel();
+  }, [isDirty, onCancel, t]);
+
+  React.useEffect(() => {
+    textAreaRef.current?.focus();
+  }, []);
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        requestCancel();
+        return;
+      }
+      // Ctrl/Cmd+S saves without reaching for the mouse.
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        if (!busy) {
+          onSave();
+        }
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [busy, requestCancel, onSave]);
+
+  const lineCount = editor.content ? editor.content.split("\n").length : 0;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 95,
+        background: "rgba(15, 23, 42, 0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "clamp(8px, 3vw, 28px)",
+        boxSizing: "border-box",
+      }}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <div
+        style={{
+          width: "min(1000px, 100%)",
+          height: "min(860px, 100%)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "10px",
+          padding: "14px",
+          borderRadius: "14px",
+          border: "1px solid var(--border-color)",
+          background: "var(--menu-bg)",
+          boxShadow: "0 24px 60px rgba(15, 23, 42, 0.28)",
+          boxSizing: "border-box",
+          minHeight: 0,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
+          <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", flex: 1, minWidth: 0 }}>
+            {t("agentConfig.fileEditorTitle")}
+          </div>
+          <span style={{ fontSize: "11px", color: "var(--text-secondary)", flexShrink: 0 }}>
+            {isDirty ? `${t("agentConfig.edited")} · ` : ""}
+            {t("agentConfig.fileEditorMeta", { lines: String(lineCount), bytes: String(editor.content.length) })}
+          </span>
+        </div>
+        <div style={agentConfigHintStyle}>
+          <div style={{ wordBreak: "break-all", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+            {editor.label}
+          </div>
+          {editor.hint ? (
+            <div style={{ marginTop: "4px", color: "var(--accent-color)" }}>{editor.hint}</div>
+          ) : null}
+        </div>
+        <textarea
+          ref={textAreaRef}
+          value={editor.content}
+          disabled={busy}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            // Tab indents instead of moving focus out of the editor.
+            if (event.key !== "Tab") {
+              return;
+            }
+            event.preventDefault();
+            const target = event.currentTarget;
+            const { selectionStart, selectionEnd, value } = target;
+            const next = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+            onChange(next);
+            window.setTimeout(() => {
+              target.selectionStart = selectionStart + 2;
+              target.selectionEnd = selectionStart + 2;
+            }, 0);
+          }}
+          style={{
+            ...agentConfigInputStyle,
+            flex: 1,
+            minHeight: 0,
+            resize: "none",
+            lineHeight: 1.55,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            whiteSpace: "pre",
+            overflow: "auto",
+            padding: "10px 12px",
+          }}
+        />
+        {error ? <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>{error}</div> : null}
+        <div style={agentConfigActionRowStyle}>
+          <button type="button" disabled={busy} onClick={requestCancel} style={agentConfigSecondaryButtonStyle(busy)}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" disabled={busy} onClick={onSave} style={agentConfigPrimaryButtonStyle(busy)}>
+            {t("agentConfig.saveFile")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentConfigPopover({
   flow,
   step,
@@ -583,6 +888,11 @@ function AgentConfigPopover({
   confirmMessage,
   busy,
   error,
+  isolatedClaudeSettings,
+  claudeSettingsPath,
+  editedSourcePaths,
+  editingBackup,
+  fileEditor,
   onChooseAgent,
   onAddTabChange,
   onSwitchTabChange,
@@ -600,6 +910,16 @@ function AgentConfigPopover({
   onSwitch,
   onConfirm,
   onCancel,
+  onIsolatedClaudeSettingsChange,
+  onClaudeSettingsPathChange,
+  onEditSourceFile,
+  onEditClaudeSettings,
+  onEditBackup,
+  onUpdateBackup,
+  onLeaveEdit,
+  onFileEditorChange,
+  onFileEditorSave,
+  onFileEditorCancel,
 }: {
   flow: AgentConfigFlow;
   step: AgentConfigStep;
@@ -620,6 +940,11 @@ function AgentConfigPopover({
   confirmMessage: string;
   busy: boolean;
   error: string;
+  isolatedClaudeSettings: boolean;
+  claudeSettingsPath: string;
+  editedSourcePaths: string[];
+  editingBackup: AgentConfigBackup | null;
+  fileEditor: AgentConfigFileEditor | null;
   onChooseAgent: (name: string) => void;
   onAddTabChange: (tab: AgentConfigAddTab) => void;
   onSwitchTabChange: (tab: AgentConfigSwitchTab) => void;
@@ -637,6 +962,16 @@ function AgentConfigPopover({
   onSwitch: () => void;
   onConfirm: () => void;
   onCancel: () => void;
+  onIsolatedClaudeSettingsChange: (value: boolean) => void;
+  onClaudeSettingsPathChange: (value: string) => void;
+  onEditSourceFile: (path: string) => void;
+  onEditClaudeSettings: () => void;
+  onEditBackup: (backup: AgentConfigBackup) => void;
+  onUpdateBackup: () => void;
+  onLeaveEdit: () => void;
+  onFileEditorChange: (content: string) => void;
+  onFileEditorSave: () => void;
+  onFileEditorCancel: () => void;
 }) {
   const { t } = useI18n();
   const agentTitle = flow === "backup"
@@ -649,6 +984,8 @@ function AgentConfigPopover({
   const switchTabs: AgentConfigSwitchTab[] = supportsAPIProvider ? ["backup", "api_provider"] : ["backup"];
   const effectiveAddTab: AgentConfigAddTab = supportsAPIProvider ? addTab : "backup";
   const effectiveSwitchTab: AgentConfigSwitchTab = supportsAPIProvider ? switchTab : "backup";
+  const isClaude = isClaudeAgentName(selectedAgent);
+  const draftSourcePaths = React.useMemo(() => agentConfigParseLines(fileSourcesBody), [fileSourcesBody]);
   return (
     <div
       style={{
@@ -720,6 +1057,72 @@ function AgentConfigPopover({
             </button>
           </div>
         </>
+      ) : step === "file" ? (
+        <div style={agentConfigHintStyle}>{t("agentConfig.fileEditorOpen")}</div>
+      ) : step === "edit" ? (
+        <>
+          <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }}>
+            {t("agentConfig.editExistingBackup")}
+          </div>
+          <div style={agentConfigFieldStyle}>
+            <label style={agentConfigLabelStyle}>{t("agentConfig.backupName")}</label>
+            <input value={editingBackup?.name || ""} readOnly disabled style={{ ...agentConfigInputStyle, opacity: 0.7 }} />
+          </div>
+          <div style={agentConfigFieldStyle}>
+            <label style={agentConfigLabelStyle}>{t("agentConfig.fileSources")}</label>
+            <AgentConfigLineEditor
+              value={fileSourcesBody}
+              onChange={onFileSourcesChange}
+              placeholder={t("agentConfig.fileSourcePlaceholder")}
+            />
+            {/* Snapshot rows come from the manifest so editing hits the backup copy. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {(editingBackup?.sources || []).map((source) => (
+                <div key={source.backupPath} style={agentConfigRowStyle}>
+                  <span title={source.sourcePath} style={agentConfigPathTextStyle}>
+                    &#8296;{source.sourcePath}&#8297;
+                  </span>
+                  <button
+                    type="button"
+                    title={t("agentConfig.editSnapshotFile")}
+                    aria-label={t("agentConfig.editSnapshotFile")}
+                    disabled={busy}
+                    onClick={() => onEditSourceFile(source.backupPath)}
+                    style={agentConfigNeutralIconButtonStyle(busy)}
+                  >
+                    <PencilIcon />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={agentConfigFieldStyle}>
+            <label style={agentConfigLabelStyle}>{t("agentConfig.env")}</label>
+            <AgentConfigLineEditor
+              value={envBody}
+              onChange={onEnvBodyChange}
+              placeholder={t("agentConfig.envPlaceholder")}
+            />
+          </div>
+          {isClaudeAgentName(editingBackup?.agent || "") ? (
+            <AgentConfigClaudeSettingsField
+              isolated={isolatedClaudeSettings}
+              settingsPath={claudeSettingsPath}
+              busy={busy}
+              onIsolatedChange={onIsolatedClaudeSettingsChange}
+              onSettingsPathChange={onClaudeSettingsPathChange}
+              onEditSettings={onEditClaudeSettings}
+            />
+          ) : null}
+          <div style={agentConfigActionRowStyle}>
+            <button type="button" disabled={busy} onClick={onLeaveEdit} style={agentConfigSecondaryButtonStyle(busy)}>
+              {t("agentConfig.backToList")}
+            </button>
+            <button type="button" disabled={busy} onClick={onUpdateBackup} style={agentConfigPrimaryButtonStyle(busy)}>
+              {t("common.save")}
+            </button>
+          </div>
+        </>
       ) : flow === "backup" ? (
         <>
           {addTabs.length > 1 ? (
@@ -767,6 +1170,12 @@ function AgentConfigPopover({
                   onChange={onFileSourcesChange}
                   placeholder={t("agentConfig.fileSourcePlaceholder")}
                 />
+                <AgentConfigSourceList
+                  paths={draftSourcePaths}
+                  editedPaths={editedSourcePaths}
+                  busy={busy}
+                  onEdit={onEditSourceFile}
+                />
               </div>
               <div style={agentConfigFieldStyle}>
                 <label style={agentConfigLabelStyle}>{t("agentConfig.env")}</label>
@@ -776,6 +1185,16 @@ function AgentConfigPopover({
                   placeholder={t("agentConfig.envPlaceholder")}
                 />
               </div>
+              {isClaude ? (
+                <AgentConfigClaudeSettingsField
+                  isolated={isolatedClaudeSettings}
+                  settingsPath={claudeSettingsPath}
+                  busy={busy}
+                  onIsolatedChange={onIsolatedClaudeSettingsChange}
+                  onSettingsPathChange={onClaudeSettingsPathChange}
+                  onEditSettings={onEditClaudeSettings}
+                />
+              ) : null}
             </>
           ) : (
             <>
@@ -873,6 +1292,19 @@ function AgentConfigPopover({
                       <div style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
                       <button
                         type="button"
+                        aria-label={t("agentConfig.editExistingBackup")}
+                        title={t("agentConfig.editBackup")}
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onEditBackup(item);
+                        }}
+                        style={agentConfigNeutralIconButtonStyle(busy)}
+                      >
+                        <PencilIcon />
+                      </button>
+                      <button
+                        type="button"
                         aria-label={t("agentConfig.deleteConfig", { name: item.name })}
                         title={t("common.delete")}
                         disabled={busy}
@@ -947,7 +1379,18 @@ function AgentConfigPopover({
           </div>
         </>
       )}
-      {error ? <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>{error}</div> : null}
+      {/* The inline error is redundant while the editor overlay owns the screen. */}
+      {error && step !== "file" ? <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>{error}</div> : null}
+      {step === "file" && fileEditor ? (
+        <AgentConfigFileEditorDialog
+          editor={fileEditor}
+          busy={busy}
+          error={error}
+          onChange={onFileEditorChange}
+          onSave={onFileEditorSave}
+          onCancel={onFileEditorCancel}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1221,6 +1664,32 @@ const agentConfigIconButtonStyle = (disabled: boolean): React.CSSProperties => (
   flexShrink: 0,
 });
 
+const agentConfigNeutralIconButtonStyle = (disabled: boolean): React.CSSProperties => ({
+  ...agentConfigIconButtonStyle(disabled),
+  color: "var(--text-secondary)",
+});
+
+const agentConfigPathTextStyle: React.CSSProperties = {
+  minWidth: 0,
+  flex: 1,
+  fontSize: "11px",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  direction: "rtl",
+  textAlign: "left",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+};
+
+const agentConfigRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "6px",
+  border: "1px solid var(--border-color)",
+  borderRadius: "8px",
+  padding: "4px 4px 4px 10px",
+};
+
 export function FileTree({
   entries,
   childrenByPath,
@@ -1332,6 +1801,16 @@ export function FileTree({
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
   const [agentConfigError, setAgentConfigError] = React.useState("");
+  // Spec §11: Claude backups default to an isolated settings.json.
+  const [agentConfigIsolatedClaude, setAgentConfigIsolatedClaude] = React.useState(true);
+  const [agentConfigClaudeSettingsPath, setAgentConfigClaudeSettingsPath] = React.useState("");
+  // Draft edits while creating a backup; keyed by source path, flushed as
+  // file_contents on save so the source file on disk is never rewritten.
+  const [agentConfigDraftFiles, setAgentConfigDraftFiles] = React.useState<Record<string, string>>({});
+  const [agentConfigDraftClaudeSettings, setAgentConfigDraftClaudeSettings] = React.useState<string | null>(null);
+  const [agentConfigEditingBackup, setAgentConfigEditingBackup] = React.useState<AgentConfigBackup | null>(null);
+  const [agentConfigFileEditor, setAgentConfigFileEditor] = React.useState<AgentConfigFileEditor | null>(null);
+  const [agentConfigFileReturnStep, setAgentConfigFileReturnStep] = React.useState<AgentConfigStep>("details");
   const [agentLifecycleOpen, setAgentLifecycleOpen] = React.useState(false);
   const [relayServicesOpen, setRelayServicesOpen] = React.useState(false);
   const [relayServicesEditing, setRelayServicesEditing] = React.useState(false);
@@ -1766,6 +2245,18 @@ export function FileTree({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [isMenuOpen]);
 
+  // Clears everything that belongs to the backup editor: draft file contents,
+  // the open file editor and the entry being edited.
+  const resetAgentConfigEditingState = React.useCallback(() => {
+    setAgentConfigIsolatedClaude(true);
+    setAgentConfigClaudeSettingsPath("");
+    setAgentConfigDraftFiles({});
+    setAgentConfigDraftClaudeSettings(null);
+    setAgentConfigEditingBackup(null);
+    setAgentConfigFileEditor(null);
+    setAgentConfigFileReturnStep("details");
+  }, []);
+
   const openAgentConfigFlow = React.useCallback((flow: AgentConfigFlow) => {
     setAgentLifecycleOpen(false);
     setAgentConfigFlow(flow);
@@ -1787,6 +2278,7 @@ export function FileTree({
     setAgentConfigPreferredProviderIDs([]);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
+    resetAgentConfigEditingState();
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -1797,7 +2289,7 @@ export function FileTree({
         setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.loadAgentFailed"));
       })
       .finally(() => setAgentConfigBusy(false));
-  }, [t]);
+  }, [resetAgentConfigEditingState, t]);
 
   React.useEffect(() => {
     if (!agentConfigSwitchRequest) {
@@ -1826,6 +2318,7 @@ export function FileTree({
     setAgentConfigPreferredProviderIDs(providerIDs);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
+    resetAgentConfigEditingState();
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -1836,7 +2329,7 @@ export function FileTree({
         setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.loadAgentFailed"));
       })
       .finally(() => setAgentConfigBusy(false));
-  }, [agentConfigSwitchRequest?.nonce, t]);
+  }, [agentConfigSwitchRequest?.nonce, resetAgentConfigEditingState, t]);
 
   const closeAgentConfigFlow = React.useCallback(() => {
     setAgentConfigFlow(null);
@@ -1845,7 +2338,8 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
     setAgentConfigSwitchSelection(null);
     setAgentConfigSwitchTab("backup");
-  }, []);
+    resetAgentConfigEditingState();
+  }, [resetAgentConfigEditingState]);
 
   const openAgentLifecycleFlow = React.useCallback(() => {
     setAgentConfigFlow(null);
@@ -1952,6 +2446,10 @@ export function FileTree({
         setAgentAPIProviderBaseURL("");
         setAgentAPIProviderAPIKey("");
         setAgentConfigAddTab("backup");
+        setAgentConfigIsolatedClaude(isClaudeAgentName(agentName));
+        setAgentConfigClaudeSettingsPath("");
+        setAgentConfigDraftFiles({});
+        setAgentConfigDraftClaudeSettings(null);
         setAgentConfigStep("details");
       } else {
         const [backups, providers] = await Promise.all([
@@ -1977,13 +2475,200 @@ export function FileTree({
     }
   }, [agentConfigAgents, agentConfigFlow, agentConfigPreferredProviderIDs, t]);
 
+  // Opens the file editor. While creating a backup the argument is a source
+  // path and the content is loaded from disk into a draft; while editing an
+  // existing backup it is a manifest backupPath and the snapshot is loaded.
+  const openAgentConfigFileEditor = React.useCallback(async (pathOrBackupPath: string) => {
+    const target = String(pathOrBackupPath || "").trim();
+    if (!target) {
+      return;
+    }
+    const editingBackupID = agentConfigEditingBackup?.id || "";
+    setAgentConfigError("");
+    setAgentConfigBusy(true);
+    try {
+      if (editingBackupID) {
+        const result = await fetchAgentConfigBackupFile({ id: editingBackupID, backupPath: target });
+        setAgentConfigFileEditor({
+          target: { kind: "snapshot", backupID: editingBackupID, backupPath: result.backup_path || target },
+          label: result.backup_path || target,
+          hint: t("agentConfig.fileEditorEditHint"),
+          content: result.content || "",
+        });
+        setAgentConfigFileReturnStep("edit");
+      } else {
+        const draft = agentConfigDraftFiles[target];
+        const content = draft !== undefined ? draft : (await previewAgentConfigSourceFile(target)).content;
+        setAgentConfigFileEditor({
+          target: { kind: "draft-source", sourcePath: target },
+          label: target,
+          hint: t("agentConfig.fileEditorCreateHint"),
+          content: content || "",
+        });
+        setAgentConfigFileReturnStep("details");
+      }
+      setAgentConfigStep("file");
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.loadFileFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentConfigDraftFiles, agentConfigEditingBackup, t]);
+
+  const openAgentConfigClaudeSettingsEditor = React.useCallback(async () => {
+    const editingBackupID = agentConfigEditingBackup?.id || "";
+    setAgentConfigError("");
+    setAgentConfigBusy(true);
+    try {
+      if (editingBackupID) {
+        const result = await fetchAgentConfigBackupFile({ id: editingBackupID, kind: "claude_settings" });
+        setAgentConfigFileEditor({
+          target: { kind: "snapshot-claude-settings", backupID: editingBackupID },
+          label: agentConfigClaudeSettingsPath || result.backup_path || "claude-settings.json",
+          hint: t("agentConfig.fileEditorEditHint"),
+          content: result.content || "",
+        });
+        setAgentConfigFileReturnStep("edit");
+      } else {
+        // Match what the server seeds when no content is submitted, so opening
+        // the editor and saving does not silently blank the settings.
+        let content = agentConfigDraftClaudeSettings;
+        if (content === null) {
+          content = await previewAgentConfigSourceFile("~/.claude/settings.json")
+            .then((result) => result.content)
+            .catch(() => "{}\n");
+        }
+        setAgentConfigFileEditor({
+          target: { kind: "draft-claude-settings" },
+          label: agentConfigClaudeSettingsPath || t("agentConfig.claudeSettingsPathPlaceholder"),
+          hint: t("agentConfig.fileEditorCreateHint"),
+          content,
+        });
+        setAgentConfigFileReturnStep("details");
+      }
+      setAgentConfigStep("file");
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.loadFileFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentConfigClaudeSettingsPath, agentConfigDraftClaudeSettings, agentConfigEditingBackup, t]);
+
+  const saveAgentConfigFileEditor = React.useCallback(async () => {
+    const editor = agentConfigFileEditor;
+    if (!editor) {
+      return;
+    }
+    const { target, content } = editor;
+    if (target.kind === "draft-source") {
+      setAgentConfigDraftFiles((previous) => ({ ...previous, [target.sourcePath]: content }));
+      setAgentConfigFileEditor(null);
+      setAgentConfigStep(agentConfigFileReturnStep);
+      return;
+    }
+    if (target.kind === "draft-claude-settings") {
+      setAgentConfigDraftClaudeSettings(content);
+      setAgentConfigFileEditor(null);
+      setAgentConfigStep(agentConfigFileReturnStep);
+      return;
+    }
+    setAgentConfigError("");
+    setAgentConfigBusy(true);
+    try {
+      await saveAgentConfigBackupFile(
+        target.kind === "snapshot"
+          ? { id: target.backupID, backupPath: target.backupPath, content }
+          : { id: target.backupID, kind: "claude_settings", content },
+      );
+      setAgentConfigFileEditor(null);
+      setAgentConfigStep(agentConfigFileReturnStep);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.saveFileFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentConfigFileEditor, agentConfigFileReturnStep, t]);
+
+  const closeAgentConfigFileEditor = React.useCallback(() => {
+    setAgentConfigFileEditor(null);
+    setAgentConfigError("");
+    setAgentConfigStep(agentConfigFileReturnStep);
+  }, [agentConfigFileReturnStep]);
+
+  // Loads an existing backup into the edit form. env values are fetched
+  // separately because the list endpoint only exposes key names.
+  const openAgentConfigBackupEditor = React.useCallback(async (backup: AgentConfigBackup) => {
+    setAgentConfigError("");
+    setAgentConfigBusy(true);
+    try {
+      const env = await fetchAgentConfigBackupEnv(backup.id);
+      setAgentConfigEditingBackup(backup);
+      setAgentConfigName(backup.name);
+      setAgentConfigFileSourcesBody((backup.sources || []).map((item) => item.sourcePath).join("\n"));
+      setAgentConfigEnvBody((env.env_lines || []).join("\n"));
+      setAgentConfigIsolatedClaude(Boolean(backup.isolatedClaudeSettings));
+      setAgentConfigClaudeSettingsPath(backup.claudeSettingsPath || "");
+      setAgentConfigDraftFiles({});
+      setAgentConfigDraftClaudeSettings(null);
+      setAgentConfigStep("edit");
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.loadConfigFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [t]);
+
+  const leaveAgentConfigBackupEditor = React.useCallback(() => {
+    setAgentConfigEditingBackup(null);
+    setAgentConfigFileEditor(null);
+    setAgentConfigError("");
+    setAgentConfigStep("details");
+  }, []);
+
+  const updateAgentConfigBackupEntry = React.useCallback(async () => {
+    const editing = agentConfigEditingBackup;
+    if (!editing) {
+      return;
+    }
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      const updated = await updateAgentConfigBackup({
+        id: editing.id,
+        fileSources: agentConfigParseLines(agentConfigFileSourcesBody),
+        envLines: agentConfigParseLines(agentConfigEnvBody),
+        isolatedClaudeSettings: isClaudeAgentName(editing.agent) ? agentConfigIsolatedClaude : undefined,
+        claudeSettingsPath: agentConfigClaudeSettingsPath.trim(),
+      });
+      setAgentConfigBackups((previous) => previous.map((item) => (item.id === updated.id ? updated : item)));
+      setAgentConfigEditingBackup(null);
+      setAgentConfigStep("details");
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.updateBackupFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [
+    agentConfigClaudeSettingsPath,
+    agentConfigEditingBackup,
+    agentConfigEnvBody,
+    agentConfigFileSourcesBody,
+    agentConfigIsolatedClaude,
+    t,
+  ]);
+
   const saveAgentConfigBackup = React.useCallback(async (overwrite = false) => {
     if (!agentConfigName.trim()) {
       setAgentConfigError(t("agentConfig.backupNameRequired"));
       return;
     }
-    const fileSources = agentConfigFileSourcesBody.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const envLines = agentConfigEnvBody.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const fileSources = agentConfigParseLines(agentConfigFileSourcesBody);
+    const envLines = agentConfigParseLines(agentConfigEnvBody);
+    const isClaude = isClaudeAgentName(agentConfigAgent);
+    // Only paths still listed as sources are worth sending as edited content.
+    const fileContents: AgentConfigFileContent[] = fileSources
+      .filter((path) => agentConfigDraftFiles[path] !== undefined)
+      .map((path) => ({ source_path: path, content: agentConfigDraftFiles[path] }));
     setAgentConfigBusy(true);
     setAgentConfigError("");
     try {
@@ -1993,6 +2678,13 @@ export function FileTree({
         fileSources,
         envLines,
         overwrite,
+        isolatedClaudeSettings: isClaude ? agentConfigIsolatedClaude : undefined,
+        claudeSettingsPath: isClaude && agentConfigIsolatedClaude ? agentConfigClaudeSettingsPath.trim() : "",
+        fileContents,
+        claudeSettingsContent:
+          isClaude && agentConfigIsolatedClaude && agentConfigDraftClaudeSettings !== null
+            ? agentConfigDraftClaudeSettings
+            : undefined,
       });
       closeAgentConfigFlow();
     } catch (error) {
@@ -2005,7 +2697,18 @@ export function FileTree({
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [agentConfigAgent, agentConfigEnvBody, agentConfigFileSourcesBody, agentConfigName, closeAgentConfigFlow, t]);
+  }, [
+    agentConfigAgent,
+    agentConfigClaudeSettingsPath,
+    agentConfigDraftClaudeSettings,
+    agentConfigDraftFiles,
+    agentConfigEnvBody,
+    agentConfigFileSourcesBody,
+    agentConfigIsolatedClaude,
+    agentConfigName,
+    closeAgentConfigFlow,
+    t,
+  ]);
 
   const saveAgentAPIProvider = React.useCallback(async () => {
     if (!agentAPIProviderName.trim()) {
@@ -2963,6 +3666,11 @@ export function FileTree({
               confirmMessage={agentConfigConfirmMessage}
               busy={agentConfigBusy}
               error={agentConfigError}
+              isolatedClaudeSettings={agentConfigIsolatedClaude}
+              claudeSettingsPath={agentConfigClaudeSettingsPath}
+              editedSourcePaths={Object.keys(agentConfigDraftFiles)}
+              editingBackup={agentConfigEditingBackup}
+              fileEditor={agentConfigFileEditor}
               onChooseAgent={(name) => {
                 void chooseAgentForConfig(name);
               }}
@@ -3000,6 +3708,28 @@ export function FileTree({
                 void runAgentConfigSwitch(true);
               }}
               onCancel={closeAgentConfigFlow}
+              onIsolatedClaudeSettingsChange={setAgentConfigIsolatedClaude}
+              onClaudeSettingsPathChange={setAgentConfigClaudeSettingsPath}
+              onEditSourceFile={(path) => {
+                void openAgentConfigFileEditor(path);
+              }}
+              onEditClaudeSettings={() => {
+                void openAgentConfigClaudeSettingsEditor();
+              }}
+              onEditBackup={(backup) => {
+                void openAgentConfigBackupEditor(backup);
+              }}
+              onUpdateBackup={() => {
+                void updateAgentConfigBackupEntry();
+              }}
+              onLeaveEdit={leaveAgentConfigBackupEditor}
+              onFileEditorChange={(content) => {
+                setAgentConfigFileEditor((previous) => (previous ? { ...previous, content } : previous));
+              }}
+              onFileEditorSave={() => {
+                void saveAgentConfigFileEditor();
+              }}
+              onFileEditorCancel={closeAgentConfigFileEditor}
             />
           </div>
         ) : null}

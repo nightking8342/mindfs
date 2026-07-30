@@ -14,6 +14,8 @@ export type AgentConfigBackup = {
   updatedAt: string;
   sources?: AgentConfigSource[];
   envKeys?: string[];
+  isolatedClaudeSettings?: boolean;
+  claudeSettingsPath?: string;
 };
 
 export type AgentAPIProvider = {
@@ -33,6 +35,11 @@ export type AgentConfigDefaults = {
   env_keys: string[];
 };
 
+export type AgentConfigFileContent = {
+  source_path: string;
+  content: string;
+};
+
 export async function fetchAgentConfigDefaults(agent: string): Promise<AgentConfigDefaults> {
   const params = new URLSearchParams({ agent });
   return protectedJSON<AgentConfigDefaults>(appPath(`/api/agent-config/defaults?${params.toString()}`));
@@ -49,6 +56,10 @@ export async function createAgentConfigBackup(input: {
   fileSources?: string[];
   envLines?: string[];
   overwrite?: boolean;
+  isolatedClaudeSettings?: boolean;
+  claudeSettingsPath?: string;
+  fileContents?: AgentConfigFileContent[];
+  claudeSettingsContent?: string;
 }): Promise<AgentConfigBackup> {
   return protectedJSON<AgentConfigBackup>(appPath("/api/agent-config/backups"), {
     method: "POST",
@@ -59,6 +70,30 @@ export async function createAgentConfigBackup(input: {
       file_sources: input.fileSources || [],
       env_lines: input.envLines || [],
       overwrite: !!input.overwrite,
+      isolated_claude_settings: input.isolatedClaudeSettings,
+      claude_settings_path: input.claudeSettingsPath || "",
+      file_contents: input.fileContents || [],
+      claude_settings_content: input.claudeSettingsContent,
+    }),
+  });
+}
+
+export async function updateAgentConfigBackup(input: {
+  id: string;
+  fileSources?: string[];
+  envLines?: string[];
+  isolatedClaudeSettings?: boolean;
+  claudeSettingsPath?: string;
+}): Promise<AgentConfigBackup> {
+  return protectedJSON<AgentConfigBackup>(appPath("/api/agent-config/backups"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: input.id,
+      file_sources: input.fileSources || [],
+      env_lines: input.envLines || [],
+      isolated_claude_settings: input.isolatedClaudeSettings,
+      claude_settings_path: input.claudeSettingsPath || "",
     }),
   });
 }
@@ -68,6 +103,52 @@ export async function deleteAgentConfigBackup(id: string): Promise<{ deleted: bo
   return protectedJSON<{ deleted: boolean; id: string; backups?: AgentConfigBackup[] }>(appPath(`/api/agent-config/backups?${params.toString()}`), {
     method: "DELETE",
   });
+}
+
+export async function previewAgentConfigSourceFile(path: string): Promise<{ path: string; content: string; size: number }> {
+  return protectedJSON(appPath("/api/agent-config/preview-file"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function fetchAgentConfigBackupFile(input: {
+  id: string;
+  backupPath?: string;
+  kind?: "claude_settings" | "";
+}): Promise<{ id: string; backup_path: string; kind?: string; content: string; size: number }> {
+  const params = new URLSearchParams({ id: input.id });
+  if (input.backupPath) {
+    params.set("backup_path", input.backupPath);
+  }
+  if (input.kind) {
+    params.set("kind", input.kind);
+  }
+  return protectedJSON(appPath(`/api/agent-config/backups/file?${params.toString()}`));
+}
+
+export async function saveAgentConfigBackupFile(input: {
+  id: string;
+  content: string;
+  backupPath?: string;
+  kind?: "claude_settings" | "";
+}): Promise<{ id: string; backup_path: string; size: number }> {
+  return protectedJSON(appPath("/api/agent-config/backups/file"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: input.id,
+      backup_path: input.backupPath || "",
+      kind: input.kind || "",
+      content: input.content,
+    }),
+  });
+}
+
+export async function fetchAgentConfigBackupEnv(id: string): Promise<{ id: string; env_lines: string[] }> {
+  const params = new URLSearchParams({ id });
+  return protectedJSON(appPath(`/api/agent-config/backups/env?${params.toString()}`));
 }
 
 export async function switchAgentConfig(input: {
@@ -144,4 +225,9 @@ export async function switchAgentAPIProvider(input: {
       provider_id: input.providerID,
     }),
   });
+}
+
+export function isClaudeAgentName(name: string): boolean {
+  const n = String(name || "").trim().toLowerCase();
+  return n === "claude" || n === "claudecode" || n === "claude-code";
 }
