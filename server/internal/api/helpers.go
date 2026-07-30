@@ -15,6 +15,12 @@ func respondJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func respondError(w http.ResponseWriter, status int, err error) {
+	respondErrorWithExtra(w, status, err, nil)
+}
+
+// respondErrorWithExtra emits the standard error body plus caller-supplied
+// fields, for endpoints that carry diagnostic payload alongside a failure.
+func respondErrorWithExtra(w http.ResponseWriter, status int, err error, extra map[string]any) {
 	payload := map[string]any{"error": err.Error()}
 	if appErr, ok := apperr.Classify(err); ok {
 		payload["code"] = appErr.Code
@@ -27,6 +33,11 @@ func respondError(w http.ResponseWriter, status int, err error) {
 		}
 		if appErr.Detail != "" {
 			payload["detail"] = appErr.Detail
+		}
+	}
+	for key, value := range extra {
+		if _, taken := payload[key]; !taken {
+			payload[key] = value
 		}
 	}
 	respondJSON(w, status, payload)

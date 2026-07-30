@@ -686,6 +686,25 @@ func (s *AppContext) BroadcastSessionMetaUpdated(rootID string, sess *session.Se
 	})
 }
 
+// AgentConfigSwitched reports the outcome of the probe that follows a config
+// switch. Unlike BroadcastAgentStatusChanged this is unconditional, so clients
+// waiting on a switch always get a terminal signal.
+func (s *AppContext) AgentConfigSwitched(evt agentConfigSwitchedEvent) {
+	if s == nil || s.GetSessionStreamHub() == nil {
+		return
+	}
+	s.GetSessionStreamHub().BroadcastAll(WSResponse{
+		Type: "agent.config.switched",
+		Payload: map[string]any{
+			"agent":       evt.Agent,
+			"backup_id":   evt.BackupID,
+			"backup_name": evt.BackupName,
+			"available":   evt.Available,
+			"error":       evt.Error,
+		},
+	})
+}
+
 func (s *AppContext) BroadcastAgentStatusChanged(agentName string) {
 	agentName = strings.TrimSpace(agentName)
 	if s == nil || agentName == "" || s.GetProber() == nil {

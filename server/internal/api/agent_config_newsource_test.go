@@ -137,7 +137,7 @@ func TestUpdateBackupNewClaudeSettingsSourceIsClaimed(t *testing.T) {
 		t.Fatalf("sources = %+v", updated.Sources)
 	}
 	// 切换时不得回写用户文件
-	if _, _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, nil); err != nil {
+	if _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFileString(t, userSettings); got != `{"marker":"user"}` {

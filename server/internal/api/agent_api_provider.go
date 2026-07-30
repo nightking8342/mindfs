@@ -379,7 +379,7 @@ func switchAgentAPIProvider(req agentAPIProviderSwitchRequest, app *AppContext) 
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(agentName, 0)
 	}
-	triggerAgentConfigSwitchProbe(app, agentName)
+	triggerAgentConfigSwitchProbe(app, agentName, "", "")
 	return provider, nil
 }
 

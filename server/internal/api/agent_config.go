@@ -78,6 +78,80 @@ type agentConfigSwitchRequest struct {
 	ConfirmOverwrite bool   `json:"confirm_overwrite"`
 }
 
+// agentConfigSwitchStep records one stage of a config switch for the UI. Only
+// structured data is returned; the client maps Key to a localized label and
+// fills Count/Target into it.
+type agentConfigSwitchStep struct {
+	Key        string `json:"key"`
+	Status     string `json:"status"`
+	Count      int    `json:"count,omitempty"`
+	Target     string `json:"target,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
+type agentConfigSwitchResult struct {
+	Entry        agentConfigManifestEntry `json:"backup"`
+	NeedsConfirm bool                     `json:"needs_confirm"`
+	Steps        []agentConfigSwitchStep  `json:"steps,omitempty"`
+}
+
+const (
+	switchStepStatusOK      = "ok"
+	switchStepStatusFailed  = "failed"
+	switchStepStatusRunning = "running"
+	switchStepStatusSkipped = "skipped"
+
+	switchStepRestoreFiles    = "restore_files"
+	switchStepClaudeSettings  = "claude_settings"
+	switchStepApplyEnv        = "apply_env"
+	switchStepKillSessions    = "kill_sessions"
+	switchStepRecordSelection = "record_selection"
+	switchStepProbe           = "probe"
+)
+
+// switchStepRecorder accumulates the step list as a switch progresses. A failed
+// switch still returns everything recorded so far, so the UI can show which
+// stage it stopped at.
+type switchStepRecorder struct {
+	steps []agentConfigSwitchStep
+}
+
+func (r *switchStepRecorder) ok(key string, start time.Time, count int, target string) {
+	r.steps = append(r.steps, agentConfigSwitchStep{
+		Key:        key,
+		Status:     switchStepStatusOK,
+		Count:      count,
+		Target:     target,
+		DurationMS: time.Since(start).Milliseconds(),
+	})
+}
+
+func (r *switchStepRecorder) fail(key string, start time.Time, err error) {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	r.steps = append(r.steps, agentConfigSwitchStep{
+		Key:        key,
+		Status:     switchStepStatusFailed,
+		DurationMS: time.Since(start).Milliseconds(),
+		Error:      message,
+	})
+}
+
+func (r *switchStepRecorder) skip(key string) {
+	r.steps = append(r.steps, agentConfigSwitchStep{Key: key, Status: switchStepStatusSkipped})
+}
+
+func (r *switchStepRecorder) running(key string) {
+	r.steps = append(r.steps, agentConfigSwitchStep{Key: key, Status: switchStepStatusRunning})
+}
+
+func (r *switchStepRecorder) result(entry agentConfigManifestEntry, needsConfirm bool) agentConfigSwitchResult {
+	return agentConfigSwitchResult{Entry: entry, NeedsConfirm: needsConfirm, Steps: r.steps}
+}
+
 type agentRestartRequest struct {
 	Agent string `json:"agent"`
 }
@@ -287,22 +361,25 @@ func (h *HTTPHandler) handleAgentConfigSwitch(w http.ResponseWriter, r *http.Req
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
-	entry, needsConfirm, err := switchAgentConfig(req, h.AppContext)
+	result, err := switchAgentConfig(req, h.AppContext)
 	if err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		// Steps travel with the error so the client can show which stage failed
+		// and warn that the config may be half-applied.
+		respondErrorWithExtra(w, http.StatusBadRequest, err, map[string]any{"steps": result.Steps})
 		return
 	}
-	if needsConfirm {
+	if result.NeedsConfirm {
 		respondJSON(w, http.StatusOK, map[string]any{
 			"needs_confirm": true,
 			"message":       "目标配置文件已存在，请确保已备份",
-			"backup":        entry,
+			"backup":        result.Entry,
 		})
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
 		"needs_confirm": false,
-		"backup":        entry,
+		"backup":        result.Entry,
+		"steps":         result.Steps,
 	})
 }
 
@@ -732,14 +809,17 @@ func deleteAgentConfigBackup(id string) ([]agentConfigManifestEntry, error) {
 	return next, nil
 }
 
-func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConfigManifestEntry, bool, error) {
+func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConfigSwitchResult, error) {
+	rec := &switchStepRecorder{}
+	var noEntry agentConfigManifestEntry
+
 	id := strings.TrimSpace(req.ID)
 	if id == "" {
-		return agentConfigManifestEntry{}, false, errors.New("backup id required")
+		return rec.result(noEntry, false), errors.New("backup id required")
 	}
 	manifest, err := readAgentConfigManifest()
 	if err != nil {
-		return agentConfigManifestEntry{}, false, err
+		return rec.result(noEntry, false), err
 	}
 	var entry agentConfigManifestEntry
 	for _, item := range manifest {
@@ -749,7 +829,7 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		}
 	}
 	if entry.ID == "" {
-		return agentConfigManifestEntry{}, false, errors.New("backup not found")
+		return rec.result(noEntry, false), errors.New("backup not found")
 	}
 	hasClaudeSnap := false
 	if entry.IsolatedClaudeSettings {
@@ -760,8 +840,12 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		}
 	}
 	if len(entry.Sources) == 0 && len(entry.EnvKeys) == 0 && !hasClaudeSnap {
-		return agentConfigManifestEntry{}, false, errors.New("backup has no config content")
+		return rec.result(noEntry, false), errors.New("backup has no config content")
 	}
+
+	// Probing for existing targets happens before anything is written, so a
+	// needs_confirm response carries no steps.
+	restoreStart := time.Now()
 	exists := false
 	for _, source := range entry.Sources {
 		if entry.IsolatedClaudeSettings && isClaudeSettingsSourcePath(source.SourcePath) {
@@ -769,22 +853,27 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		}
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepRestoreFiles, restoreStart, err)
+			return rec.result(noEntry, false), err
 		}
 		if _, err := os.Stat(sourcePath); err == nil {
 			exists = true
 			break
 		} else if err != nil && !os.IsNotExist(err) {
-			return agentConfigManifestEntry{}, false, apperr.Wrap("stat", sourcePath, err)
+			wrapped := apperr.Wrap("stat", sourcePath, err)
+			rec.fail(switchStepRestoreFiles, restoreStart, wrapped)
+			return rec.result(noEntry, false), wrapped
 		}
 	}
 	if exists && !req.ConfirmOverwrite {
-		return entry, true, nil
+		return agentConfigSwitchResult{Entry: entry, NeedsConfirm: true}, nil
 	}
 	configRoot, err := agentConfigRootDir()
 	if err != nil {
-		return agentConfigManifestEntry{}, false, err
+		rec.fail(switchStepRestoreFiles, restoreStart, err)
+		return rec.result(noEntry, false), err
 	}
+	restored := 0
 	for _, source := range entry.Sources {
 		// Legacy entries may still list ~/.claude/settings.json as a regular source.
 		// With isolation on, that file belongs to the isolated channel below.
@@ -793,81 +882,125 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		}
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepRestoreFiles, restoreStart, err)
+			return rec.result(noEntry, false), err
 		}
 		if err := copyFile(filepath.Join(configRoot, filepath.FromSlash(source.BackupPath)), sourcePath); err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepRestoreFiles, restoreStart, err)
+			return rec.result(noEntry, false), err
 		}
+		restored++
 	}
+	if restored > 0 {
+		rec.ok(switchStepRestoreFiles, restoreStart, restored, "")
+	} else {
+		rec.skip(switchStepRestoreFiles)
+	}
+
 	// Isolated Claude settings: restore snapshot to P only (never user ~/.claude/settings.json).
+	claudeStart := time.Now()
 	if entry.IsolatedClaudeSettings {
 		snap := filepath.Join(configRoot, entry.ID, claudeSettingsSnapshotRelName)
 		p := strings.TrimSpace(entry.ClaudeSettingsPath)
 		if p == "" {
 			resolved, err := resolveClaudeSettingsPath(entry.ID, "")
 			if err != nil {
-				return agentConfigManifestEntry{}, false, err
+				rec.fail(switchStepClaudeSettings, claudeStart, err)
+				return rec.result(noEntry, false), err
 			}
 			p = resolved
 		}
 		if _, err := os.Stat(snap); err == nil {
 			if err := copyFile(snap, p); err != nil {
-				return agentConfigManifestEntry{}, false, err
+				rec.fail(switchStepClaudeSettings, claudeStart, err)
+				return rec.result(noEntry, false), err
 			}
 		}
 		if app != nil && app.GetPreferences() != nil {
 			if err := app.GetPreferences().UpdateAgentClaudeSettingsPath(entry.Agent, p); err != nil {
-				return agentConfigManifestEntry{}, false, err
+				rec.fail(switchStepClaudeSettings, claudeStart, err)
+				return rec.result(noEntry, false), err
 			}
 		}
 		applyRuntimeClaudeSettingsPath(app, entry.Agent, p)
-	} else if isClaudeAgentName(entry.Agent) && app != nil && app.GetPreferences() != nil {
-		_ = app.GetPreferences().UpdateAgentClaudeSettingsPath(entry.Agent, "")
-		applyRuntimeClaudeSettingsPath(app, entry.Agent, "")
+		rec.ok(switchStepClaudeSettings, claudeStart, 0, p)
+	} else {
+		if isClaudeAgentName(entry.Agent) && app != nil && app.GetPreferences() != nil {
+			_ = app.GetPreferences().UpdateAgentClaudeSettingsPath(entry.Agent, "")
+			applyRuntimeClaudeSettingsPath(app, entry.Agent, "")
+		}
+		rec.skip(switchStepClaudeSettings)
 	}
+
+	envStart := time.Now()
 	var env map[string]string
 	if len(entry.EnvKeys) > 0 {
 		envBackups, err := readAgentEnvBackups()
 		if err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepApplyEnv, envStart, err)
+			return rec.result(noEntry, false), err
 		}
 		lines, ok := envBackups[entry.ID]
 		if !ok {
-			return agentConfigManifestEntry{}, false, errors.New("environment backup not found")
+			err := errors.New("environment backup not found")
+			rec.fail(switchStepApplyEnv, envStart, err)
+			return rec.result(noEntry, false), err
 		}
 		parsedEnv, _, err := envLinesToMap(lines)
 		if err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepApplyEnv, envStart, err)
+			return rec.result(noEntry, false), err
 		}
 		env = parsedEnv
 		if err := updateAgentEnvConfig(entry.Agent, env); err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepApplyEnv, envStart, err)
+			return rec.result(noEntry, false), err
 		}
 		if app != nil && app.GetAgentPool() != nil {
 			if err := app.GetAgentPool().SetAgentEnv(entry.Agent, env); err != nil {
-				return agentConfigManifestEntry{}, false, err
+				rec.fail(switchStepApplyEnv, envStart, err)
+				return rec.result(noEntry, false), err
 			}
 		}
 		if app != nil && app.GetProber() != nil {
 			if err := app.GetProber().SetAgentEnv(entry.Agent, env); err != nil {
-				return agentConfigManifestEntry{}, false, err
+				rec.fail(switchStepApplyEnv, envStart, err)
+				return rec.result(noEntry, false), err
 			}
 		}
+		rec.ok(switchStepApplyEnv, envStart, len(env), "")
+	} else {
+		rec.skip(switchStepApplyEnv)
 	}
+
+	killStart := time.Now()
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(entry.Agent, 0)
+		rec.ok(switchStepKillSessions, killStart, 0, entry.Agent)
+	} else {
+		rec.skip(switchStepKillSessions)
 	}
+
+	recordStart := time.Now()
 	if app != nil && app.GetPreferences() != nil {
 		if err := app.GetPreferences().UpdateAgentLastConfigSelection(entry.Agent, preferences.LastConfigSelection{
 			Type: "backup",
 			ID:   entry.ID,
 			Name: entry.Name,
 		}); err != nil {
-			return agentConfigManifestEntry{}, false, err
+			rec.fail(switchStepRecordSelection, recordStart, err)
+			return rec.result(noEntry, false), err
 		}
+		rec.ok(switchStepRecordSelection, recordStart, 0, entry.Name)
+	} else {
+		rec.skip(switchStepRecordSelection)
 	}
-	triggerAgentConfigSwitchProbe(app, entry.Agent)
-	return entry, false, nil
+
+	triggerAgentConfigSwitchProbe(app, entry.Agent, entry.ID, entry.Name)
+	// The probe runs in the background; its completion arrives over WS as
+	// agent.config.switched.
+	rec.running(switchStepProbe)
+	return rec.result(entry, false), nil
 }
 
 func restartAgent(agentName string, app *AppContext) error {
@@ -882,7 +1015,7 @@ func restartAgent(agentName string, app *AppContext) error {
 		return fmt.Errorf("agent not configured: %s", agentName)
 	}
 	app.GetAgentPool().KillAgentProcess(agentName, 0)
-	triggerAgentConfigSwitchProbe(app, agentName)
+	triggerAgentConfigSwitchProbe(app, agentName, "", "")
 	return nil
 }
 
@@ -905,11 +1038,42 @@ func applyRuntimeClaudeSettingsPath(app *AppContext, agentName, settingsPath str
 	}
 }
 
-func triggerAgentConfigSwitchProbe(app *AppContext, agentName string) {
+// agentConfigSwitchedEvent reports the outcome of the background probe that
+// follows a config switch, an API provider switch or a manual restart.
+type agentConfigSwitchedEvent struct {
+	Agent      string `json:"agent"`
+	BackupID   string `json:"backup_id,omitempty"`
+	BackupName string `json:"backup_name,omitempty"`
+	Available  bool   `json:"available"`
+	Error      string `json:"error,omitempty"`
+}
+
+// agentConfigSwitchNotifier exists so tests can observe the completion
+// broadcast. A missing broadcast is the worst failure mode here: the server log
+// looks healthy while the client waits on the probe forever.
+type agentConfigSwitchNotifier interface {
+	AgentConfigSwitched(evt agentConfigSwitchedEvent)
+}
+
+// switchProbeNotifier is overridden in tests; nil means "use the AppContext".
+var switchProbeNotifier agentConfigSwitchNotifier
+
+func resolveSwitchNotifier(app *AppContext) agentConfigSwitchNotifier {
+	if switchProbeNotifier != nil {
+		return switchProbeNotifier
+	}
+	if app == nil {
+		return nil
+	}
+	return app
+}
+
+func triggerAgentConfigSwitchProbe(app *AppContext, agentName, backupID, backupName string) {
 	if app == nil || app.GetProber() == nil {
 		return
 	}
 	prober := app.GetProber()
+	notifier := resolveSwitchNotifier(app)
 	if err := prober.ClearProbeSession(agentName); err != nil {
 		log.Printf("[agent-config] clear_probe_session.error agent=%s err=%v", agentName, err)
 	}
@@ -917,11 +1081,25 @@ func triggerAgentConfigSwitchProbe(app *AppContext, agentName string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 		status := prober.ProbeOne(ctx, agentName)
-		if status.Error != "" {
-			log.Printf("[agent-config] switch_probe.completed agent=%s available=%t err=%q", agentName, status.Available, status.Error)
-			return
+		probeErr := firstNonEmpty(status.Error, status.ProbeError, status.RuntimeError)
+		if probeErr != "" {
+			log.Printf("[agent-config] switch_probe.completed agent=%s available=%t err=%q", agentName, status.Available, probeErr)
+		} else {
+			log.Printf("[agent-config] switch_probe.completed agent=%s available=%t", agentName, status.Available)
 		}
-		log.Printf("[agent-config] switch_probe.completed agent=%s available=%t", agentName, status.Available)
+		// Broadcast unconditionally. agent.status.changed is filtered by
+		// Prober.statusChanged and is silently dropped when nothing about the
+		// status differs, which happens when switching between two backups that
+		// both work and expose the same models.
+		if notifier != nil {
+			notifier.AgentConfigSwitched(agentConfigSwitchedEvent{
+				Agent:      agentName,
+				BackupID:   backupID,
+				BackupName: backupName,
+				Available:  status.Available,
+				Error:      probeErr,
+			})
+		}
 	}()
 }
 

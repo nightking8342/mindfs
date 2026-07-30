@@ -243,21 +243,21 @@ func TestSwitchIsolatedClaudeSettingsKeepsUserFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &AppContext{Prefs: prefs}
-	switched, needsConfirm, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, app)
+	switchResult, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, app)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needsConfirm {
+	if switchResult.NeedsConfirm {
 		t.Fatal("unexpected needs_confirm")
 	}
 	if got := readFileString(t, userSettings); got != `{"marker":"user"}` {
 		t.Fatalf("user settings were overwritten: %q", got)
 	}
-	if got := readFileString(t, switched.ClaudeSettingsPath); got != `{"marker":"backup"}` {
+	if got := readFileString(t, switchResult.Entry.ClaudeSettingsPath); got != `{"marker":"backup"}` {
 		t.Fatalf("isolated settings = %q", got)
 	}
-	if got := prefs.AgentClaudeSettingsPath("claude"); got != switched.ClaudeSettingsPath {
-		t.Fatalf("preferences settings path = %q, want %q", got, switched.ClaudeSettingsPath)
+	if got := prefs.AgentClaudeSettingsPath("claude"); got != switchResult.Entry.ClaudeSettingsPath {
+		t.Fatalf("preferences settings path = %q, want %q", got, switchResult.Entry.ClaudeSettingsPath)
 	}
 }
 
@@ -277,11 +277,11 @@ func TestSwitchIsolatedSkipsOverwriteConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, needsConfirm, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID}, nil)
+	switchResult, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needsConfirm {
+	if switchResult.NeedsConfirm {
 		t.Fatal("isolated-only backup should not require overwrite confirmation")
 	}
 }
@@ -431,17 +431,17 @@ func TestSwitchLegacyManifestWithoutIsolatedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	switched, needsConfirm, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID}, nil)
+	switchResult, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !needsConfirm {
+	if !switchResult.NeedsConfirm {
 		t.Fatal("expected needs_confirm for an existing user file")
 	}
-	if switched.IsolatedClaudeSettings {
+	if switchResult.Entry.IsolatedClaudeSettings {
 		t.Fatal("legacy entry should not report isolation")
 	}
-	if _, _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, nil); err != nil {
+	if _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFileString(t, src); got != "version = 2\n" {
@@ -585,7 +585,7 @@ func TestUpdateBackupDisablingIsolationClearsPath(t *testing.T) {
 	if err := prefs.UpdateAgentClaudeSettingsPath("claude", entry.ClaudeSettingsPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, &AppContext{Prefs: prefs}); err != nil {
+	if _, err := switchAgentConfig(agentConfigSwitchRequest{ID: entry.ID, ConfirmOverwrite: true}, &AppContext{Prefs: prefs}); err != nil {
 		t.Fatal(err)
 	}
 	if got := prefs.AgentClaudeSettingsPath("claude"); got != "" {
