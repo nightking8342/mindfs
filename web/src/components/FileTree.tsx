@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { rootBadgeStyle } from "./rootBadgeStyle";
 import { openExternalURL } from "../services/platformNavigation";
 import { isNativeShellRuntime, shouldEnablePWAInstall } from "../services/runtime";
@@ -777,12 +778,16 @@ function AgentConfigFileEditorDialog({
 
   const lineCount = editor.content ? editor.content.split("\n").length : 0;
 
-  return (
+  // Portaled to document.body: the sidebar column (z-index 10) and the mobile
+  // drawer (transform + overflow hidden, z-index 2000) each form stacking
+  // contexts that would trap this fixed overlay below the footer input bar
+  // (z-index 100) or clip it to the drawer. 2100 clears the drawer tier.
+  return createPortal(
     <div
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 95,
+        zIndex: 2100,
         background: "rgba(15, 23, 42, 0.45)",
         display: "flex",
         alignItems: "center",
@@ -871,7 +876,8 @@ function AgentConfigFileEditorDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
