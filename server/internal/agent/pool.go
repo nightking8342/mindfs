@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,16 +16,17 @@ import (
 
 // Pool routes agent session creation to protocol-specific runtimes.
 type Pool struct {
-	cfg        Config
-	processCtx context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	sessions   map[string]*sessionEntry
-	runtimeEnv map[string]map[string]string
-	closed     bool
-	acp        *acp.Runtime
-	claude     *claude.Runtime
-	codex      *codex.Runtime
+	cfg                 Config
+	processCtx          context.Context
+	cancel              context.CancelFunc
+	mu                  sync.Mutex
+	sessions            map[string]*sessionEntry
+	runtimeEnv          map[string]map[string]string
+	runtimeSettingsPath map[string]string
+	closed              bool
+	acp                 *acp.Runtime
+	claude              *claude.Runtime
+	codex               *codex.Runtime
 }
 
 type sessionEntry struct {
@@ -38,14 +40,15 @@ type sessionEntry struct {
 func NewPool(cfg Config) *Pool {
 	processCtx, cancel := context.WithCancel(context.Background())
 	return &Pool{
-		cfg:        cfg,
-		processCtx: processCtx,
-		cancel:     cancel,
-		sessions:   make(map[string]*sessionEntry),
-		runtimeEnv: make(map[string]map[string]string),
-		acp:        acp.NewRuntime(processCtx),
-		claude:     claude.NewRuntime(),
-		codex:      codex.NewRuntime(),
+		cfg:                 cfg,
+		processCtx:          processCtx,
+		cancel:              cancel,
+		sessions:            make(map[string]*sessionEntry),
+		runtimeEnv:          make(map[string]map[string]string),
+		runtimeSettingsPath: make(map[string]string),
+		acp:                 acp.NewRuntime(processCtx),
+		claude:              claude.NewRuntime(),
+		codex:               codex.NewRuntime(),
 	}
 }
 
@@ -109,6 +112,10 @@ func (p *Pool) GetOrCreate(ctx context.Context, in agenttypes.OpenSessionInput) 
 func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definition, in agenttypes.OpenSessionInput) (agenttypes.Session, error) {
 	switch protocol {
 	case ProtocolClaudeSDK:
+		settingsPath := strings.TrimSpace(in.SettingsPath)
+		if settingsPath == "" {
+			settingsPath = strings.TrimSpace(def.ClaudeSettingsPath)
+		}
 		return p.claude.OpenSession(ctx, claude.OpenOptions{
 			AgentName:       in.AgentName,
 			SessionKey:      in.SessionKey,
@@ -119,6 +126,7 @@ func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definitio
 			Command:         def.Command,
 			Args:            append([]string{}, def.Args...),
 			Env:             cloneEnv(def.Env),
+			SettingsPath:    settingsPath,
 			ResumeSessionID: in.AgentSessionID,
 			ForkSessionID:   in.ForkPoint.AgentSessionID,
 			ResumeMessageID: in.ForkPoint.ClaudeMessageUUID,
@@ -291,17 +299,42 @@ func (p *Pool) SetAgentEnv(agentName string, env map[string]string) error {
 }
 
 func (p *Pool) applyRuntimeEnvOverridesLocked(cfg Config) Config {
-	if len(p.runtimeEnv) == 0 {
-		return cfg
-	}
 	for i := range cfg.Agents {
-		env, ok := p.runtimeEnv[cfg.Agents[i].Name]
-		if !ok {
-			continue
+		if env, ok := p.runtimeEnv[cfg.Agents[i].Name]; ok {
+			cfg.Agents[i].Env = cloneEnv(env)
 		}
-		cfg.Agents[i].Env = cloneEnv(env)
+		if path, ok := p.runtimeSettingsPath[cfg.Agents[i].Name]; ok {
+			cfg.Agents[i].ClaudeSettingsPath = path
+		}
 	}
 	return cfg
+}
+
+// SetAgentClaudeSettingsPath records the isolated Claude settings.json that
+// sessions for this agent should use when the caller does not pass one
+// explicitly. Probes go through GetOrCreate without a SettingsPath, so without
+// this the model list would come from the user's own ~/.claude/settings.json.
+func (p *Pool) SetAgentClaudeSettingsPath(agentName, settingsPath string) error {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("agent required")
+	}
+	settingsPath = strings.TrimSpace(settingsPath)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.cfg.Agents {
+		if p.cfg.Agents[i].Name != agentName {
+			continue
+		}
+		if settingsPath == "" {
+			delete(p.runtimeSettingsPath, agentName)
+		} else {
+			p.runtimeSettingsPath[agentName] = settingsPath
+		}
+		p.cfg.Agents[i].ClaudeSettingsPath = settingsPath
+		return nil
+	}
+	return errors.New("agent not configured: " + agentName)
 }
 
 // Get returns an existing session handle if present.

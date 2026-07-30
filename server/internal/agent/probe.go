@@ -351,6 +351,33 @@ func (p *Prober) ProbeOne(ctx context.Context, name string) Status {
 	return status
 }
 
+// SetAgentClaudeSettingsPath mirrors Pool.SetAgentClaudeSettingsPath onto the
+// prober's own config copy so probe-opened sessions report the models of the
+// selected backup rather than the user's default Claude settings.
+func (p *Prober) SetAgentClaudeSettingsPath(agentName, settingsPath string) error {
+	if p == nil {
+		return errors.New("prober not configured")
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("agent required")
+	}
+	settingsPath = strings.TrimSpace(settingsPath)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cfg == nil {
+		return errors.New("config not loaded")
+	}
+	for i := range p.cfg.Agents {
+		if p.cfg.Agents[i].Name != agentName {
+			continue
+		}
+		p.cfg.Agents[i].ClaudeSettingsPath = settingsPath
+		return nil
+	}
+	return errors.New("agent not configured: " + agentName)
+}
+
 func (p *Prober) SetAgentEnv(agentName string, env map[string]string) error {
 	if p == nil {
 		return errors.New("prober not configured")

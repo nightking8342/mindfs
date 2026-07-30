@@ -26,21 +26,51 @@ type agentConfigSource struct {
 }
 
 type agentConfigManifestEntry struct {
-	ID        string              `json:"id"`
-	Agent     string              `json:"agent"`
-	Name      string              `json:"name"`
-	CreatedAt string              `json:"createdAt"`
-	UpdatedAt string              `json:"updatedAt"`
-	Sources   []agentConfigSource `json:"sources,omitempty"`
-	EnvKeys   []string            `json:"envKeys,omitempty"`
+	ID                     string              `json:"id"`
+	Agent                  string              `json:"agent"`
+	Name                   string              `json:"name"`
+	CreatedAt              string              `json:"createdAt"`
+	UpdatedAt              string              `json:"updatedAt"`
+	Sources                []agentConfigSource `json:"sources,omitempty"`
+	EnvKeys                []string            `json:"envKeys,omitempty"`
+	IsolatedClaudeSettings bool                `json:"isolatedClaudeSettings,omitempty"`
+	ClaudeSettingsPath     string              `json:"claudeSettingsPath,omitempty"`
+}
+
+type agentConfigFileContent struct {
+	SourcePath string `json:"source_path"`
+	Content    string `json:"content"`
 }
 
 type agentConfigBackupRequest struct {
-	Agent       string   `json:"agent"`
-	Name        string   `json:"name"`
-	FileSources []string `json:"file_sources"`
-	EnvLines    []string `json:"env_lines"`
-	Overwrite   bool     `json:"overwrite"`
+	Agent                  string                   `json:"agent"`
+	Name                   string                   `json:"name"`
+	FileSources            []string                 `json:"file_sources"`
+	EnvLines               []string                 `json:"env_lines"`
+	Overwrite              bool                     `json:"overwrite"`
+	IsolatedClaudeSettings *bool                    `json:"isolated_claude_settings,omitempty"`
+	ClaudeSettingsPath     string                   `json:"claude_settings_path,omitempty"`
+	FileContents           []agentConfigFileContent `json:"file_contents,omitempty"`
+	ClaudeSettingsContent  *string                  `json:"claude_settings_content,omitempty"`
+}
+
+type agentConfigBackupUpdateRequest struct {
+	ID                     string   `json:"id"`
+	FileSources            []string `json:"file_sources"`
+	EnvLines               []string `json:"env_lines"`
+	IsolatedClaudeSettings *bool    `json:"isolated_claude_settings,omitempty"`
+	ClaudeSettingsPath     string   `json:"claude_settings_path,omitempty"`
+}
+
+type agentConfigFileRequest struct {
+	ID         string `json:"id"`
+	BackupPath string `json:"backup_path"`
+	Content    string `json:"content"`
+	Kind       string `json:"kind"`
+}
+
+type agentConfigPreviewRequest struct {
+	Path string `json:"path"`
 }
 
 type agentConfigSwitchRequest struct {
@@ -51,6 +81,11 @@ type agentConfigSwitchRequest struct {
 type agentRestartRequest struct {
 	Agent string `json:"agent"`
 }
+
+const (
+	agentConfigMaxFileBytes       = 1 << 20 // 1 MiB
+	claudeSettingsSnapshotRelName = "claude-settings.json"
+)
 
 var agentConfigNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -115,18 +150,135 @@ func (h *HTTPHandler) handleAgentConfigBackupCreate(w http.ResponseWriter, r *ht
 	respondJSON(w, http.StatusOK, entry)
 }
 
+func (h *HTTPHandler) handleAgentConfigBackupUpdate(w http.ResponseWriter, r *http.Request) {
+	var req agentConfigBackupUpdateRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
+		return
+	}
+	entry, err := updateAgentConfigBackup(req)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, entry)
+}
+
 func (h *HTTPHandler) handleAgentConfigBackupDelete(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("backup id required"))
 		return
 	}
+	var removedPath, removedAgent string
+	if entry, err := findAgentConfigBackup(id); err == nil {
+		removedPath = entry.ClaudeSettingsPath
+		removedAgent = entry.Agent
+	}
 	manifest, err := deleteAgentConfigBackup(id)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
 	}
+	if h.AppContext != nil && h.AppContext.GetPreferences() != nil && removedPath != "" && removedAgent != "" {
+		prefs := h.AppContext.GetPreferences()
+		if prefs.AgentClaudeSettingsPath(removedAgent) == removedPath {
+			_ = prefs.UpdateAgentClaudeSettingsPath(removedAgent, "")
+		}
+	}
 	respondJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id, "backups": manifest})
+}
+
+func (h *HTTPHandler) handleAgentConfigBackupFileGet(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	backupPath := strings.TrimSpace(r.URL.Query().Get("backup_path"))
+	content, resolvedPath, err := readAgentConfigBackupFile(id, backupPath, kind)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAgentConfigFileTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		respondError(w, status, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"id":          id,
+		"backup_path": resolvedPath,
+		"kind":        kind,
+		"content":     content,
+		"size":        len(content),
+	})
+}
+
+func (h *HTTPHandler) handleAgentConfigBackupFilePut(w http.ResponseWriter, r *http.Request) {
+	var req agentConfigFileRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
+		return
+	}
+	if int64(len(req.Content)) > agentConfigMaxFileBytes {
+		respondError(w, http.StatusRequestEntityTooLarge, errAgentConfigFileTooLarge)
+		return
+	}
+	resolvedPath, err := writeAgentConfigBackupFile(req.ID, req.BackupPath, req.Kind, req.Content)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"id":          strings.TrimSpace(req.ID),
+		"backup_path": resolvedPath,
+		"kind":        strings.TrimSpace(req.Kind),
+		"size":        len(req.Content),
+	})
+}
+
+func (h *HTTPHandler) handleAgentConfigBackupEnvGet(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("backup id required"))
+		return
+	}
+	if _, err := findAgentConfigBackup(id); err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	envMap, err := readAgentEnvBackups()
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	lines := envMap[id]
+	if lines == nil {
+		lines = []string{}
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"id":        id,
+		"env_lines": lines,
+	})
+}
+
+func (h *HTTPHandler) handleAgentConfigPreviewFile(w http.ResponseWriter, r *http.Request) {
+	var req agentConfigPreviewRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
+		return
+	}
+	abs, content, err := previewAgentConfigSourceFile(req.Path)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAgentConfigFileTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		respondError(w, status, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"path":    abs,
+		"content": content,
+		"size":    len(content),
+	})
 }
 
 func (h *HTTPHandler) handleAgentConfigSwitch(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +336,34 @@ func createAgentConfigBackup(req agentConfigBackupRequest) (agentConfigManifestE
 	if _, ok := cfg.GetAgent(agentName); !ok {
 		return agentConfigManifestEntry{}, fmt.Errorf("agent not configured: %s", agentName)
 	}
+
+	isolated := false
+	if req.IsolatedClaudeSettings != nil {
+		isolated = *req.IsolatedClaudeSettings
+	} else if isClaudeAgentName(agentName) {
+		// Spec default: isolated on for Claude.
+		isolated = true
+	}
+	if isolated && !isClaudeAgentName(agentName) {
+		return agentConfigManifestEntry{}, errors.New("isolated_claude_settings is only supported for claude agent")
+	}
+
+	contentBySource := map[string]string{}
+	for _, item := range req.FileContents {
+		source := strings.TrimSpace(item.SourcePath)
+		if source == "" {
+			continue
+		}
+		expanded, err := expandUserPath(source)
+		if err != nil {
+			return agentConfigManifestEntry{}, err
+		}
+		if int64(len(item.Content)) > agentConfigMaxFileBytes {
+			return agentConfigManifestEntry{}, errAgentConfigFileTooLarge
+		}
+		contentBySource[expanded] = item.Content
+	}
+
 	configRoot, err := agentConfigRootDir()
 	if err != nil {
 		return agentConfigManifestEntry{}, err
@@ -215,7 +395,13 @@ func createAgentConfigBackup(req agentConfigBackupRequest) (agentConfigManifestE
 		CreatedAt: createdAt,
 		UpdatedAt: now,
 	}
-	sources, err := normalizeFileSources(req.FileSources)
+
+	// file_sources that only appear in file_contents still need to be snapshotted.
+	fileSourcesInput := append([]string{}, req.FileSources...)
+	for source := range contentBySource {
+		fileSourcesInput = append(fileSourcesInput, source)
+	}
+	sources, err := normalizeFileSourcesAllowMissing(fileSourcesInput, contentBySource)
 	if err != nil {
 		return agentConfigManifestEntry{}, err
 	}
@@ -223,7 +409,64 @@ func createAgentConfigBackup(req agentConfigBackupRequest) (agentConfigManifestE
 	if err != nil {
 		return agentConfigManifestEntry{}, err
 	}
-	if len(sources) == 0 && len(envLines) == 0 {
+
+	// The isolated channel owns ~/.claude/settings.json: keep it out of the regular
+	// sources so switching never writes back to the user's Claude config.
+	var claudeSettingsSources []string
+	if isolated {
+		sources, claudeSettingsSources = splitClaudeSettingsSources(sources)
+	}
+
+	var claudeSettingsContent string
+	hasClaudeSettings := false
+	if isolated {
+		if req.ClaudeSettingsContent != nil {
+			claudeSettingsContent = *req.ClaudeSettingsContent
+			hasClaudeSettings = true
+		}
+		path, err := resolveClaudeSettingsPath(id, req.ClaudeSettingsPath)
+		if err != nil {
+			return agentConfigManifestEntry{}, err
+		}
+		entry.IsolatedClaudeSettings = true
+		entry.ClaudeSettingsPath = path
+		if !hasClaudeSettings {
+			// Seed from a settings source the caller listed (edited content wins over disk).
+			for _, source := range claudeSettingsSources {
+				if content, ok := contentBySource[source]; ok {
+					claudeSettingsContent = content
+					hasClaudeSettings = true
+					break
+				}
+				if data, err := os.ReadFile(source); err == nil && int64(len(data)) <= agentConfigMaxFileBytes {
+					claudeSettingsContent = string(data)
+					hasClaudeSettings = true
+					break
+				}
+			}
+		}
+		if !hasClaudeSettings {
+			// Best-effort seed from default user settings if present.
+			if home, err := os.UserHomeDir(); err == nil {
+				candidate := filepath.Join(home, ".claude", "settings.json")
+				if data, err := os.ReadFile(candidate); err == nil {
+					if int64(len(data)) <= agentConfigMaxFileBytes {
+						claudeSettingsContent = string(data)
+						hasClaudeSettings = true
+					}
+				}
+			}
+		}
+		if !hasClaudeSettings {
+			claudeSettingsContent = "{}\n"
+			hasClaudeSettings = true
+		}
+		if int64(len(claudeSettingsContent)) > agentConfigMaxFileBytes {
+			return agentConfigManifestEntry{}, errAgentConfigFileTooLarge
+		}
+	}
+
+	if len(sources) == 0 && len(envLines) == 0 && !hasClaudeSettings {
 		return agentConfigManifestEntry{}, errors.New("config source or environment variables required")
 	}
 	if err := os.RemoveAll(filepath.Join(configRoot, id)); err != nil {
@@ -233,13 +476,23 @@ func createAgentConfigBackup(req agentConfigBackupRequest) (agentConfigManifestE
 		name := fmt.Sprintf("%03d-%s", index+1, filepath.Base(source))
 		rel := filepath.Join(id, name)
 		dst := filepath.Join(configRoot, rel)
-		if err := copyFile(source, dst); err != nil {
+		if content, ok := contentBySource[source]; ok {
+			if err := writeFileAtomic(dst, []byte(content), 0o600); err != nil {
+				return agentConfigManifestEntry{}, err
+			}
+		} else if err := copyFile(source, dst); err != nil {
 			return agentConfigManifestEntry{}, err
 		}
 		entry.Sources = append(entry.Sources, agentConfigSource{
 			SourcePath: source,
 			BackupPath: filepath.ToSlash(rel),
 		})
+	}
+	if hasClaudeSettings {
+		snap := filepath.Join(configRoot, id, claudeSettingsSnapshotRelName)
+		if err := writeFileAtomic(snap, []byte(claudeSettingsContent), 0o600); err != nil {
+			return agentConfigManifestEntry{}, err
+		}
 	}
 	envMap, err := readAgentEnvBackups()
 	if err != nil {
@@ -268,6 +521,168 @@ func createAgentConfigBackup(req agentConfigBackupRequest) (agentConfigManifestE
 	return entry, nil
 }
 
+func updateAgentConfigBackup(req agentConfigBackupUpdateRequest) (agentConfigManifestEntry, error) {
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		return agentConfigManifestEntry{}, errors.New("backup id required")
+	}
+	manifest, err := readAgentConfigManifest()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	index := -1
+	var entry agentConfigManifestEntry
+	for i, item := range manifest {
+		if item.ID == id {
+			index = i
+			entry = item
+			break
+		}
+	}
+	if index < 0 {
+		return agentConfigManifestEntry{}, errors.New("backup not found")
+	}
+
+	isolated := entry.IsolatedClaudeSettings
+	if req.IsolatedClaudeSettings != nil {
+		isolated = *req.IsolatedClaudeSettings
+	}
+	if isolated && !isClaudeAgentName(entry.Agent) {
+		return agentConfigManifestEntry{}, errors.New("isolated_claude_settings is only supported for claude agent")
+	}
+
+	configRoot, err := agentConfigRootDir()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	backupDir := filepath.Join(configRoot, id)
+
+	// Preserve existing snapshot contents by sourcePath where possible.
+	existingBySource := map[string]agentConfigSource{}
+	for _, src := range entry.Sources {
+		existingBySource[src.SourcePath] = src
+	}
+
+	sources, err := normalizeFileSources(req.FileSources)
+	if err != nil {
+		// Allow empty file sources when env or isolated settings remain.
+		if len(req.FileSources) > 0 {
+			return agentConfigManifestEntry{}, err
+		}
+		sources = nil
+	}
+	envLines, envKeys, err := normalizeEnvLines(req.EnvLines)
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+
+	// With isolation on, ~/.claude/settings.json is owned by the isolated channel.
+	var claudeSettingsSources []string
+	if isolated {
+		sources, claudeSettingsSources = splitClaudeSettingsSources(sources)
+	}
+
+	// Snapshot names of preserved sources are reserved so new ones never collide.
+	reservedRel := map[string]bool{}
+	for _, source := range sources {
+		if prev, ok := existingBySource[source]; ok {
+			reservedRel[prev.BackupPath] = true
+		}
+	}
+
+	var newSources []agentConfigSource
+	usedRel := map[string]bool{}
+	for index, source := range sources {
+		if prev, ok := existingBySource[source]; ok {
+			// Keep existing snapshot file.
+			newSources = append(newSources, prev)
+			usedRel[prev.BackupPath] = true
+			continue
+		}
+		base := filepath.Base(source)
+		rel := filepath.ToSlash(filepath.Join(id, fmt.Sprintf("%03d-%s", index+1, base)))
+		for seq := index + 1; reservedRel[rel] || usedRel[rel]; seq++ {
+			rel = filepath.ToSlash(filepath.Join(id, fmt.Sprintf("%03d-%s", seq+1, base)))
+		}
+		dst := filepath.Join(configRoot, filepath.FromSlash(rel))
+		if err := copyFile(source, dst); err != nil {
+			return agentConfigManifestEntry{}, err
+		}
+		newSources = append(newSources, agentConfigSource{SourcePath: source, BackupPath: rel})
+		usedRel[rel] = true
+	}
+	// Remove orphaned snapshot files (except claude-settings.json).
+	if entries, err := os.ReadDir(backupDir); err == nil {
+		for _, ent := range entries {
+			if ent.IsDir() {
+				continue
+			}
+			name := ent.Name()
+			if name == claudeSettingsSnapshotRelName {
+				continue
+			}
+			rel := filepath.ToSlash(filepath.Join(id, name))
+			if !usedRel[rel] {
+				_ = os.Remove(filepath.Join(backupDir, name))
+			}
+		}
+	}
+
+	entry.Sources = newSources
+	entry.UpdatedAt = time.Now().Format(time.RFC3339)
+	entry.IsolatedClaudeSettings = isolated
+	if isolated {
+		path, err := resolveClaudeSettingsPath(id, firstNonEmpty(req.ClaudeSettingsPath, entry.ClaudeSettingsPath))
+		if err != nil {
+			return agentConfigManifestEntry{}, err
+		}
+		entry.ClaudeSettingsPath = path
+		snap := filepath.Join(backupDir, claudeSettingsSnapshotRelName)
+		if _, err := os.Stat(snap); os.IsNotExist(err) {
+			// Seed from a settings path the caller listed, else start empty.
+			seed := []byte("{}\n")
+			for _, source := range claudeSettingsSources {
+				if data, err := os.ReadFile(source); err == nil && int64(len(data)) <= agentConfigMaxFileBytes {
+					seed = data
+					break
+				}
+			}
+			if err := writeFileAtomic(snap, seed, 0o600); err != nil {
+				return agentConfigManifestEntry{}, err
+			}
+		}
+	} else {
+		entry.ClaudeSettingsPath = ""
+	}
+
+	if len(entry.Sources) == 0 && len(envLines) == 0 && !entry.IsolatedClaudeSettings {
+		return agentConfigManifestEntry{}, errors.New("config source or environment variables required")
+	}
+
+	envMap, err := readAgentEnvBackups()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	if len(envLines) > 0 {
+		envMap[id] = envLines
+		entry.EnvKeys = envKeys
+	} else {
+		delete(envMap, id)
+		entry.EnvKeys = nil
+	}
+	if err := writeAgentEnvBackups(envMap); err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	if err := updateAgentConfigDefaults(entry.Agent, sources, envKeys); err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	manifest[index] = entry
+	if err := writeAgentConfigManifest(manifest); err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	return entry, nil
+}
+
 func deleteAgentConfigBackup(id string) ([]agentConfigManifestEntry, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -279,9 +694,11 @@ func deleteAgentConfigBackup(id string) ([]agentConfigManifestEntry, error) {
 	}
 	next := make([]agentConfigManifestEntry, 0, len(manifest))
 	found := false
+	var removed agentConfigManifestEntry
 	for _, item := range manifest {
 		if item.ID == id {
 			found = true
+			removed = item
 			continue
 		}
 		next = append(next, item)
@@ -298,6 +715,9 @@ func deleteAgentConfigBackup(id string) ([]agentConfigManifestEntry, error) {
 	}
 	if err := os.RemoveAll(filepath.Join(configRoot, id)); err != nil {
 		return nil, apperr.Wrap("remove", filepath.Join(configRoot, id), err)
+	}
+	if removed.ClaudeSettingsPath != "" {
+		_ = os.Remove(removed.ClaudeSettingsPath)
 	}
 	envBackups, err := readAgentEnvBackups()
 	if err != nil {
@@ -331,11 +751,22 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	if entry.ID == "" {
 		return agentConfigManifestEntry{}, false, errors.New("backup not found")
 	}
-	if len(entry.Sources) == 0 && len(entry.EnvKeys) == 0 {
+	hasClaudeSnap := false
+	if entry.IsolatedClaudeSettings {
+		if root, err := agentConfigRootDir(); err == nil {
+			if _, err := os.Stat(filepath.Join(root, entry.ID, claudeSettingsSnapshotRelName)); err == nil {
+				hasClaudeSnap = true
+			}
+		}
+	}
+	if len(entry.Sources) == 0 && len(entry.EnvKeys) == 0 && !hasClaudeSnap {
 		return agentConfigManifestEntry{}, false, errors.New("backup has no config content")
 	}
 	exists := false
 	for _, source := range entry.Sources {
+		if entry.IsolatedClaudeSettings && isClaudeSettingsSourcePath(source.SourcePath) {
+			continue
+		}
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
@@ -355,6 +786,11 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		return agentConfigManifestEntry{}, false, err
 	}
 	for _, source := range entry.Sources {
+		// Legacy entries may still list ~/.claude/settings.json as a regular source.
+		// With isolation on, that file belongs to the isolated channel below.
+		if entry.IsolatedClaudeSettings && isClaudeSettingsSourcePath(source.SourcePath) {
+			continue
+		}
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
@@ -362,6 +798,32 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		if err := copyFile(filepath.Join(configRoot, filepath.FromSlash(source.BackupPath)), sourcePath); err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
+	}
+	// Isolated Claude settings: restore snapshot to P only (never user ~/.claude/settings.json).
+	if entry.IsolatedClaudeSettings {
+		snap := filepath.Join(configRoot, entry.ID, claudeSettingsSnapshotRelName)
+		p := strings.TrimSpace(entry.ClaudeSettingsPath)
+		if p == "" {
+			resolved, err := resolveClaudeSettingsPath(entry.ID, "")
+			if err != nil {
+				return agentConfigManifestEntry{}, false, err
+			}
+			p = resolved
+		}
+		if _, err := os.Stat(snap); err == nil {
+			if err := copyFile(snap, p); err != nil {
+				return agentConfigManifestEntry{}, false, err
+			}
+		}
+		if app != nil && app.GetPreferences() != nil {
+			if err := app.GetPreferences().UpdateAgentClaudeSettingsPath(entry.Agent, p); err != nil {
+				return agentConfigManifestEntry{}, false, err
+			}
+		}
+		applyRuntimeClaudeSettingsPath(app, entry.Agent, p)
+	} else if isClaudeAgentName(entry.Agent) && app != nil && app.GetPreferences() != nil {
+		_ = app.GetPreferences().UpdateAgentClaudeSettingsPath(entry.Agent, "")
+		applyRuntimeClaudeSettingsPath(app, entry.Agent, "")
 	}
 	var env map[string]string
 	if len(entry.EnvKeys) > 0 {
@@ -422,6 +884,25 @@ func restartAgent(agentName string, app *AppContext) error {
 	app.GetAgentPool().KillAgentProcess(agentName, 0)
 	triggerAgentConfigSwitchProbe(app, agentName)
 	return nil
+}
+
+// applyRuntimeClaudeSettingsPath pushes the isolated settings path into the
+// live pool and prober. The pool covers real sessions; the prober covers the
+// probe sessions that populate the agent's model list.
+func applyRuntimeClaudeSettingsPath(app *AppContext, agentName, settingsPath string) {
+	if app == nil {
+		return
+	}
+	if pool := app.GetAgentPool(); pool != nil {
+		if err := pool.SetAgentClaudeSettingsPath(agentName, settingsPath); err != nil {
+			log.Printf("[agent-config] pool_settings_path.error agent=%s err=%v", agentName, err)
+		}
+	}
+	if prober := app.GetProber(); prober != nil {
+		if err := prober.SetAgentClaudeSettingsPath(agentName, settingsPath); err != nil {
+			log.Printf("[agent-config] prober_settings_path.error agent=%s err=%v", agentName, err)
+		}
+	}
 }
 
 func triggerAgentConfigSwitchProbe(app *AppContext, agentName string) {
@@ -770,4 +1251,269 @@ func agentEnvPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, "agents-env.json"), nil
+}
+
+var errAgentConfigFileTooLarge = errors.New("config file exceeds size limit")
+
+func isClaudeAgentName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude", "claudecode", "claude-code":
+		return true
+	default:
+		return false
+	}
+}
+
+// isClaudeSettingsSourcePath reports whether a config source path points at a
+// Claude settings.json under a .claude directory. When a backup uses isolated
+// Claude settings, such a path is owned by the isolated channel and must never
+// be restored back onto the user's file.
+func isClaudeSettingsSourcePath(path string) bool {
+	clean := filepath.Clean(strings.TrimSpace(path))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if !strings.EqualFold(filepath.Base(clean), "settings.json") {
+		return false
+	}
+	return strings.EqualFold(filepath.Base(filepath.Dir(clean)), ".claude")
+}
+
+// splitClaudeSettingsSources partitions sources into regular ones and Claude
+// settings ones, preserving order.
+func splitClaudeSettingsSources(sources []string) (regular []string, claudeSettings []string) {
+	for _, source := range sources {
+		if isClaudeSettingsSourcePath(source) {
+			claudeSettings = append(claudeSettings, source)
+			continue
+		}
+		regular = append(regular, source)
+	}
+	return regular, claudeSettings
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func claudeSettingsRootDir() (string, error) {
+	configDir, err := configpkg.MindFSConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "claude-settings"), nil
+}
+
+func resolveClaudeSettingsPath(backupID, requested string) (string, error) {
+	root, err := claudeSettingsRootDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", apperr.Wrap("mkdir", root, err)
+	}
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return filepath.Join(root, backupID+".json"), nil
+	}
+	abs, err := expandUserPath(requested)
+	if err != nil {
+		return "", err
+	}
+	abs, err = filepath.Abs(abs)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("claude_settings_path must be under %s", root)
+	}
+	return abs, nil
+}
+
+// normalizeFileSourcesAllowMissing is like normalizeFileSources but allows paths
+// that only exist as in-memory file_contents (not yet on disk).
+func normalizeFileSourcesAllowMissing(input []string, contentBySource map[string]string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range input {
+		path := strings.TrimSpace(item)
+		if path == "" {
+			continue
+		}
+		path, err := expandUserPath(path)
+		if err != nil {
+			return nil, err
+		}
+		if seen[path] {
+			continue
+		}
+		if _, hasContent := contentBySource[path]; hasContent {
+			seen[path] = true
+			out = append(out, path)
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, apperr.Wrap("stat", path, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("config source is a directory: %s", path)
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out, nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return apperr.Wrap("mkdir", filepath.Dir(path), err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return apperr.Wrap("write", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if retryErr := os.Rename(tmp, path); retryErr != nil {
+			return apperr.Wrap("rename", path, err)
+		}
+	}
+	return nil
+}
+
+func findAgentConfigBackup(id string) (agentConfigManifestEntry, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return agentConfigManifestEntry{}, errors.New("backup id required")
+	}
+	manifest, err := readAgentConfigManifest()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	for _, item := range manifest {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return agentConfigManifestEntry{}, errors.New("backup not found")
+}
+
+func resolveBackupFileAbs(id, backupPath, kind string) (abs string, rel string, err error) {
+	id = strings.TrimSpace(id)
+	kind = strings.TrimSpace(kind)
+	backupPath = strings.TrimSpace(backupPath)
+	if id == "" {
+		return "", "", errors.New("backup id required")
+	}
+	if _, err := findAgentConfigBackup(id); err != nil {
+		return "", "", err
+	}
+	configRoot, err := agentConfigRootDir()
+	if err != nil {
+		return "", "", err
+	}
+	if kind == "claude_settings" {
+		rel = filepath.ToSlash(filepath.Join(id, claudeSettingsSnapshotRelName))
+		abs = filepath.Join(configRoot, id, claudeSettingsSnapshotRelName)
+		return abs, rel, nil
+	}
+	if backupPath == "" {
+		return "", "", errors.New("backup_path required")
+	}
+	// Accept either "id/file" or "file" relative forms.
+	clean := filepath.Clean(filepath.FromSlash(backupPath))
+	if !strings.HasPrefix(clean, id+string(os.PathSeparator)) && clean != id {
+		clean = filepath.Join(id, clean)
+	}
+	abs = filepath.Join(configRoot, clean)
+	abs, err = filepath.Abs(abs)
+	if err != nil {
+		return "", "", err
+	}
+	rootAbs, err := filepath.Abs(filepath.Join(configRoot, id))
+	if err != nil {
+		return "", "", err
+	}
+	relToID, err := filepath.Rel(rootAbs, abs)
+	if err != nil || strings.HasPrefix(relToID, "..") {
+		return "", "", errors.New("backup_path escapes backup directory")
+	}
+	return abs, filepath.ToSlash(filepath.Join(id, relToID)), nil
+}
+
+func readAgentConfigBackupFile(id, backupPath, kind string) (content string, rel string, err error) {
+	abs, rel, err := resolveBackupFileAbs(id, backupPath, kind)
+	if err != nil {
+		return "", "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", "", apperr.Wrap("stat", abs, err)
+	}
+	if info.IsDir() {
+		return "", "", fmt.Errorf("not a file: %s", abs)
+	}
+	if info.Size() > agentConfigMaxFileBytes {
+		return "", "", errAgentConfigFileTooLarge
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", "", apperr.Wrap("read", abs, err)
+	}
+	return string(data), rel, nil
+}
+
+func writeAgentConfigBackupFile(id, backupPath, kind, content string) (rel string, err error) {
+	abs, rel, err := resolveBackupFileAbs(id, backupPath, kind)
+	if err != nil {
+		return "", err
+	}
+	if err := writeFileAtomic(abs, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	// Touch manifest updatedAt.
+	manifest, err := readAgentConfigManifest()
+	if err != nil {
+		return rel, nil
+	}
+	for i := range manifest {
+		if manifest[i].ID == strings.TrimSpace(id) {
+			manifest[i].UpdatedAt = time.Now().Format(time.RFC3339)
+			_ = writeAgentConfigManifest(manifest)
+			break
+		}
+	}
+	return rel, nil
+}
+
+func previewAgentConfigSourceFile(path string) (abs string, content string, err error) {
+	abs, err = expandUserPath(path)
+	if err != nil {
+		return "", "", err
+	}
+	if abs == "" {
+		return "", "", errors.New("path required")
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", "", apperr.Wrap("stat", abs, err)
+	}
+	if info.IsDir() {
+		return "", "", fmt.Errorf("path is a directory: %s", abs)
+	}
+	if info.Size() > agentConfigMaxFileBytes {
+		return "", "", errAgentConfigFileTooLarge
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", "", apperr.Wrap("read", abs, err)
+	}
+	return abs, string(data), nil
 }

@@ -115,6 +115,8 @@ type OpenSessionInput struct {
 	AgentSessionID string
 	AgentCtxSeq    int
 	ForkPoint      ResolveForkPointOutput
+	// SettingsPath is Claude-only: explicit settings.json for the SDK.
+	SettingsPath string
 }
 
 type RuntimeDefaults struct {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -162,6 +163,56 @@ func TestPoolUpdateConfigAppliesRuntimeEnvWithoutFreezingHostedFields(t *testing
 	}
 	if hostedOnly.Command != "hosted-only-v2" || hostedOnly.Brief != "hosted only v2" {
 		t.Fatalf("hosted update was frozen: %+v", hostedOnly)
+	}
+}
+
+// Probes open sessions through GetOrCreate without an explicit SettingsPath.
+// Without the definition-level fallback they would read the user's own
+// ~/.claude/settings.json, so the reported model list would not match the
+// selected config backup.
+func TestPoolAgentClaudeSettingsPathFallsBackForProbes(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	if err := pool.SetAgentClaudeSettingsPath("claude", `C:\iso\claude-cpa.json`); err != nil {
+		t.Fatalf("SetAgentClaudeSettingsPath: %v", err)
+	}
+	def, ok := pool.Config().GetAgent("claude")
+	if !ok {
+		t.Fatal("expected claude agent")
+	}
+	if def.ClaudeSettingsPath != `C:\iso\claude-cpa.json` {
+		t.Fatalf("settings path not applied: %q", def.ClaudeSettingsPath)
+	}
+
+	// It survives a hosted-config refresh, like runtime env does.
+	effective := pool.UpdateConfig(pool.Config())
+	if refreshed, _ := effective.GetAgent("claude"); refreshed.ClaudeSettingsPath != `C:\iso\claude-cpa.json` {
+		t.Fatalf("settings path lost after UpdateConfig: %q", refreshed.ClaudeSettingsPath)
+	}
+
+	// Clearing it removes the override so Claude falls back to its own discovery.
+	if err := pool.SetAgentClaudeSettingsPath("claude", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if cleared, _ := pool.Config().GetAgent("claude"); cleared.ClaudeSettingsPath != "" {
+		t.Fatalf("settings path not cleared: %q", cleared.ClaudeSettingsPath)
+	}
+	if cleared, _ := pool.UpdateConfig(pool.Config()).GetAgent("claude"); cleared.ClaudeSettingsPath != "" {
+		t.Fatalf("cleared settings path came back: %q", cleared.ClaudeSettingsPath)
+	}
+
+	if err := pool.SetAgentClaudeSettingsPath("nope", "x"); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+}
+
+// ClaudeSettingsPath is runtime-only and must never leak into agents.json.
+func TestDefinitionClaudeSettingsPathNotSerialized(t *testing.T) {
+	payload, err := json.Marshal(Definition{Name: "claude", ClaudeSettingsPath: `C:\iso\x.json`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "iso") {
+		t.Fatalf("settings path leaked into JSON: %s", payload)
 	}
 }
 

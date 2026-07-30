@@ -79,6 +79,12 @@ type Definition struct {
 	// Env are additional environment variables.
 	Env map[string]string `json:"env,omitempty"`
 
+	// ClaudeSettingsPath is a runtime-only override (never persisted to
+	// agents.json) pointing at the isolated Claude settings.json selected by a
+	// config backup. Sessions opened without an explicit path fall back to it,
+	// which is what lets probes see the same models as real sessions.
+	ClaudeSettingsPath string `json:"-"`
+
 	// ConfigBackup stores default inputs for config backup flows.
 	ConfigBackup ConfigBackupDefaults `json:"configBackup,omitempty"`
 

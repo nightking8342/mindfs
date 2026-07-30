@@ -95,12 +95,16 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 	}
 	agentPool := agent.NewPool(agentConfig)
 	agentProber := agent.NewProber(&agentConfig, agentPool, 5*time.Minute)
-	agentProber.Start(ctx)
-	startHostedAgentConfigLoop(ctx, relayBaseURL, agentConfig, agentPool, agentProber)
 	prefs, err := preferences.NewStore()
 	if err != nil {
 		log.Printf("[preferences] init.error err=%v", err)
 	}
+	// Restore the isolated Claude settings selected by a config backup before
+	// the first probe runs, otherwise probes report the models of the user's
+	// own ~/.claude/settings.json until the next manual switch.
+	restoreAgentClaudeSettingsPaths(agentConfig, prefs, agentPool, agentProber)
+	agentProber.Start(ctx)
+	startHostedAgentConfigLoop(ctx, relayBaseURL, agentConfig, agentPool, agentProber)
 	webPushStore, err := webpush.NewStore()
 	if err != nil {
 		log.Printf("[webpush] init.error err=%v", err)
@@ -198,6 +202,39 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 		return server.ServeTLS(listener, opts.CertFile, opts.KeyFile)
 	}
 	return server.Serve(listener)
+}
+
+// restoreAgentClaudeSettingsPaths re-applies the isolated Claude settings path
+// recorded in preferences to the live pool and prober at startup.
+func restoreAgentClaudeSettingsPaths(cfg agent.Config, prefs *preferences.Store, pool *agent.Pool, prober *agent.Prober) {
+	if prefs == nil {
+		return
+	}
+	for _, def := range cfg.Agents {
+		name := strings.TrimSpace(def.Name)
+		if name == "" {
+			continue
+		}
+		settingsPath := strings.TrimSpace(prefs.AgentClaudeSettingsPath(name))
+		if settingsPath == "" {
+			continue
+		}
+		if _, err := os.Stat(settingsPath); err != nil {
+			log.Printf("[agent-config] restore_settings_path.missing agent=%s path=%s err=%v", name, settingsPath, err)
+			continue
+		}
+		if pool != nil {
+			if err := pool.SetAgentClaudeSettingsPath(name, settingsPath); err != nil {
+				log.Printf("[agent-config] restore_settings_path.pool_error agent=%s err=%v", name, err)
+			}
+		}
+		if prober != nil {
+			if err := prober.SetAgentClaudeSettingsPath(name, settingsPath); err != nil {
+				log.Printf("[agent-config] restore_settings_path.prober_error agent=%s err=%v", name, err)
+			}
+		}
+		log.Printf("[agent-config] restore_settings_path.applied agent=%s path=%s", name, settingsPath)
+	}
 }
 
 func startHostedAgentConfigLoop(ctx context.Context, relayBaseURL string, localConfig agent.Config, pool *agent.Pool, prober *agent.Prober) {

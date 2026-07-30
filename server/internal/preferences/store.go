@@ -29,6 +29,9 @@ type AgentDefaults struct {
 	Effort              string               `json:"effort,omitempty"`
 	FastService         string               `json:"fast_service,omitempty"`
 	LastConfigSelection *LastConfigSelection `json:"last_config_selection,omitempty"`
+	// ClaudeSettingsPath is the isolated settings.json used by MindFS Claude sessions
+	// (WithSettingsPath). Empty means default Claude settings discovery.
+	ClaudeSettingsPath string `json:"claude_settings_path,omitempty"`
 }
 
 type LastConfigSelection struct {
@@ -138,6 +141,45 @@ func (s *Store) UpdateAgentLastConfigSelection(agentName string, selection LastC
 	next.LastConfigSelection = &selection
 	s.data.Agents[agentName] = next
 	return s.saveLocked()
+}
+
+// UpdateAgentClaudeSettingsPath stores or clears the runtime Claude settings path for an agent.
+func (s *Store) UpdateAgentClaudeSettingsPath(agentName, settingsPath string) error {
+	if s == nil {
+		return nil
+	}
+	agentName = strings.TrimSpace(agentName)
+	settingsPath = strings.TrimSpace(settingsPath)
+	if agentName == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.data.Agents == nil {
+		s.data.Agents = map[string]AgentDefaults{}
+	}
+	next := s.data.Agents[agentName]
+	if next.ClaudeSettingsPath == settingsPath {
+		return nil
+	}
+	next.ClaudeSettingsPath = settingsPath
+	s.data.Agents[agentName] = next
+	return s.saveLocked()
+}
+
+// AgentClaudeSettingsPath returns the isolated Claude settings path for an agent, if any.
+func (s *Store) AgentClaudeSettingsPath(agentName string) string {
+	if s == nil {
+		return ""
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.data.Agents[agentName].ClaudeSettingsPath)
 }
 
 func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {

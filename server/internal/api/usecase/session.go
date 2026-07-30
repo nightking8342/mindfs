@@ -497,6 +497,7 @@ func (s *Service) ForkSession(ctx context.Context, in ForkSessionInput) (ForkSes
 		FastService:    strings.TrimSpace(target.FastService),
 		PlanMode:       current.PlanMode,
 		RootPath:       root.RootPath,
+		SettingsPath:   claudeSettingsPathFor(s.Registry, agentName),
 		AgentSessionID: "",
 		AgentCtxSeq:    agentCtxSeq,
 		ForkPoint:      forkPoint,
@@ -1216,6 +1217,23 @@ func buildSwitchReadHint(exchangeLogPath string, lines int) string {
 		"Only if reading fails, output a brief error and stop.\n\n"
 }
 
+func claudeSettingsPathFor(reg Registry, agentName string) string {
+	agentName = strings.TrimSpace(agentName)
+	switch strings.ToLower(agentName) {
+	case "claude", "claudecode", "claude-code":
+	default:
+		return ""
+	}
+	if reg == nil {
+		return ""
+	}
+	prefs := reg.GetPreferences()
+	if prefs == nil {
+		return ""
+	}
+	return prefs.AgentClaudeSettingsPath(agentName)
+}
+
 func sessionNameRunner(ctx context.Context, pool *agent.Pool, rootAbs string, in SuggestSessionNameInput) (string, error) {
 	agentName := strings.TrimSpace(in.Agent)
 	if agentName == "" || pool == nil {
@@ -1767,6 +1785,7 @@ func (s *Service) ensureAgentSession(
 			}
 			return binding.AgentCtxSeq
 		}(),
+		SettingsPath: claudeSettingsPathFor(s.Registry, agentName),
 	}
 	if openInput.AgentSessionID != "" {
 		log.Printf("[session/model] open session=%s agent=%s model=%q mode=%q effort=%q fast_service=%q pool_session=%s action=resume_runtime_session agent_session_id=%s agent_ctx_seq=%d", current.Key, agentName, nextModel, nextMode, nextEffort, nextFastService, poolSessionKey, openInput.AgentSessionID, openInput.AgentCtxSeq)

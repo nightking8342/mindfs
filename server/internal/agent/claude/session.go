@@ -54,6 +54,9 @@ type OpenOptions struct {
 	ResumeSessionID string
 	ForkSessionID   string
 	ResumeMessageID string
+	// SettingsPath, when set, is passed to the Claude Agent SDK as an explicit
+	// settings.json (isolated from the user ~/.claude/settings.json).
+	SettingsPath string
 }
 
 type Runtime struct{}
@@ -83,6 +86,9 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 		claudeagent.WithAgentProgressSummaries(true),
 		claudeagent.WithForwardSubagentText(true),
 		claudeagent.WithCanUseTool(s.handleCanUseTool),
+	}
+	if settingsPath := strings.TrimSpace(opts.SettingsPath); settingsPath != "" {
+		optionList = append(optionList, claudeagent.WithSettingsPath(settingsPath))
 	}
 	if strings.TrimSpace(opts.Command) != "" {
 		optionList = append(optionList, claudeagent.WithCLIPath(opts.Command))
