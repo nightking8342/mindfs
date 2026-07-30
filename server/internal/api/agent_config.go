@@ -952,26 +952,26 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 			return rec.result(noEntry, false), err
 		}
 		env = parsedEnv
-		if err := updateAgentEnvConfig(entry.Agent, env); err != nil {
+	}
+	// Applied even when the backup has no env keys, so switching clears
+	// variables left behind by the previous config.
+	if err := updateAgentEnvConfig(entry.Agent, env); err != nil {
+		rec.fail(switchStepApplyEnv, envStart, err)
+		return rec.result(noEntry, false), err
+	}
+	if app != nil && app.GetAgentPool() != nil {
+		if err := app.GetAgentPool().SetAgentEnv(entry.Agent, env); err != nil {
 			rec.fail(switchStepApplyEnv, envStart, err)
 			return rec.result(noEntry, false), err
 		}
-		if app != nil && app.GetAgentPool() != nil {
-			if err := app.GetAgentPool().SetAgentEnv(entry.Agent, env); err != nil {
-				rec.fail(switchStepApplyEnv, envStart, err)
-				return rec.result(noEntry, false), err
-			}
-		}
-		if app != nil && app.GetProber() != nil {
-			if err := app.GetProber().SetAgentEnv(entry.Agent, env); err != nil {
-				rec.fail(switchStepApplyEnv, envStart, err)
-				return rec.result(noEntry, false), err
-			}
-		}
-		rec.ok(switchStepApplyEnv, envStart, len(env), "")
-	} else {
-		rec.skip(switchStepApplyEnv)
 	}
+	if app != nil && app.GetProber() != nil {
+		if err := app.GetProber().SetAgentEnv(entry.Agent, env); err != nil {
+			rec.fail(switchStepApplyEnv, envStart, err)
+			return rec.result(noEntry, false), err
+		}
+	}
+	rec.ok(switchStepApplyEnv, envStart, len(env), "")
 
 	killStart := time.Now()
 	if app != nil && app.GetAgentPool() != nil {

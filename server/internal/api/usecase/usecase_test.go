@@ -1700,6 +1700,27 @@ func TestAppendResponseChunk(t *testing.T) {
 	}
 }
 
+func TestSendMessageUserTimestampUsesInputWhenPresent(t *testing.T) {
+	fallback := time.Date(2026, 7, 29, 10, 0, 30, 0, time.UTC)
+	actual := time.Date(2026, 7, 29, 10, 0, 0, int(123*time.Millisecond), time.FixedZone("CST", 8*60*60))
+
+	got := sendMessageUserTimestamp(SendMessageInput{UserTimestamp: actual}, fallback)
+
+	if !got.Equal(actual.UTC()) {
+		t.Fatalf("sendMessageUserTimestamp = %s, want %s", got.Format(time.RFC3339Nano), actual.UTC().Format(time.RFC3339Nano))
+	}
+}
+
+func TestSendMessageUserTimestampFallsBackToStartTime(t *testing.T) {
+	fallback := time.Date(2026, 7, 29, 10, 0, 30, 0, time.UTC)
+
+	got := sendMessageUserTimestamp(SendMessageInput{}, fallback)
+
+	if !got.Equal(fallback) {
+		t.Fatalf("sendMessageUserTimestamp = %s, want fallback %s", got.Format(time.RFC3339Nano), fallback.Format(time.RFC3339Nano))
+	}
+}
+
 func TestIsNonRecoverableAgentError(t *testing.T) {
 	testCases := []struct {
 		err  error
@@ -1718,6 +1739,39 @@ func TestIsNonRecoverableAgentError(t *testing.T) {
 		if got := isNonRecoverableAgentError(tc.err); got != tc.want {
 			t.Fatalf("isNonRecoverableAgentError(%v) = %v, want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestGetSessionContextWindowFallsBackToPersistedValue(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	current, err := manager.Create(context.Background(), session.CreateInput{
+		Type:  session.TypeChat,
+		Agent: "codex",
+		Name:  "chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	want := agenttypes.ContextWindow{
+		TotalTokens:        321,
+		ModelContextWindow: 200000,
+	}
+	if err := manager.UpdateLastContextWindow(context.Background(), current, want); err != nil {
+		t.Fatalf("update context window: %v", err)
+	}
+
+	service := Service{Registry: &commandTestRegistry{root: root, manager: manager}}
+	got, err := service.GetSessionContextWindow(context.Background(), GetSessionContextWindowInput{
+		RootID: root.ID,
+		Key:    current.Key,
+	})
+	if err != nil {
+		t.Fatalf("get context window: %v", err)
+	}
+	if got != want {
+		t.Fatalf("context window = %#v, want %#v", got, want)
 	}
 }
 

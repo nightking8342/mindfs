@@ -90,9 +90,17 @@ import {
 import { isUploadAbortError, uploadFiles, type UploadProgress } from "./services/upload";
 import {
   PluginManager,
-  loadAllPlugins,
+  loadPluginsFromSources,
+  scanPluginSources,
+  snapshotFromPluginSources,
+  type PluginSourceBundle,
   type PluginInput,
 } from "./plugins/manager";
+import {
+  isPluginSnapshotTrusted,
+  readTrustedPluginSet,
+  saveTrustedPluginSet,
+} from "./plugins/trust";
 import { appPath, appURL, isRelayNodePage } from "./services/base";
 import { copyText } from "./services/clipboard";
 import { triggerUpdate, type UpdateState } from "./services/update";
@@ -131,7 +139,7 @@ import {
   ProjectAddPopover,
   type ProjectAddMode,
 } from "./components/ProjectAddPopover";
-import { fetchAgents, type AgentStatus } from "./services/agents";
+import { fetchAgents, restartAgent, type AgentStatus } from "./services/agents";
 import { fetchCandidates, type CandidateItem } from "./services/candidates";
 import {
   createTask,
@@ -150,6 +158,7 @@ import {
   type StageTemplate,
   type TaskTemplate,
 } from "./services/tasks";
+import { mergeRelatedFileGroups, taskIdsForUpdatedSession } from "./services/taskRelatedFiles";
 import { useI18n, type MessageKey, type MessageParams } from "./i18n";
 
 // 类型定义
@@ -1499,6 +1508,7 @@ export function App({ onGoHome }: AppProps) {
   const fullUpgradeAttemptRef = useRef("");
   const pluginsLoadedByRootRef = useRef<Record<string, boolean>>({});
   const pluginsLoadingByRootRef = useRef<Record<string, Promise<void>>>({});
+  const pluginsTrustPendingByRootRef = useRef<Record<string, boolean>>({});
   const didInitRef = useRef(false);
   const relayWSAuthCheckRef = useRef(false);
   const managedRootsRequestRef = useRef<Promise<ManagedRootPayload[] | null> | null>(null);
@@ -1567,6 +1577,8 @@ export function App({ onGoHome }: AppProps) {
 	  const [taskFirstInputById, setTaskFirstInputById] = useState<Record<string, string>>({});
 	  const [taskSessionKeysById, setTaskSessionKeysById] = useState<Record<string, string[]>>({});
 	  const [taskRelatedFilesById, setTaskRelatedFilesById] = useState<Record<string, RelatedFile[]>>({});
+	  const taskDetailsByIdRef = useRef<Record<string, TaskDetail>>({});
+	  const taskSessionKeysByIdRef = useRef<Record<string, string[]>>({});
 	  const [selectedKanbanTaskId, setSelectedKanbanTaskId] = useState("");
 	  const [expandedTaskInputIds, setExpandedTaskInputIds] = useState<Set<string>>(() => new Set());
   const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["success", "fail", "cancelled"]));
@@ -1577,11 +1589,11 @@ export function App({ onGoHome }: AppProps) {
   const [taskInlineCandidateIndex, setTaskInlineCandidateIndex] = useState(0);
   const [taskInlineSaving, setTaskInlineSaving] = useState(false);
   const [taskInlineUploadProgress, setTaskInlineUploadProgress] = useState<UploadProgress | null>(null);
-  const [directoryUploadProgress, setDirectoryUploadProgress] = useState<UploadProgress | null>(null);
-  const [taskWorktreeBranches, setTaskWorktreeBranches] = useState<GitBranchesPayload>({ branches: [] });
-  const [taskWorktreeBranchesLoading, setTaskWorktreeBranchesLoading] = useState(false);
-  const [taskWorktreeBranchError, setTaskWorktreeBranchError] = useState("");
-  const [kanbanTasksLoading, setKanbanTasksLoading] = useState(false);
+	  const [directoryUploadProgress, setDirectoryUploadProgress] = useState<UploadProgress | null>(null);
+	  const [taskWorktreeBranches, setTaskWorktreeBranches] = useState<GitBranchesPayload>({ branches: [] });
+	  const [taskWorktreeBranchesLoading, setTaskWorktreeBranchesLoading] = useState(false);
+	  const [taskWorktreeBranchError, setTaskWorktreeBranchError] = useState("");
+	  const [kanbanTasksLoading, setKanbanTasksLoading] = useState(false);
   const [taskTemplateFilter, setTaskTemplateFilter] = useState("");
   const [taskTemplateActionMenuOpen, setTaskTemplateActionMenuOpen] = useState(false);
   const [taskTemplateConcurrencyOpen, setTaskTemplateConcurrencyOpen] = useState(false);
@@ -1589,8 +1601,16 @@ export function App({ onGoHome }: AppProps) {
   const taskInlineEditorRef = useRef<TokenEditorHandle | null>(null);
   const taskInlineCandidateItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const taskInlineAttachmentInputRef = useRef<HTMLInputElement | null>(null);
-  const taskInlineUploadAbortRef = useRef<AbortController | null>(null);
-  const directoryUploadAbortRef = useRef<AbortController | null>(null);
+	  const taskInlineUploadAbortRef = useRef<AbortController | null>(null);
+	  const directoryUploadAbortRef = useRef<AbortController | null>(null);
+
+	  useEffect(() => {
+	    taskDetailsByIdRef.current = taskDetailsById;
+	  }, [taskDetailsById]);
+
+	  useEffect(() => {
+	    taskSessionKeysByIdRef.current = taskSessionKeysById;
+	  }, [taskSessionKeysById]);
   const knownTaskWorktreePathsRef = useRef<Set<string>>(new Set());
   const [selectedSession, setSelectedSession] = useState<SessionItem | null>(
     null,
@@ -2421,6 +2441,10 @@ export function App({ onGoHome }: AppProps) {
     useState<AttachedFileContext | null>(null);
   const [pluginVersion, setPluginVersion] = useState(0);
   const [pluginLoading, setPluginLoading] = useState(false);
+  const [pendingPluginTrust, setPendingPluginTrust] = useState<{
+    rootId: string;
+    bundle: PluginSourceBundle;
+  } | null>(null);
   const [pluginBypass, setPluginBypass] = useState(false);
   const [pluginQuery, setPluginQuery] = useState<Record<string, string>>(
     () => readURLState().pluginQuery,
@@ -2988,6 +3012,7 @@ export function App({ onGoHome }: AppProps) {
     delete drawerOpenByRootRef.current[root];
     delete pluginsLoadedByRootRef.current[root];
     delete pluginsLoadingByRootRef.current[root];
+    delete pluginsTrustPendingByRootRef.current[root];
 
     deleteSessionRecordKeys(sessionCacheRef.current);
     deleteSessionRecordKeys(loadedSessionRef.current);
@@ -6485,6 +6510,13 @@ export function App({ onGoHome }: AppProps) {
     ],
   );
 
+  const handleRestartAgent = useCallback(async (agentName: string) => {
+    await restartAgent(agentName);
+    const items = await fetchAgents(true);
+    setAvailableAgents(items);
+    setAgentsVersion((v) => v + 1);
+  }, []);
+
   const handleCancelCurrentTurn = useCallback(
     async (sessionKey: string) => {
       const activeRoot = currentRootIdRef.current;
@@ -8214,14 +8246,26 @@ export function App({ onGoHome }: AppProps) {
     if (!rootId || pluginsLoadedByRootRef.current[rootId]) {
       return;
     }
+    if (pluginsTrustPendingByRootRef.current[rootId]) {
+      return;
+    }
     const inflight = pluginsLoadingByRootRef.current[rootId];
     if (inflight) {
       await inflight;
       return;
     }
     setPluginLoading(true);
-    const request = loadAllPlugins(rootId)
-      .then((plugins) => {
+    const request = scanPluginSources(rootId, managedRootByIdRef.current[rootId]?.root_path || rootId)
+      .then(async (bundle) => {
+        const snapshot = snapshotFromPluginSources(bundle);
+        if (bundle.plugins.length > 0 && !isPluginSnapshotTrusted(snapshot, readTrustedPluginSet(rootId))) {
+          pluginManagerRef.current.clear(rootId);
+          pluginsTrustPendingByRootRef.current[rootId] = true;
+          setPendingPluginTrust({ rootId, bundle });
+          setPluginVersion((v) => v + 1);
+          return;
+        }
+        const plugins = await loadPluginsFromSources(bundle.plugins);
         pluginManagerRef.current.set(rootId, plugins);
         pluginsLoadedByRootRef.current[rootId] = true;
         setPluginVersion((v) => v + 1);
@@ -8238,6 +8282,47 @@ export function App({ onGoHome }: AppProps) {
     pluginsLoadingByRootRef.current[rootId] = request;
     await request;
   }, []);
+
+  const handleTrustPendingPlugins = useCallback(async () => {
+    const pending = pendingPluginTrust;
+    if (!pending) return;
+    setPluginLoading(true);
+    try {
+      const snapshot = snapshotFromPluginSources(pending.bundle);
+      saveTrustedPluginSet(pending.rootId, snapshot);
+      const plugins = await loadPluginsFromSources(pending.bundle.plugins);
+      pluginManagerRef.current.set(pending.rootId, plugins);
+      pluginsLoadedByRootRef.current[pending.rootId] = true;
+      delete pluginsTrustPendingByRootRef.current[pending.rootId];
+      setPendingPluginTrust((current) => current?.rootId === pending.rootId ? null : current);
+      setPluginVersion((v) => v + 1);
+    } finally {
+      setPluginLoading(false);
+    }
+  }, [pendingPluginTrust]);
+
+  const handleDisablePendingPlugins = useCallback(() => {
+    const pending = pendingPluginTrust;
+    if (!pending) return;
+    pluginManagerRef.current.clear(pending.rootId);
+    pluginsLoadedByRootRef.current[pending.rootId] = true;
+    delete pluginsTrustPendingByRootRef.current[pending.rootId];
+    setPendingPluginTrust((current) => current?.rootId === pending.rootId ? null : current);
+    setPluginVersion((v) => v + 1);
+  }, [pendingPluginTrust]);
+
+  const invalidatePluginsForRoot = useCallback((rootId: string) => {
+    if (!rootId) return;
+    pluginManagerRef.current.clear(rootId);
+    delete pluginsLoadedByRootRef.current[rootId];
+    delete pluginsLoadingByRootRef.current[rootId];
+    delete pluginsTrustPendingByRootRef.current[rootId];
+    setPendingPluginTrust((current) => current?.rootId === rootId ? null : current);
+    setPluginVersion((v) => v + 1);
+    if (rootId === currentRootIdRef.current) {
+      void ensurePluginsLoaded(rootId).catch(() => {});
+    }
+  }, [ensurePluginsLoaded]);
 
   const pluginHandlers = useMemo(
     () => ({
@@ -8423,6 +8508,45 @@ export function App({ onGoHome }: AppProps) {
 	    ],
 	  );
 
+	  const refreshTaskRelatedFiles = useCallback(async (
+	    root: string,
+	    taskId: string,
+	    sessionKeys: string[],
+	  ) => {
+	    const keys = Array.from(new Set(
+	      sessionKeys
+	        .map((key) => String(key || "").trim())
+	        .filter(Boolean),
+	    ));
+	    if (!root || !taskId || keys.length === 0) return;
+	    const relatedFileGroups = await Promise.all(
+	      keys.map(async (sessionKey) => {
+	        const relatedFiles = await sessionService.getSessionRelatedFiles(root, sessionKey);
+	        await setCachedSessionRelatedFiles(root, sessionKey, relatedFiles);
+	        updateSessionRelatedFilesForKey(root, sessionKey, relatedFiles);
+	        return relatedFiles;
+	      }),
+	    );
+	    setTaskRelatedFilesById((prev) => ({ ...prev, [taskId]: mergeRelatedFileGroups(relatedFileGroups) }));
+	  }, [updateSessionRelatedFilesForKey]);
+
+	  const refreshTasksForRelatedSession = useCallback((root: string, sessionKey: string) => {
+	    const taskIds = taskIdsForUpdatedSession(taskSessionKeysByIdRef.current, sessionKey);
+	    taskIds.forEach((taskId) => {
+	      const detail = taskDetailsByIdRef.current[taskId];
+	      const task = detail?.task;
+	      if (!task || task.root_id !== root) return;
+	      const sessionKeys = Array.from(new Set(
+	        [...(taskSessionKeysByIdRef.current[taskId] || []), task.main_session_key]
+	          .map((key) => String(key || "").trim())
+	          .filter(Boolean),
+	      ));
+	      void refreshTaskRelatedFiles(root, taskId, sessionKeys).catch((error) => {
+	        console.error("[task.related_files] refresh from session event failed", { root, taskId, sessionKey, error });
+	      });
+	    });
+	  }, [refreshTaskRelatedFiles]);
+
 	  const handleSelectKanbanTask = useCallback((task: KanbanTask) => {
 	    const taskId = String(task.id || "");
 	    if (!taskId) return;
@@ -8434,35 +8558,11 @@ export function App({ onGoHome }: AppProps) {
 	        .filter(Boolean),
 	    ));
 	    if (!root || sessionKeys.length === 0) return;
-	    void Promise.all(
-	      sessionKeys.map(async (sessionKey) => {
-	        const relatedFiles = await sessionService.getSessionRelatedFiles(root, sessionKey);
-	        await setCachedSessionRelatedFiles(root, sessionKey, relatedFiles);
-	        updateSessionRelatedFilesForKey(root, sessionKey, relatedFiles);
-	        return relatedFiles;
-	      }),
-	    )
-	      .then((relatedFileGroups) => {
-	        const seen = new Set<string>();
-	        const merged: RelatedFile[] = [];
-	        relatedFileGroups.flat().forEach((file) => {
-	          const key = [
-	            file.root_id || "",
-	            file.repo_kind || "",
-	            file.repo_path || "",
-	            file.head || "",
-	            file.path || "",
-	          ].join("\0");
-	          if (!file.path || seen.has(key)) return;
-	          seen.add(key);
-	          merged.push(file);
-	        });
-	        setTaskRelatedFilesById((prev) => ({ ...prev, [taskId]: merged }));
-	      })
+	    void refreshTaskRelatedFiles(root, taskId, sessionKeys)
 	      .catch((error) => {
 	        console.error("[task.related_files] failed", { root, taskId, sessionKeys, error });
 	      });
-	  }, [taskSessionKeysById, updateSessionRelatedFilesForKey]);
+	  }, [refreshTaskRelatedFiles, taskSessionKeysById]);
 
 	  useEffect(() => {
     function openReplySession(detail: any) {
@@ -9245,6 +9345,14 @@ export function App({ onGoHome }: AppProps) {
       for (const path of paths) {
         invalidateFileCache(rootID, path);
       }
+      if (
+        [...paths, ...dirs].some((path) => {
+          const normalized = String(path || "").replace(/\\/g, "/").replace(/^\/+/, "");
+          return normalized === ".mindfs/plugins" || normalized.startsWith(".mindfs/plugins/");
+        })
+      ) {
+        invalidatePluginsForRoot(rootID);
+      }
 
       const currentFile = fileRef.current;
       const currentFileRoot =
@@ -9950,6 +10058,7 @@ export function App({ onGoHome }: AppProps) {
             typeof payload?.session_key === "string" ? payload.session_key : "";
           if (rootID && sessionKey) {
             void refreshSessionRelatedFiles(rootID, sessionKey);
+            refreshTasksForRelatedSession(rootID, sessionKey);
             const cachedSession =
               sessionCacheRef.current[rootSessionKey(rootID, sessionKey)];
             const parentSessionKey = String(
@@ -9957,6 +10066,7 @@ export function App({ onGoHome }: AppProps) {
             ).trim();
             if (parentSessionKey) {
               void refreshSessionRelatedFiles(rootID, parentSessionKey);
+              refreshTasksForRelatedSession(rootID, parentSessionKey);
             }
             if (payload?.related_worktree && typeof payload.related_worktree === "object") {
               updateSessionRelatedWorktreeForKey(
@@ -10086,12 +10196,14 @@ export function App({ onGoHome }: AppProps) {
     setMultiProjectSessionPending,
     refreshManagedRoots,
     handleRelayWebSocketClosed,
+    invalidatePluginsForRoot,
     refreshTreeDir,
     refreshCurrentFileContent,
     refreshGitStatus,
     refreshManagedRoots,
     updateSessionRelatedWorktreeForKey,
     updateSessionRelatedFilesForKey,
+    refreshTasksForRelatedSession,
     updateSessionAgentForKey,
     treeCacheKey,
     t,
@@ -11286,6 +11398,8 @@ export function App({ onGoHome }: AppProps) {
     gitStatusLoading || gitStatusAvailable;
   const shouldRenderGitHistoryPanel =
     gitHistoryLoading || (gitHistoryAvailable && (gitHistory?.items.length || 0) > 0);
+  const activePendingPluginTrust =
+    pendingPluginTrust && pendingPluginTrust.rootId === currentRootId ? pendingPluginTrust : null;
 	  const relatedSessionSnapshot =
 	    selectedKanbanTaskSessionSnapshot ||
 	    selectedSessionSnapshot ||
@@ -12446,6 +12560,7 @@ export function App({ onGoHome }: AppProps) {
                     const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
                     const showTaskAdvanceButton = !taskTerminal && !taskStageRunning && !taskQueued;
                     const taskStatusText = taskStatusLabel(task.status || "", t);
+                    const taskWorktreeEnabled = task.create_worktree === true;
 	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
 	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
 	                    const showStageName = isAllTaskTemplateFilter ? column.name === t("task.column.running") : Boolean(taskStageName);
@@ -12522,7 +12637,15 @@ export function App({ onGoHome }: AppProps) {
 	                                  </button>
 	                                ) : null}
 	                              </>
-	                            ) : null}
+                            ) : null}
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
                           </div>
                         ) : null}
                         <div
@@ -12548,6 +12671,16 @@ export function App({ onGoHome }: AppProps) {
                                 : {}),
                             }}
                           >
+                            {!isAllTaskTemplateFilter ? (
+                              <span
+                                title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                                aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                                style={{ ...taskWorktreeTagStyle(taskWorktreeEnabled), float: "right", marginLeft: "6px" }}
+                              >
+                                {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                                worktree
+                              </span>
+                            ) : null}
                             {!isAllTaskTemplateFilter && taskNumberLabel ? (
                               <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
                             ) : null}
@@ -12742,7 +12875,108 @@ export function App({ onGoHome }: AppProps) {
       )}
     </div>
   ) : null;
-  if (gitDiff) {
+  if (activePendingPluginTrust) {
+    workspaceView = (
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 24,
+          background: "var(--mindfs-main-bg, transparent)",
+        }}
+      >
+        <section
+          style={{
+            width: "min(720px, 100%)",
+            border: "1px solid var(--border-color)",
+            borderRadius: 8,
+            background: "var(--mindfs-panel-bg, var(--bg-primary))",
+            padding: 20,
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ModeIcon type="plugin" size={18} />
+            <strong style={{ fontSize: 15, color: "var(--text-primary)" }}>
+              {t("plugin.trustTitle")}
+            </strong>
+          </div>
+          <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.55 }}>
+            {t("plugin.trustRisk")}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+            <div>{t("plugin.trustRoot", { path: activePendingPluginTrust.bundle.rootPath })}</div>
+            <div>{t("plugin.trustCount", { count: activePendingPluginTrust.bundle.plugins.length })}</div>
+          </div>
+          <div
+            style={{
+              border: "1px solid var(--border-color)",
+              borderRadius: 6,
+              overflow: "hidden",
+            }}
+          >
+            {activePendingPluginTrust.bundle.plugins.map((plugin) => (
+              <div
+                key={plugin.path}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  gap: 12,
+                  padding: "8px 10px",
+                  borderBottom: "1px solid var(--border-color)",
+                  fontSize: 12,
+                }}
+              >
+                <span style={{ color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {plugin.path}
+                </span>
+                <span style={{ color: "var(--text-secondary)", fontFamily: "monospace" }}>
+                  {plugin.sha256.slice(0, 12)}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button
+              type="button"
+              onClick={handleDisablePendingPlugins}
+              style={{
+                border: "1px solid var(--border-color)",
+                background: "transparent",
+                borderRadius: 6,
+                padding: "6px 10px",
+                cursor: "pointer",
+                color: "var(--text-secondary)",
+              }}
+            >
+              {t("plugin.trustDisable")}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void handleTrustPendingPlugins();
+              }}
+              style={{
+                border: "1px solid var(--accent-color)",
+                background: "var(--accent-color)",
+                borderRadius: 6,
+                padding: "6px 10px",
+                cursor: "pointer",
+                color: "var(--accent-foreground, #fff)",
+              }}
+            >
+              {pluginLoading ? t("plugin.loading") : t("plugin.trustAllow")}
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  } else if (gitDiff) {
     workspaceView = (
       <GitDiffViewer
         diff={gitDiff}
@@ -13747,6 +13981,7 @@ export function App({ onGoHome }: AppProps) {
             multiProjectSessionsEnabled={multiProjectSessionsEnabled}
             onMultiProjectSessionsChange={setMultiProjectSessionsEnabled}
             onRunAgentLifecycleCommand={handleRunAgentLifecycleCommand}
+            onRestartAgent={handleRestartAgent}
             onGoHome={onGoHome}
           />
         }
@@ -14673,6 +14908,25 @@ function TaskSessionErrorIcon() {
   );
 }
 
+function NoWorktreeIcon() {
+  return (
+    <svg
+      width="8"
+      height="8"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M7 17L17 7" />
+    </svg>
+  );
+}
+
 function DeleteIcon() {
   return (
     <svg
@@ -14742,6 +14996,24 @@ function taskAuxBadgeStyle(attention = false): React.CSSProperties {
     background: attention ? "rgba(239, 68, 68, 0.10)" : "transparent",
     color: "var(--text-secondary)",
     animation: attention ? "mindfs-task-ask-user-pulse 2.2s ease-in-out infinite" : "none",
+  };
+}
+
+function taskWorktreeTagStyle(enabled: boolean): React.CSSProperties {
+  return {
+    flex: "0 0 auto",
+    marginLeft: "auto",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "1px",
+    border: enabled ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid rgba(217, 119, 6, 0.28)",
+    borderRadius: "4px",
+    background: enabled ? "rgba(22, 163, 74, 0.08)" : "rgba(217, 119, 6, 0.08)",
+    color: enabled ? "#15803d" : "#b45309",
+    fontSize: "9px",
+    fontWeight: 800,
+    lineHeight: "12px",
+    padding: enabled ? "0 4px" : "0 3px 0 2px",
   };
 }
 
