@@ -55,6 +55,7 @@ type StreamEvent struct {
 
 type sessionMessageJob struct {
 	RootID          string
+	RuntimeRootPath string
 	Key             string
 	RequestID       string
 	SessionType     string
@@ -373,6 +374,7 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 				"type":                sess.Type,
 				"parent_session_key":  sess.ParentSessionKey,
 				"parent_tool_call_id": sess.ParentToolCallID,
+				"source":              sess.Source,
 				"task_id":             sess.TaskID,
 				"name":                sess.Name,
 				"model":               sess.Model,
@@ -381,6 +383,7 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 				"fast_service":        session.InferFastServiceFromSession(sess),
 				"plan_mode":           sess.PlanMode,
 				"related_worktree":    sess.RelatedWorktree,
+				"pinned_at":           sess.PinnedAt,
 				"updated_at":          sess.UpdatedAt,
 			},
 		},
@@ -561,6 +564,9 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
 	shell := getString(req.Payload, "shell")
 	terminalCols := getInt(req.Payload, "terminal_cols")
+	createWorktree := getBool(req.Payload, "create_worktree")
+	worktreeBranchMode := getString(req.Payload, "worktree_branch_mode")
+	worktreeBranch := getString(req.Payload, "worktree_branch")
 	if content == "" || sessionType == "" || (agentName == "" && sessionType != session.TypeCommand) {
 		h.sendWSError(conn, clientID, req.ID, "invalid_request", "content, type and agent required")
 		return
@@ -568,19 +574,28 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 
 	uc := &usecase.Service{Registry: h.AppContext}
 	streamHub := h.AppContext.GetSessionStreamHub()
+	userTimestamp := time.Now().UTC()
 	if requestID != "" {
-		if !h.reserveClientRequest(requestID) {
-			h.sendWSAccepted(conn, clientID, requestID, rootID, key)
+		reservedAt, reserved := h.reserveClientRequest(requestID)
+		userTimestamp = reservedAt
+		if !reserved {
+			h.sendWSAcceptedAt(conn, clientID, requestID, rootID, key, userTimestamp)
 			return
 		}
 	}
 	sessionName := ""
+	runtimeRootPath := ""
 	if key == "" {
 		sessionName = usecase.BuildFallbackSessionName(content)
+		sessionSource := ""
+		if createWorktree && sessionType != session.TypeCommand {
+			sessionSource = "worktree"
+		}
 		created, err := uc.CreateSession(ctx, usecase.CreateSessionInput{
 			RootID: rootID,
 			Input: session.CreateInput{
 				Type:     sessionType,
+				Source:   sessionSource,
 				Agent:    agentName,
 				Model:    model,
 				Shell:    shell,
@@ -593,6 +608,34 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 			return
 		}
 		key = created.Key
+		if createWorktree && sessionType != session.TypeCommand {
+			wt, worktreeErr := h.AppContext.CreateSessionWorktree(ctx, rootID, worktreeBranchMode, worktreeBranch)
+			if worktreeErr != nil {
+				if manager, managerErr := h.AppContext.GetSessionManager(rootID); managerErr == nil {
+					_ = manager.Delete(ctx, created.Key)
+				}
+				h.sendWSError(conn, clientID, req.ID, "session.create_failed", worktreeErr.Error())
+				return
+			}
+			runtimeRootPath = wt.Path
+			if manager, managerErr := h.AppContext.GetSessionManager(rootID); managerErr == nil {
+				branch := worktreeBranch
+				head := ""
+				if root, rootErr := h.AppContext.GetRoot(rootID); rootErr == nil {
+					if match, ok := resolveRelatedWorktree(ctx, root, wt.Path); ok {
+						branch = match.Branch
+						head = match.Head
+					}
+				}
+				if _, recordErr := manager.RecordRelatedWorktree(ctx, created.Key, rootID, wt.Path, branch, head); recordErr != nil {
+					h.sendWSError(conn, clientID, req.ID, "session.create_failed", recordErr.Error())
+					return
+				}
+				if updated, getErr := manager.Get(ctx, created.Key, 0); getErr == nil && updated != nil {
+					created = updated
+				}
+			}
+		}
 		h.broadcastSessionMetaUpdated(rootID, created)
 		if sessionType != session.TypeCommand {
 			go func(rootID, sessionKey, agentName, firstMessage string) {
@@ -619,6 +662,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	} else if current, err := uc.GetSession(ctx, usecase.GetSessionInput{RootID: rootID, Key: key}); err == nil && current != nil {
 		sessionName = current.Name
 		planMode = current.PlanMode
+		runtimeRootPath = sessionRuntimeRootPath(current)
 		if planRequested && !current.PlanMode {
 			if manager, managerErr := h.AppContext.GetSessionManager(rootID); managerErr == nil {
 				if updateErr := manager.UpdatePlanMode(ctx, current, true); updateErr != nil {
@@ -639,7 +683,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		}
 	}
 	if requestID != "" {
-		h.sendWSAccepted(conn, clientID, requestID, rootID, key)
+		h.sendWSAcceptedAt(conn, clientID, requestID, rootID, key, userTimestamp)
 	}
 	if h.AppContext != nil {
 		streamHub.BindSessionClient(key, clientID)
@@ -653,10 +697,11 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		FastService: fastService,
 		PlanMode:    planMode,
 		Content:     content,
-		Timestamp:   time.Now().UTC(),
+		Timestamp:   userTimestamp,
 	}
 	job := sessionMessageJob{
 		RootID:          rootID,
+		RuntimeRootPath: runtimeRootPath,
 		Key:             key,
 		RequestID:       requestID,
 		SessionType:     sessionType,
@@ -710,7 +755,8 @@ func (h *WSHandler) handleSessionSlashCommandRun(ctx context.Context, conn *webs
 		return
 	}
 	if requestID != "" {
-		if !h.reserveClientRequest(requestID) {
+		_, reserved := h.reserveClientRequest(requestID)
+		if !reserved {
 			h.sendWSAccepted(conn, clientID, requestID, rootID, key)
 			return
 		}
@@ -845,22 +891,23 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 	}
 
 	err := uc.SendMessage(msgCtx, usecase.SendMessageInput{
-		RootID:        rootID,
-		Key:           key,
-		Agent:         job.User.Agent,
-		Model:         job.User.Model,
-		Mode:          job.User.Mode,
-		Effort:        job.User.Effort,
-		FastService:   job.User.FastService,
-		PlanMode:      &job.User.PlanMode,
-		Shell:         job.Shell,
-		TerminalCols:  job.TerminalCols,
-		Content:       job.User.Content,
-		UserTimestamp: job.User.Timestamp,
-		ClientCtx:     job.ClientCtx,
-		OnStart: func() {
+		RootID:          rootID,
+		RuntimeRootPath: job.RuntimeRootPath,
+		Key:             key,
+		Agent:           job.User.Agent,
+		Model:           job.User.Model,
+		Mode:            job.User.Mode,
+		Effort:          job.User.Effort,
+		FastService:     job.User.FastService,
+		PlanMode:        &job.User.PlanMode,
+		Shell:           job.Shell,
+		TerminalCols:    job.TerminalCols,
+		Content:         job.User.Content,
+		UserTimestamp:   job.User.Timestamp,
+		ClientCtx:       job.ClientCtx,
+		OnStart: func(start usecase.MessageStart) {
 			h.AppContext.ClearTaskAuxFlagsForSession(rootID, key)
-			streamHub.BroadcastSessionUserMessageAt(rootID, key, job.SessionType, job.SessionName, job.User.Agent, job.User.Model, job.User.Mode, job.User.Effort, job.User.FastService, job.User.PlanMode, job.User.Content, job.User.Timestamp, job.ExcludeClientID, job.Queued)
+			streamHub.BroadcastSessionUserMessageAt(rootID, key, job.SessionType, job.SessionName, job.User.Agent, start.Model, start.Mode, start.Effort, start.FastService, job.User.PlanMode, job.User.Content, job.User.Timestamp, job.ExcludeClientID, job.Queued)
 		},
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
@@ -923,22 +970,35 @@ func (h *WSHandler) startNextQueuedSessionMessage(rootID, key string) {
 	sessionType := session.TypeChat
 	sessionName := ""
 	shell := ""
+	runtimeRootPath := ""
 	uc := &usecase.Service{Registry: h.AppContext}
 	if current, err := uc.GetSession(context.Background(), usecase.GetSessionInput{RootID: rootID, Key: key}); err == nil && current != nil {
 		sessionType = current.Type
 		sessionName = current.Name
 		shell = current.Shell
+		runtimeRootPath = sessionRuntimeRootPath(current)
 	}
 	go h.runSessionMessage(sessionMessageJob{
-		RootID:      rootID,
-		Key:         key,
-		SessionType: sessionType,
-		SessionName: sessionName,
-		Shell:       shell,
-		User:        item.PendingUserMessage,
-		ClientCtx:   item.ClientCtx,
-		Queued:      true,
+		RootID:          rootID,
+		RuntimeRootPath: runtimeRootPath,
+		Key:             key,
+		SessionType:     sessionType,
+		SessionName:     sessionName,
+		Shell:           shell,
+		User:            item.PendingUserMessage,
+		ClientCtx:       item.ClientCtx,
+		Queued:          true,
 	})
+}
+
+func sessionRuntimeRootPath(current *session.Session) string {
+	if current == nil || current.RelatedWorktree == nil {
+		return ""
+	}
+	if strings.TrimSpace(current.TaskID) == "" && strings.TrimSpace(current.Source) != "worktree" {
+		return ""
+	}
+	return strings.TrimSpace(current.RelatedWorktree.Path)
 }
 
 func (h *WSHandler) handleSessionReady(clientID string, req WSRequest) {
@@ -1081,22 +1141,31 @@ func (h *WSHandler) sendE2EEError(conn *websocket.Conn, id, code string) {
 }
 
 func (h *WSHandler) sendWSAccepted(conn *websocket.Conn, clientID, requestID, rootID, sessionKey string) {
+	h.sendWSAcceptedAt(conn, clientID, requestID, rootID, sessionKey, time.Time{})
+}
+
+func (h *WSHandler) sendWSAcceptedAt(conn *websocket.Conn, clientID, requestID, rootID, sessionKey string, timestamp time.Time) {
+	payload := map[string]any{
+		"request_id":  requestID,
+		"root_id":     rootID,
+		"session_key": sessionKey,
+	}
+	if !timestamp.IsZero() {
+		payload["timestamp"] = timestamp.UTC()
+	}
 	resp := WSResponse{
-		ID:   requestID,
-		Type: "session.accepted",
-		Payload: map[string]any{
-			"request_id":  requestID,
-			"root_id":     rootID,
-			"session_key": sessionKey,
-		},
+		ID:      requestID,
+		Type:    "session.accepted",
+		Payload: payload,
 	}
 	_ = h.writeWSJSON(clientID, conn, resp)
 }
 
-func (h *WSHandler) reserveClientRequest(requestID string) bool {
+func (h *WSHandler) reserveClientRequest(requestID string) (time.Time, bool) {
 	requestID = strings.TrimSpace(requestID)
+	now := time.Now().UTC()
 	if requestID == "" {
-		return true
+		return now, true
 	}
 	h.requestMu.Lock()
 	defer h.requestMu.Unlock()
@@ -1109,11 +1178,11 @@ func (h *WSHandler) reserveClientRequest(requestID string) bool {
 			delete(h.requests, id)
 		}
 	}
-	if _, exists := h.requests[requestID]; exists {
-		return false
+	if seenAt, exists := h.requests[requestID]; exists {
+		return seenAt, false
 	}
-	h.requests[requestID] = time.Now().UTC()
-	return true
+	h.requests[requestID] = now
+	return now, true
 }
 
 func (h *WSHandler) writeWSJSON(clientID string, conn *websocket.Conn, resp WSResponse) error {

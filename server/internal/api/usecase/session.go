@@ -46,8 +46,10 @@ type ListSessionsInput struct {
 }
 
 type ListSessionsOutput struct {
-	Sessions   []*session.Session
-	TotalCount int
+	Sessions       []*session.Session
+	PinnedSessions []*session.Session
+	PinnedKeys     []string
+	TotalCount     int
 }
 
 type ListMultiRootSessionsInput struct {
@@ -59,6 +61,8 @@ type SessionRootGroup struct {
 	RootName          string
 	LatestSessionTime time.Time
 	Sessions          []*session.Session
+	PinnedSessions    []*session.Session
+	PinnedKeys        []string
 	TotalCount        int
 }
 
@@ -134,10 +138,16 @@ func (s *Service) ListSessions(ctx context.Context, in ListSessionsInput) (ListS
 			return ListSessionsOutput{}, err
 		}
 	}
-	if err := fillCommandShells(ctx, manager, items); err != nil {
+	pinnedItems, err := manager.ListPinned(ctx, session.ListOptions{TopLevelOnly: in.TopLevelOnly})
+	if err != nil {
 		return ListSessionsOutput{}, err
 	}
-	return ListSessionsOutput{Sessions: items, TotalCount: totalCount}, nil
+	pinnedKeys := pinnedSessionKeys(pinnedItems)
+	allForShells := append(append([]*session.Session{}, items...), pinnedItems...)
+	if err := fillCommandShells(ctx, manager, allForShells); err != nil {
+		return ListSessionsOutput{}, err
+	}
+	return ListSessionsOutput{Sessions: items, PinnedSessions: pinnedItems, PinnedKeys: pinnedKeys, TotalCount: totalCount}, nil
 }
 
 func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSessionsInput) (ListMultiRootSessionsOutput, error) {
@@ -169,7 +179,13 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 		if err != nil {
 			return ListMultiRootSessionsOutput{}, err
 		}
-		if err := fillCommandShells(ctx, manager, items); err != nil {
+		pinnedItems, err := manager.ListPinned(ctx, session.ListOptions{TopLevelOnly: true})
+		if err != nil {
+			return ListMultiRootSessionsOutput{}, err
+		}
+		pinnedKeys := pinnedSessionKeys(pinnedItems)
+		allForShells := append(append([]*session.Session{}, items...), pinnedItems...)
+		if err := fillCommandShells(ctx, manager, allForShells); err != nil {
 			return ListMultiRootSessionsOutput{}, err
 		}
 		latest := time.Time{}
@@ -181,6 +197,8 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 			RootName:          root.Name,
 			LatestSessionTime: latest,
 			Sessions:          items,
+			PinnedSessions:    pinnedItems,
+			PinnedKeys:        pinnedKeys,
 			TotalCount:        totalCount,
 		})
 	}
@@ -188,6 +206,17 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 		return groups[i].LatestSessionTime.After(groups[j].LatestSessionTime)
 	})
 	return ListMultiRootSessionsOutput{Groups: groups}, nil
+}
+
+func pinnedSessionKeys(items []*session.Session) []string {
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.Key) == "" {
+			continue
+		}
+		keys = append(keys, item.Key)
+	}
+	return keys
 }
 
 func (s *Service) ListChildSessions(ctx context.Context, in ListChildSessionsInput) (ListSessionsOutput, error) {
@@ -996,6 +1025,23 @@ func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*se
 	return manager.Rename(ctx, in.Key, in.Name)
 }
 
+type PinSessionInput struct {
+	RootID string
+	Key    string
+	Pinned bool
+}
+
+func (s *Service) PinSession(ctx context.Context, in PinSessionInput) (*session.Session, error) {
+	if err := s.ensureRegistry(); err != nil {
+		return nil, err
+	}
+	manager, err := s.Registry.GetSessionManager(in.RootID)
+	if err != nil {
+		return nil, err
+	}
+	return manager.SetPinned(ctx, in.Key, in.Pinned)
+}
+
 type BuildPromptInput struct {
 	Session        *session.Session
 	Manager        *session.Manager
@@ -1055,11 +1101,61 @@ type SendMessageInput struct {
 	Content                string
 	UserTimestamp          time.Time
 	ClientCtx              ClientContext
-	OnStart                func()
+	OnStart                func(MessageStart)
 	OnUpdate               func(agenttypes.Event)
 	OnSubSessionCreated    func(*session.Session)
 	OnSubSessionUpdate     func(sessionKey string, update agenttypes.Event)
 	OnAgentDefaultsChanged func(agentName string)
+}
+
+type MessageStart struct {
+	Model       string
+	Mode        string
+	Effort      string
+	FastService string
+}
+
+func applyMessageRuntimeDefaultsFromStatus(
+	in *SendMessageInput,
+	status agent.Status,
+	statusOK bool,
+) {
+	if in == nil || strings.TrimSpace(in.Model) != "" {
+		return
+	}
+	in.Model = ""
+	in.Effort = strings.TrimSpace(in.Effort)
+	in.FastService = strings.TrimSpace(in.FastService)
+	if !statusOK {
+		return
+	}
+	in.Model = strings.TrimSpace(status.DefaultModelID)
+	if in.Model == "" {
+		in.Model = strings.TrimSpace(status.CurrentModelID)
+	}
+	if in.Effort == "" {
+		in.Effort = strings.TrimSpace(status.DefaultEffort)
+	}
+	if in.FastService == "" {
+		in.FastService = strings.TrimSpace(status.DefaultFastService)
+	}
+}
+
+func (s *Service) applyMessageRuntimeDefaults(in *SendMessageInput) {
+	if in == nil || strings.TrimSpace(in.Model) != "" {
+		return
+	}
+	if s == nil || s.Registry == nil || s.Registry.GetProber() == nil {
+		applyMessageRuntimeDefaultsFromStatus(in, agent.Status{}, false)
+		return
+	}
+	status, ok := s.Registry.GetProber().GetStatus(strings.TrimSpace(in.Agent))
+	if ok {
+		if prefs := s.Registry.GetPreferences(); prefs != nil {
+			status = prefs.ApplyAgentDefaults([]agent.Status{status})[0]
+		}
+	}
+	applyMessageRuntimeDefaultsFromStatus(in, status, ok)
 }
 
 func sendMessageUserTimestamp(in SendMessageInput, fallback time.Time) time.Time {
@@ -1970,9 +2066,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	registerActiveTurn(in.RootID, in.Key, turnCancel)
 	defer unregisterActiveTurn(in.RootID, in.Key)
-	if in.OnStart != nil {
-		in.OnStart()
-	}
+	s.applyMessageRuntimeDefaults(&in)
 	manager, err := s.Registry.GetSessionManager(in.RootID)
 	if err != nil {
 		return err
@@ -1985,6 +2079,16 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		if err := manager.UpdatePlanMode(ctx, current, *in.PlanMode); err != nil {
 			return err
 		}
+	}
+	resolvedMode := resolveRuntimeMode(current, in.Mode)
+	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
+	if in.OnStart != nil {
+		in.OnStart(MessageStart{
+			Model:       in.Model,
+			Mode:        resolvedMode,
+			Effort:      in.Effort,
+			FastService: resolvedFastService,
+		})
 	}
 	if current.Type == session.TypeCommand {
 		return s.sendCommandMessage(turnCtx, in, manager, current)
@@ -2233,7 +2337,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	resolvedModel := resolveRuntimeModel(current, sess, in.Model)
 	resolvedEffort := resolveRuntimeEffort(in.Agent, current, in.Effort)
-	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
+	resolvedFastService = resolveRuntimeFastService(in.Agent, current, in.FastService)
 	if prefs := s.Registry.GetPreferences(); prefs != nil {
 		if changed, err := prefs.UpdateAgentDefaultsIfChanged(in.Agent, resolvedModel, resolvedEffort, resolvedFastService); err != nil {
 			log.Printf("[preferences] agent_defaults.update.error agent=%s err=%v", strings.TrimSpace(in.Agent), err)
@@ -2244,12 +2348,11 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 			}
 		}
 	}
+	modelDisplayName := s.resolveExchangeModelDisplayName(in.Agent, resolvedModel)
+	exchangeCtx := session.WithExchangeModelDisplayName(ctx, modelDisplayName)
 	if err := manager.UpdateModel(ctx, current, resolvedModel); err != nil {
 		return err
 	}
-	resolvedMode := resolveRuntimeMode(current, in.Mode)
-	modelDisplayName := s.resolveExchangeModelDisplayName(in.Agent, resolvedModel)
-	exchangeCtx := session.WithExchangeModelDisplayName(ctx, modelDisplayName)
 	if err := manager.AddExchangeForAgentAt(exchangeCtx, current, "user", in.Content, in.Agent, resolvedMode, resolvedEffort, resolvedFastService, userTimestamp); err != nil {
 		log.Printf("[session] persist.user.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, err)
 		return err
