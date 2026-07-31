@@ -954,7 +954,8 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		env = parsedEnv
 	}
 	// Applied even when the backup has no env keys, so switching clears
-	// variables left behind by the previous config.
+	// variables left behind by the previous config. The step is still reported
+	// as skipped in that case (spec §4.3), since there was nothing to apply.
 	if err := updateAgentEnvConfig(entry.Agent, env); err != nil {
 		rec.fail(switchStepApplyEnv, envStart, err)
 		return rec.result(noEntry, false), err
@@ -971,7 +972,11 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 			return rec.result(noEntry, false), err
 		}
 	}
-	rec.ok(switchStepApplyEnv, envStart, len(env), "")
+	if len(entry.EnvKeys) == 0 {
+		rec.skip(switchStepApplyEnv)
+	} else {
+		rec.ok(switchStepApplyEnv, envStart, len(env), "")
+	}
 
 	killStart := time.Now()
 	if app != nil && app.GetAgentPool() != nil {
@@ -1320,10 +1325,15 @@ func readAgentConfigManifest() ([]agentConfigManifestEntry, error) {
 		}
 		return nil, apperr.Wrap("read", path, err)
 	}
-	var manifest []agentConfigManifestEntry
+	// A successful write never produces an empty file: the smallest payload is
+	// "[]". An existing empty file therefore means a previous write was cut
+	// short, and reporting it as "no backups" would let the next create persist
+	// a manifest holding only the new entry, silently dropping the recorded
+	// backups while their snapshots stay on disk.
 	if len(strings.TrimSpace(string(payload))) == 0 {
-		return []agentConfigManifestEntry{}, nil
+		return nil, fmt.Errorf("agent config manifest is empty (truncated by an interrupted write): %s", path)
 	}
+	var manifest []agentConfigManifestEntry
 	if err := json.Unmarshal(payload, &manifest); err != nil {
 		return nil, err
 	}
@@ -1335,15 +1345,12 @@ func writeAgentConfigManifest(manifest []agentConfigManifestEntry) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return apperr.Wrap("mkdir", filepath.Dir(path), err)
-	}
 	payload, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
-	return apperr.Wrap("write", path, os.WriteFile(path, payload, 0o644))
+	return writeFileAtomic(path, payload, 0o644)
 }
 
 func readAgentEnvBackups() (map[string][]string, error) {
@@ -1359,7 +1366,7 @@ func readAgentEnvBackups() (map[string][]string, error) {
 		return nil, apperr.Wrap("read", path, err)
 	}
 	if len(strings.TrimSpace(string(payload))) == 0 {
-		return map[string][]string{}, nil
+		return nil, fmt.Errorf("agent env backups file is empty (truncated by an interrupted write): %s", path)
 	}
 	var out map[string][]string
 	if err := json.Unmarshal(payload, &out); err != nil {
@@ -1376,15 +1383,12 @@ func writeAgentEnvBackups(env map[string][]string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return apperr.Wrap("mkdir", filepath.Dir(path), err)
-	}
 	payload, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
-	return apperr.Wrap("write", path, os.WriteFile(path, payload, 0o644))
+	return writeFileAtomic(path, payload, 0o644)
 }
 
 func copyFile(src, dst string) error {

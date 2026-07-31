@@ -12,6 +12,10 @@ import (
 func TestSwitchAgentConfigClearsExistingEnvWhenBackupHasNoEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	// Windows resolves the config dir from %AppData%, so without this the test
+	// would read and rewrite the real user's agent config backups.
+	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	configPath := filepath.Join(home, "agents.json")
 	t.Setenv("MINDFS_AGENTS_CONFIG", configPath)
