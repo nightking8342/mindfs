@@ -18,6 +18,7 @@
 | `web/package.json` 的 `allowScripts` 字段 | 允许 esbuild 安装脚本（本地构建需要） | 我方（版本号等其余字段随上游） |
 | Android WebView 文字缩放设置与 IME 选区修复（e587493） | fork 自研功能，上游未合入 | 我方 |
 | `web/src/App.tsx` 的 `TOKEN_STATION_ENABLED` 开关 | 置 `false` 隐藏官方 Token 加油站入口并停掉其后台轮询；恢复或指向自建中转站时置 `true` | 我方（开关及三处引用；面板 JSX 本体随上游） |
+| fork UI 隔离层（`ForkShell` + `fork-theme.css`） | fork 要改 UI 布局与视觉，但上游 `App.tsx` 有 1.5 万行、布局装配在文件尾部，直接改必然每次合并都在巨型文件里解冲突。改为接管布局壳：新增 `web/src/layout/ForkShell.tsx`（实现与上游 `AppShell` 相同的五槽位接口，尺寸走 `--fork-*` CSS 变量，各区域挂 `data-fork-region` / `data-fork-viewport` 钩子）+ `web/src/styles/fork-theme.css`（视觉覆盖层，加载于 `index.css` 之后）。**上游 `layout/AppShell.tsx` 与 `index.css` 一律不改**，对上游文件的 diff 仅两行 import。`ForkShell` 内含 props 契约断言（`Equals<ForkShellProps, UpstreamShellProps>`），上游增删改 `AppShell` 的 prop 时 `npm run typecheck` 直接失败，据此同步；`?forkShell=0` 可临时回退上游 `AppShell` 用于合并后对照排查 | 我方（`web/src/layout/ForkShell.tsx`、`web/src/styles/fork-theme.css` 为 fork 独有文件；`App.tsx` 的 `import { ForkShell as AppShell }` 一行与 `main.tsx` 的 `import "./styles/fork-theme.css"` 一行。上游改 `AppShell.tsx` 内部实现时**取上游版本**（该文件仍归上游），但 `ForkShell` 不会自动继承这些改动，需按同步流程第 7 步逐条评估是否 port——尤其是移动端踩坑补丁；props 形状变化则由契约断言在 `typecheck` 阶段强制暴露） |
 | 配置备份编辑 + Claude 单独 settings（`docs/agent-config-backup-edit-spec.md`） | 备份清单可更新；快照文件读写；Claude `isolatedClaudeSettings` 切换写独立路径并用 `WithSettingsPath`，不覆盖用户 `~/.claude/settings.json` | 我方（`server/internal/api/agent_config.go` + `http.go` 路由、`preferences/store.go`、`agent/claude/session.go` + `pool.go` + `types/types.go`、`api/usecase/session.go`、`web/src/services/agentConfig.ts`、`web/src/components/FileTree.tsx` 的 `AgentConfigPopover`、两份 i18n locale） |
 | 配置切换进度展示（`docs/agent-config-switch-progress-spec.md`） | `switchAgentConfig` 返回步骤清单（失败时也带）；探活结束无条件广播 `agent.config.switched`，因为 `agent.status.changed` 会被 `Prober.statusChanged` 过滤掉 | 我方（`agent_config.go`、`appcontext.go`、`helpers.go` 的 `respondErrorWithExtra`、`agent_api_provider.go` 调用处、`App.tsx`、`FileTree.tsx`、`services/agentConfig.ts`、`services/error.ts` 的 `agent.config_switched`） |
 | Agent 配置弹层点击外部关闭 | 上游只在「选择 Agent」一步监听外部点击；fork 扩展到全部步骤（全屏文件编辑器 `file` 步骤除外，避免丢草稿） | 我方（`web/src/components/FileTree.tsx` 的 click-outside effect） |
@@ -48,7 +49,12 @@
 5. 门槛检查：`go test ./...` 和 `cd web && npm run typecheck` 全部通过。
    注意：Windows 本地跑 `go test ./...` 存在已知的环境性失败（POSIX 文件权限断言、SQLite 临时目录文件锁、部分测试会读到真实用户目录的 skills / 项目注册表），**以 CI 的 Linux 结果为权威门槛**，本地失败时先对照 CI 判断是否为环境问题。
 6. 回归扫描：`git grep a9gent.com -- ':!*.md'` 对比合并前后，确认上游新增代码没有引入绕过配置的硬编码官方地址；有则评估处理并登记。
-7. 全部通过后 push，等 CI 变绿。
+7. 布局层扫描：`git log <上次合并的 tag>..<本次 tag> --oneline -- web/src/layout/AppShell.tsx`。fork 的 `ForkShell` 接管了布局，**不会自动继承上游对 `AppShell` 的改动**，因此有输出就要逐条评估是否 port。
+   - 优先看移动端修复（`fix.*mobile` / `ios` / safe-area / IME / viewport height 这类）：`ForkShell` 里的 `--mindfs-safe-area-top`、`--mindfs-viewport-height`、`willChange`、`backfaceVisibility`、`transform: translateZ(0)` 全是上游踩坑换来的补丁，漏掉在桌面浏览器上测不出来，只会在真机上炸。
+   - 主题/配色类改动通常已被 `--fork-*` 变量吸收，确认一遍即可。
+   - 需要对照上游布局效果时，页面 URL 加 `?forkShell=0` 可临时切回上游 `AppShell` 渲染。
+   - props 形状变化不用靠人眼：`ForkShell` 内的契约断言会让 `npm run typecheck` 直接失败。
+8. 全部通过后 push，等 CI 变绿。
 
 ## 提交规范
 

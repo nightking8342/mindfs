@@ -1,0 +1,71 @@
+/*
+ * fork-theme.css —— fork 专属的视觉/布局覆盖层。
+ *
+ * 这是与上游 diff 最小的改 UI 方式：上游组件的 inline style 几乎都写成
+ * var(--x, fallback)，在这里重定义变量就能整体换肤，一行上游代码都不用碰。
+ * 加载顺序在 index.css 之后（见 main.tsx），因此同特异性下这里胜出。
+ *
+ * 规则：
+ *   - 上游文件（index.css / 各组件）一律不改，所有 fork 视觉调整写在本文件。
+ *   - --fork-* 是 fork 自建变量，被 ForkShell.tsx 读取；--mindfs-* 等是上游变量，
+ *     覆盖它们会影响全局。
+ *   - 需要压过组件 inline style 时才用 !important，并在该行注明原因。
+ */
+
+/* ============================================================
+ * 1. 布局尺寸 —— 由 ForkShell.tsx 读取
+ * ============================================================ */
+:root {
+  /* 侧栏宽度 */
+  --fork-sidebar-width: 260px;
+  --fork-sidebar-width-tablet: 200px;
+  --fork-right-width: 280px;
+  --fork-right-width-tablet: 240px;
+
+  /* 移动端抽屉 */
+  --fork-mobile-drawer-width: 75vw;
+  --fork-mobile-drawer-radius: 14px;
+
+  /* 侧栏展开/收起动画 */
+  --fork-sidebar-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 底部操作栏与安全区之间的额外间距 */
+  --fork-actionbar-gap: 12px;
+}
+
+/* ============================================================
+ * 2. 骨架配色 —— 留空即完全跟随上游主题
+ * ============================================================
+ * 可用的钩子（默认值均回落到上游变量，取消注释即生效）：
+ *   --fork-shell-bg / --fork-shell-bg-mobile
+ *   --fork-sidebar-bg / --fork-right-bg / --fork-main-bg / --fork-footer-bg
+ *   --fork-sidebar-border / --fork-right-border
+ *   --fork-mobile-drawer-bg / --fork-overlay-bg
+ */
+
+/* ============================================================
+ * 3. 按主题分支覆盖
+ * ============================================================
+ * 上游主题：默认(light) / [data-theme="dark"] / "meadow" / "moss"
+ * 示例：
+ *   :root[data-theme="dark"] { --fork-sidebar-bg: #0b1220; }
+ */
+
+/* ============================================================
+ * 4. 区域级微调 —— ForkShell 挂的结构钩子
+ * ============================================================
+ * 可选择器：
+ *   .fork-shell[data-fork-viewport="mobile|tablet|desktop"]
+ *   [data-fork-region="left|right|main|footer"]
+ *   [data-fork-region="left"][data-fork-open]   （仅展开态）
+ * 这些钩子让 CSS 能按视口/区域精准命中，不必依赖上游 class 名。
+ */
+
+/* ============================================================
+ * 5. 组件微调 —— 命中上游 .mindfs-* class
+ * ============================================================
+ * 上游稳定的 class 前缀：.mindfs-sidebar-resize-rail / .mindfs-git-* /
+ * .mindfs-ansi-output 等（定义见 src/index.css）。
+ * 组件内部大量使用 inline style，无 class 可命中的地方优先考虑走 L3
+ * （包一层 fork 组件），而不是在这里堆 !important。
+ */

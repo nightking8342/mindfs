@@ -115,7 +115,7 @@ import {
   mergeSessionItems,
 } from "./services/sessionListMerge";
 // 直接导入标准组件
-import { AppShell } from "./layout/AppShell";
+import { ForkShell as AppShell } from "./layout/ForkShell";
 import { ModeIcon } from "./components/ModeIcon";
 import { FileTree, type AgentConfigSwitchRequest } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
