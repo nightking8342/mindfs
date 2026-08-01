@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { useI18n } from "../i18n";
 import { AppShell } from "./AppShell";
+// import 即自执行：在首次渲染前把 data-scheme 写好，避免明暗闪烁
+import "../services/forkScheme";
 
 /**
  * ForkShell —— fork 自己的布局壳，接管上游 AppShell。
@@ -76,6 +78,24 @@ function useUpstreamShellFallback(): boolean {
   return fallback;
 }
 
+/**
+ * 当前主题 id。用 MutationObserver 盯 data-theme 而不是监听 appearance 事件——
+ * 属性是最终状态，事件可能被别的路径绕过（如 system 模式跟随系统切换）。
+ */
+function useThemeId(): string {
+  const [themeId, setThemeId] = useState(() =>
+    typeof document === "undefined" ? "" : document.documentElement.getAttribute("data-theme") || ""
+  );
+  useEffect(() => {
+    const sync = () => setThemeId(document.documentElement.getAttribute("data-theme") || "");
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
+  return themeId;
+}
+
 const sidebarStyle: React.CSSProperties = {
   gridArea: "sidebar",
   borderRight: "var(--fork-sidebar-border, 1px solid var(--border-color))",
@@ -141,8 +161,12 @@ export function ForkShell(props: ForkShellProps) {
   const { t } = useI18n();
   const viewport = useViewport();
   const upstreamFallback = useUpstreamShellFallback();
+  const themeId = useThemeId();
   const isMobile = viewport === "mobile";
   const isTablet = viewport === "tablet";
+  // 液态玻璃主题要求内容从输入栏玻璃下方滚过，因此把 footer 移进主区浮起来。
+  // 移动端不这么做：那里 footer 要参与 flex 布局给软键盘让位。
+  const floatingFooter = themeId === "glass" && !isMobile;
 
   if (upstreamFallback) {
     return <AppShell {...props} />;
@@ -180,8 +204,12 @@ export function ForkShell(props: ForkShellProps) {
     display: isMobile ? "flex" : "grid",
     flexDirection: isMobile ? "column" : undefined,
     gridTemplateColumns: isMobile ? undefined : `${physicalLeftOpen ? physicalLeftWidth : "0px"} 1fr ${physicalRightOpen ? physicalRightWidth : "0px"}`,
-    gridTemplateRows: isMobile ? undefined : "1fr auto",
-    gridTemplateAreas: isMobile ? undefined : `"sidebar main right" "sidebar footer right"`,
+    gridTemplateRows: isMobile ? undefined : floatingFooter ? "1fr" : "1fr auto",
+    gridTemplateAreas: isMobile
+      ? undefined
+      : floatingFooter
+        ? `"sidebar main right"`
+        : `"sidebar main right" "sidebar footer right"`,
     minHeight: isMobile ? mobileHeight : "100vh",
     height: isMobile ? mobileHeight : "100dvh",
     background: isMobile
@@ -277,12 +305,37 @@ export function ForkShell(props: ForkShellProps) {
                 minHeight: 0,
                 minWidth: 0,
               }
-            : mainStyle
+            : floatingFooter
+              ? {
+                  // 给浮起来的输入栏让出高度：内容在 content box 内滚动，不会被永久遮挡。
+                  // 代价是内容不会真的滚到玻璃下方——可用性优先于那点动态效果。
+                  ...mainStyle,
+                  paddingBottom: "var(--fork-floating-footer-space, 96px)",
+                }
+              : mainStyle
         }
       >
         {main}
         {/* 抽屉层放在主视图内部，绝对定位时才能精准对齐主视图宽度 */}
         {drawer}
+        {floatingFooter ? (
+          <div
+            className="fork-shell__footer fork-shell__footer--floating"
+            data-fork-region="footer"
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: "var(--fork-floating-footer-bottom, 16px)",
+              padding: "0 var(--fork-floating-footer-inset, 24px)",
+              zIndex: 5,
+              // 容器自身不吃事件，避免左右留白挡住内容；子元素在 fork-theme.css 里恢复
+              pointerEvents: "none",
+            }}
+          >
+            {footer}
+          </div>
+        ) : null}
       </main>
 
       {(!isMobile || physicalRightOpen) && physicalRightContent ? (
@@ -333,13 +386,17 @@ export function ForkShell(props: ForkShellProps) {
         </>
       ) : null}
 
-      <footer
-        className="fork-shell__footer"
-        data-fork-region="footer"
-        style={isMobile ? { ...footerStyle, flexShrink: 0 } : footerStyle}
-      >
-        {footer}
-      </footer>
+      {/* 浮动模式下 grid 已无 footer 区域，这里必须整个不渲染：
+          留一个空 footer 会被 grid 自动排布，挤乱三栏。 */}
+      {floatingFooter ? null : (
+        <footer
+          className="fork-shell__footer"
+          data-fork-region="footer"
+          style={isMobile ? { ...footerStyle, flexShrink: 0 } : footerStyle}
+        >
+          {footer}
+        </footer>
+      )}
     </div>
   );
 }

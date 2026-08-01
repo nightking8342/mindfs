@@ -1,15 +1,17 @@
-export type AppearanceMode = "dark" | "light" | "system" | "meadow" | "moss";
+export type AppearanceMode = "dark" | "light" | "system" | "meadow" | "moss" | "codex" | "glass";
 
 export const APPEARANCE_STORAGE_KEY = "mindfs-appearance-mode";
 export const APPEARANCE_CHANGE_EVENT = "mindfs:appearance-changed";
 
-const appearanceModes = new Set<AppearanceMode>(["dark", "light", "system", "meadow", "moss"]);
+const appearanceModes = new Set<AppearanceMode>(["dark", "light", "system", "meadow", "moss", "codex", "glass"]);
 const themeColors: Record<AppearanceMode, string> = {
   dark: "#0f172a",
   light: "#f3f4f6",
   system: "#f3f4f6",
   meadow: "#f4efe6",
   moss: "#dfe5d4",
+  codex: "#0a0a0a",
+  glass: "#000000",
 };
 
 export function normalizeAppearanceMode(value: unknown): AppearanceMode {
@@ -30,6 +32,15 @@ export function getAppearanceMode(): AppearanceMode {
 export function getEffectiveAppearanceMode(mode: AppearanceMode = getAppearanceMode()): "dark" | "light" | "meadow" | "moss" {
   if (mode === "dark" || mode === "light" || mode === "meadow" || mode === "moss") {
     return mode;
+  }
+  // fork 主题的明暗与主题正交，由 forkScheme 解析后写在 data-scheme 上。
+  // 这里读同一个属性而非重新判断主题名：既保证与 CSS 永远一致，
+  // 也让将来新增 fork 主题时不必再来改这个函数。
+  if (typeof document !== "undefined") {
+    const forkScheme = document.documentElement.getAttribute("data-scheme");
+    if (forkScheme === "light" || forkScheme === "dark") {
+      return forkScheme;
+    }
   }
   if (typeof window === "undefined") {
     return "light";

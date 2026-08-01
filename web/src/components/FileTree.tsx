@@ -23,6 +23,7 @@ import { AgentMenuList } from "./AgentMenuList";
 import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
+import { ForkSchemeSwitch } from "./ForkSchemeSwitch";
 import { fetchAgentCatalog, fetchAgents, restartAgent, type AgentStatus } from "../services/agents";
 import {
   createAgentAPIProvider,
@@ -69,6 +70,8 @@ const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; labelKey: MessageKey }>
   { value: "light", labelKey: "appearance.light" },
   { value: "meadow", labelKey: "appearance.meadow" },
   { value: "moss", labelKey: "appearance.moss" },
+  { value: "codex", labelKey: "appearance.codex" },
+  { value: "glass", labelKey: "appearance.glass" },
   { value: "system", labelKey: "appearance.system" },
 ];
 
@@ -3744,6 +3747,7 @@ export function FileTree({
                     </button>
                   );
                 }) : null}
+                {isAppearanceMenuOpen ? <ForkSchemeSwitch appearanceMode={appearanceMode} /> : null}
                 <button
                   type="button"
                   onClick={() => {

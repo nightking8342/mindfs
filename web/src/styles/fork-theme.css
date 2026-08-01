@@ -47,9 +47,586 @@
  * 3. 按主题分支覆盖
  * ============================================================
  * 上游主题：默认(light) / [data-theme="dark"] / "meadow" / "moss"
- * 示例：
- *   :root[data-theme="dark"] { --fork-sidebar-bg: #0b1220; }
+ * fork 主题：[data-theme="codex"]（见下）
  */
+
+/* ------------------------------------------------------------
+ * Codex —— 中性纯黑 · 工程感 · 无装饰
+ *
+ * 与上游 dark 的区别：dark 是 slate 蓝黑（#0F172A）配蓝色强调，
+ * 这里是中性纯黑（#0a0a0a）配 #10a37f，去掉一切渐变与投影。
+ * 完整度对齐 meadow：变量块 + #root + 链接 + 拖拽条 + Prism + 插件沙箱。
+ * ------------------------------------------------------------ */
+:root[data-theme="codex"] {
+  color-scheme: dark;
+
+  --mindfs-system-bar-bg: #0a0a0a;
+  --mindfs-topbar-bg: #0d0d0d;
+
+  --mindfs-launcher-bg: linear-gradient(180deg, #0a0a0a 0%, #050505 100%);
+  --mindfs-launcher-surface: #111111;
+  --mindfs-launcher-surface-strong: #161616;
+  --mindfs-launcher-surface-soft: rgba(255, 255, 255, 0.03);
+  --mindfs-launcher-border: rgba(255, 255, 255, 0.09);
+  --mindfs-launcher-border-strong: rgba(255, 255, 255, 0.16);
+  --mindfs-launcher-modal-border: rgba(255, 255, 255, 0.12);
+  --mindfs-launcher-input-bg: #131313;
+  --mindfs-launcher-text: #ededed;
+  --mindfs-launcher-muted: #8f8f8f;
+  --mindfs-launcher-accent: #10a37f;
+  --mindfs-launcher-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+  --mindfs-launcher-error-bg: rgba(248, 81, 73, 0.12);
+  --mindfs-launcher-error-text: #f85149;
+
+  /* 纯色，不做渐变——Codex 的克制感来自「什么都不加」 */
+  --bg-gradient-start: #0a0a0a;
+  --bg-gradient-end: #0a0a0a;
+  --bg-gradient-composite: linear-gradient(180deg, #0a0a0a 0%, #0a0a0a 100%);
+
+  --text-primary: #ededed;
+  --text-secondary: #9b9b9b;
+  --border-color: rgba(255, 255, 255, 0.07);
+
+  --sidebar-bg: #0d0d0d;
+  --mobile-sidebar-bg: #0f0f0f;
+  --content-bg: #0a0a0a;
+  --mobile-overlay-bg: #0a0a0a;
+
+  --panel-bg: #111111;
+  --panel-border: rgba(255, 255, 255, 0.13);
+  --panel-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --panel-focus-shadow: 0 0 0 3px rgba(16, 163, 127, 0.28);
+
+  --mindfs-code-bg: #0d0d0d;
+  --mindfs-code-text: #d4d4d4;
+  --mindfs-code-border: rgba(255, 255, 255, 0.08);
+
+  --menu-bg: #141414;
+  --menu-border: rgba(255, 255, 255, 0.11);
+  --menu-divider: rgba(255, 255, 255, 0.07);
+  --menu-active-bg: rgba(255, 255, 255, 0.08);
+
+  --accent-color: #10a37f;
+  --accent-hover: #14b892;
+  --selection-bg: rgba(16, 163, 127, 0.20);
+
+  --root-badge-bg: rgba(16, 163, 127, 0.16);
+  --root-badge-border: rgba(16, 163, 127, 0.32);
+  --root-badge-text: #3ddbb0;
+}
+
+/* 字体：不引入外部 CDN（自托管应用离线要能用），装了 Geist 就用，否则回落系统栈。
+   中文字形无论如何走系统字体，Geist 只影响拉丁字母与数字。 */
+:root[data-theme="codex"] body {
+  font-family: "Geist", "SF Pro Text", -apple-system, BlinkMacSystemFont,
+    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+:root[data-theme="codex"] code,
+:root[data-theme="codex"] pre,
+:root[data-theme="codex"] kbd,
+:root[data-theme="codex"] samp {
+  font-family: "Geist Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+    "JetBrains Mono", Consolas, monospace;
+}
+
+:root[data-theme="codex"] #root {
+  background: #0a0a0a !important;
+}
+
+:root[data-theme="codex"] a { color: #10a37f; }
+:root[data-theme="codex"] a:hover { color: #14b892; }
+
+:root[data-theme="codex"] .mindfs-sidebar-resize-rail::before {
+  background: linear-gradient(transparent, rgba(255, 255, 255, 0.04) 12%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.04) 88%, transparent);
+  box-shadow: none;
+}
+:root[data-theme="codex"] .mindfs-sidebar-resize-rail:focus-visible::before {
+  background: linear-gradient(transparent, rgba(16, 163, 127, 0.20) 12%, rgba(16, 163, 127, 0.75), rgba(16, 163, 127, 0.20) 88%, transparent);
+}
+
+:root[data-theme="codex"] pre[class*="language-"],
+:root[data-theme="codex"] code[class*="language-"] {
+  box-shadow: none !important;
+  background: var(--mindfs-code-bg) !important;
+  color: var(--mindfs-code-text) !important;
+  text-shadow: none !important;
+  border: 1px solid var(--mindfs-code-border) !important;
+}
+
+:root[data-theme="codex"] pre[class*="language-"] > code[class*="language-"] {
+  box-shadow: none !important;
+  background: transparent !important;
+  border: none !important;
+}
+
+:root[data-theme="codex"] .plugin-shadcn-sandbox {
+  --vp-surface-bg: #0d0d0d;
+  --vp-surface-bg-elevated: #131313;
+  --vp-text: #ededed;
+  --vp-text-muted: #9b9b9b;
+  --vp-border: rgba(255, 255, 255, 0.10);
+  --vp-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+
+/* 滚动条：细、无轨道，跟整体的「不加装饰」一致 */
+:root[data-theme="codex"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+:root[data-theme="codex"] ::-webkit-scrollbar-track { background: transparent; }
+:root[data-theme="codex"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 5px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+:root[data-theme="codex"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
+}
+
+/* ------------------------------------------------------------
+ * Liquid Glass —— 深色玻璃 · 内部光晕 · 折射高光 · 微粒散射
+ *
+ * 强度按参考图实测标定：参考图背景 RGB(7,12,8)、卡片均值 RGB(24~86)、
+ * 饱和度 0.21~0.39。玻璃层若只到 RGB 30 上下就会显得发虚——上一版正是如此。
+ *
+ * 质感由四层叠出，缺任何一层都会退回「彩色塑料片」：
+ *   ① 微粒散射：feTurbulence 噪点。真实玻璃有颗粒，纯渐变永远像塑料。
+ *   ② 内部光晕：彩色 radial-gradient 塞进 --panel-bg 等变量。组件写的是
+ *      background（简写属性，接受渐变），零组件改动即可让玻璃自带颜色。
+ *   ③ 折射高光：inset 顶亮边 + 整圈发丝边。--panel-shadow 里也塞了 inset，
+ *      组件用 var(--panel-shadow) 自动获得。
+ *   ④ 背景模糊：backdrop-filter，只是四要素之一。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"] {
+  color-scheme: dark;
+
+  /* 噪点：140px 平铺的 fractalNoise，opacity 压到 0.055——高于 0.08 就脏了 */
+  --fork-glass-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
+
+  --mindfs-system-bar-bg: #000000;
+  --mindfs-topbar-bg: rgba(255, 255, 255, 0.075);
+
+  --mindfs-launcher-bg:
+    radial-gradient(900px 700px at 12% 6%, rgba(0, 212, 126, 0.26), transparent 58%),
+    radial-gradient(820px 660px at 88% 24%, rgba(90, 150, 255, 0.24), transparent 60%),
+    radial-gradient(780px 640px at 74% 96%, rgba(190, 120, 255, 0.20), transparent 58%),
+    #000000;
+  --mindfs-launcher-surface:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.075);
+  --mindfs-launcher-surface-strong:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.12);
+  --mindfs-launcher-surface-soft: rgba(255, 255, 255, 0.055);
+  --mindfs-launcher-border: rgba(255, 255, 255, 0.20);
+  --mindfs-launcher-border-strong: rgba(0, 212, 126, 0.45);
+  --mindfs-launcher-modal-border: rgba(255, 255, 255, 0.24);
+  --mindfs-launcher-input-bg: rgba(255, 255, 255, 0.085);
+  --mindfs-launcher-text: #f2f2f4;
+  --mindfs-launcher-muted: #a2a2ac;
+  --mindfs-launcher-accent: #00d47e;
+  --mindfs-launcher-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 28px 70px rgba(0, 0, 0, 0.8);
+  --mindfs-launcher-error-bg: rgba(255, 69, 58, 0.18);
+  --mindfs-launcher-error-text: #ff6b60;
+
+  /* 壁纸：纯黑打底 + 四团**极淡**色光。这是全主题唯一的颜色来源。
+     强度必须克制到「若隐若现」——参考图里的卡片其实是中性深灰（RGB 24~86），
+     绿色只出现在按钮和图标上。色光一浓，玻璃就被染成彩色区块，
+     反而丢了玻璃感。光斑按三栏布局分布，放四角会被两侧栏挡住。 */
+  --bg-gradient-start: #000000;
+  --bg-gradient-end: #000000;
+  --bg-gradient-composite:
+    radial-gradient(1100px 860px at 22% 6%, rgba(120, 170, 255, 0.055), transparent 56%),
+    radial-gradient(1000px 800px at 76% 16%, rgba(150, 130, 255, 0.05), transparent 58%),
+    radial-gradient(1050px 820px at 58% 96%, rgba(90, 190, 255, 0.045), transparent 56%),
+    radial-gradient(900px 720px at 34% 66%, rgba(255, 255, 255, 0.028), transparent 55%),
+    #000000;
+
+  --text-primary: #f4f4f6;
+  --text-secondary: #a6a6b0;
+  --border-color: rgba(255, 255, 255, 0.16);
+
+  /* --- 玻璃层。关键：玻璃本身几乎无色，颜色来自背后壁纸透过来。
+         往这些变量里塞彩色渐变等于给玻璃上色，会越加越浑、压住文字。
+         每个区域是一整块均匀的玻璃板，质感靠 backdrop-filter + 边缘高光。 --- */
+
+  /* ForkShell 三大区域必须走 --fork-* 钩子：上游 fallback 链是
+     var(--fork-sidebar-bg, var(--mindfs-topbar-bg, var(--sidebar-bg)))，
+     --mindfs-topbar-bg 排在前面，只设 --sidebar-bg 会被它吃掉。 */
+  --fork-sidebar-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.055);
+  --fork-right-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.055);
+  /* 主区最透：正文区域不抢戏，壁纸直接透上来 */
+  --fork-main-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.018);
+
+  --sidebar-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.055);
+  --content-bg: rgba(255, 255, 255, 0.02);
+
+  /* 面板/卡片：浮在主区之上，所以比侧栏再实一点 */
+  --panel-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.085);
+
+  /* 菜单要挡住底下内容，基色最实 */
+  --menu-bg:
+    var(--fork-glass-grain),
+    rgba(34, 34, 40, 0.82);
+
+  /* 移动端抽屉盖在内容上，必须够实 */
+  --mobile-sidebar-bg:
+    var(--fork-glass-grain),
+    rgba(22, 22, 26, 0.94);
+  --mobile-overlay-bg: #000000;
+
+  --panel-border: rgba(255, 255, 255, 0.20);
+  /* inset 部分就是折射高光：组件写 var(--panel-shadow) 即自动带上 */
+  --panel-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.10),
+    0 24px 60px rgba(0, 0, 0, 0.78);
+  --panel-focus-shadow: 0 0 0 3px rgba(0, 212, 126, 0.36);
+
+  --mindfs-code-bg:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.06);
+  --mindfs-code-text: #e9e9ee;
+  --mindfs-code-border: rgba(255, 255, 255, 0.14);
+
+  --menu-border: rgba(255, 255, 255, 0.20);
+  --menu-divider: rgba(255, 255, 255, 0.11);
+  --menu-active-bg: rgba(0, 212, 126, 0.24);
+
+  --accent-color: #00d47e;
+  --accent-hover: #2ce89a;
+  --selection-bg: rgba(0, 212, 126, 0.28);
+
+  /* 徽标文字近白：侧栏一屏十几个项目名，全用强调绿会把整块玻璃染绿。
+     绿色留给按钮和状态点这些真正需要抓眼的地方。 */
+  --root-badge-bg: rgba(0, 212, 126, 0.16);
+  --root-badge-border: rgba(0, 212, 126, 0.30);
+  --root-badge-text: #dfeee7;
+
+  /* 每块玻璃板之间的缝隙与圆角。ForkShell 的边框走 --fork-*-border 钩子，
+     这里置 none：板与板之间靠缝隙分隔，不需要描边。 */
+  --fork-glass-gap: 10px;
+  --fork-glass-radius: 16px;
+  --fork-sidebar-border: none;
+  --fork-right-border: none;
+}
+
+/* --- 让每个区域成为「一块浮在壁纸上的玻璃板」 ---
+   紧贴的三栏只有一条细线分隔，看不出板的边界；加上圆角 + 缝隙 + 整圈高光，
+   壁纸从缝里透出来，「一块玻璃」的观感才成立。移动端排除：那里侧栏是全屏抽屉。 */
+:root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="left"] {
+  margin: var(--fork-glass-gap) 0 var(--fork-glass-gap) var(--fork-glass-gap);
+  border-radius: var(--fork-glass-radius);
+}
+:root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="right"] {
+  margin: var(--fork-glass-gap) var(--fork-glass-gap) var(--fork-glass-gap) 0;
+  border-radius: var(--fork-glass-radius);
+}
+:root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="main"] {
+  margin: var(--fork-glass-gap);
+  border-radius: var(--fork-glass-radius);
+}
+
+:root[data-theme="glass"] body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+:root[data-theme="glass"] #root {
+  background: transparent !important;
+}
+
+:root[data-theme="glass"] a { color: #00d47e; }
+:root[data-theme="glass"] a:hover { color: #2ce89a; }
+
+/* --- 折射高光：变量给不了 inset 阴影的地方，用选择器补上 --- */
+
+/* 两侧栏：各是一整块玻璃板。顶部亮边 + 整圈发丝边 + 底部反光＝厚度感；
+   外阴影＝板子「浮」在壁纸上，缺了它圆角区块看着像从背景里挖出来的洞 */
+:root[data-theme="glass"] [data-fork-region="left"],
+:root[data-theme="glass"] [data-fork-region="right"] {
+  backdrop-filter: blur(40px) saturate(135%);
+  -webkit-backdrop-filter: blur(40px) saturate(135%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+    0 12px 36px rgba(0, 0, 0, 0.58);
+}
+
+:root[data-theme="glass"] [data-fork-region="main"] {
+  backdrop-filter: blur(24px) saturate(125%);
+  -webkit-backdrop-filter: blur(24px) saturate(125%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 12px 36px rgba(0, 0, 0, 0.52);
+}
+
+/* 菜单与面板：命中组件 inline style 里的 var(--menu-bg) / var(--panel-bg)。
+   依赖上游的书写形式，属于脆规则——上游改写法即静默失效，
+   但退化结果只是少了模糊与高光，不影响功能。 */
+:root[data-theme="glass"] [style*="var(--menu-bg)"],
+:root[data-theme="glass"] [style*="var(--panel-bg)"] {
+  backdrop-filter: blur(40px) saturate(135%);
+  -webkit-backdrop-filter: blur(40px) saturate(135%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+    0 20px 50px rgba(0, 0, 0, 0.62);
+}
+
+/* 浮动输入栏：浮在最上层，所以模糊最强、边缘最亮 */
+:root[data-theme="glass"] .fork-shell__footer--floating > * {
+  pointer-events: auto;
+  backdrop-filter: blur(44px) saturate(135%);
+  -webkit-backdrop-filter: blur(44px) saturate(135%);
+  border-radius: 18px;
+  background:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.09) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.10),
+    0 18px 46px rgba(0, 0, 0, 0.7);
+}
+
+/* 拖拽条落在两块玻璃板的缝隙里，静态时用白色半透明而非强调色——
+   缝里一条常亮的绿会喧宾夺主，把「板间空隙」变成一条装饰线 */
+:root[data-theme="glass"] .mindfs-sidebar-resize-rail::before {
+  background: linear-gradient(transparent, rgba(255, 255, 255, 0.06) 12%, rgba(255, 255, 255, 0.20), rgba(255, 255, 255, 0.06) 88%, transparent);
+  box-shadow: none;
+}
+:root[data-theme="glass"] .mindfs-sidebar-resize-rail:hover::before,
+:root[data-theme="glass"] .mindfs-sidebar-resize-rail:focus-visible::before {
+  background: linear-gradient(transparent, rgba(0, 212, 126, 0.20) 12%, rgba(0, 212, 126, 0.78), rgba(0, 212, 126, 0.20) 88%, transparent);
+  box-shadow: 0 0 16px rgba(0, 212, 126, 0.32);
+}
+
+:root[data-theme="glass"] pre[class*="language-"],
+:root[data-theme="glass"] code[class*="language-"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07) !important;
+  background: var(--mindfs-code-bg) !important;
+  color: var(--mindfs-code-text) !important;
+  text-shadow: none !important;
+  border: 1px solid var(--mindfs-code-border) !important;
+  backdrop-filter: blur(16px) saturate(130%);
+  -webkit-backdrop-filter: blur(16px) saturate(130%);
+}
+
+:root[data-theme="glass"] pre[class*="language-"] > code[class*="language-"] {
+  box-shadow: none !important;
+  background: transparent !important;
+  border: none !important;
+  backdrop-filter: none;
+}
+
+:root[data-theme="glass"] .plugin-shadcn-sandbox {
+  --vp-surface-bg: rgba(255, 255, 255, 0.095);
+  --vp-surface-bg-elevated: rgba(255, 255, 255, 0.14);
+  --vp-text: #f4f4f6;
+  --vp-text-muted: #a6a6b0;
+  --vp-border: rgba(255, 255, 255, 0.18);
+  --vp-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34), 0 24px 60px rgba(0, 0, 0, 0.78);
+}
+
+:root[data-theme="glass"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+:root[data-theme="glass"] ::-webkit-scrollbar-track { background: transparent; }
+:root[data-theme="glass"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.20);
+  border-radius: 5px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+:root[data-theme="glass"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
+  background-clip: content-box;
+}
+
+/* 降级：系统开了「减少透明度」就退回不透明实色，无障碍优先 */
+/* ------------------------------------------------------------
+ * glass 的浅色变体 —— 跟随系统明暗自动切换
+ *
+ * 浅色玻璃比深色难做：白玻璃贴在白背景上对比趋近于零，只会剩下高斯模糊。
+ * 所以这里换一套策略——壁纸的色彩要**比深色版浓得多**（alpha 0.30 上下，
+ * 深色版只有 0.055），玻璃则更白更实，靠「白玻璃浮在彩色壁纸上」建立对比。
+ * 高光也要反过来：深色版靠白色 inset 提亮，浅色版靠彩色外阴影压出层次。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"][data-scheme="light"] {
+  color-scheme: light;
+
+  --mindfs-system-bar-bg: #e8eefb;
+  --mindfs-topbar-bg: rgba(255, 255, 255, 0.62);
+
+  --mindfs-launcher-bg:
+    radial-gradient(900px 700px at 12% 6%, rgba(255, 140, 190, 0.34), transparent 58%),
+    radial-gradient(820px 660px at 88% 24%, rgba(110, 165, 255, 0.36), transparent 60%),
+    radial-gradient(780px 640px at 74% 96%, rgba(170, 130, 255, 0.30), transparent 58%),
+    linear-gradient(146deg, #fdeef6 0%, #e2edff 38%, #ebe4ff 68%, #e2f7f1 100%);
+  --mindfs-launcher-surface: var(--fork-glass-grain), rgba(255, 255, 255, 0.66);
+  --mindfs-launcher-surface-strong: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
+  --mindfs-launcher-surface-soft: rgba(255, 255, 255, 0.40);
+  --mindfs-launcher-border: rgba(255, 255, 255, 0.70);
+  --mindfs-launcher-border-strong: rgba(0, 168, 98, 0.42);
+  --mindfs-launcher-modal-border: rgba(255, 255, 255, 0.85);
+  --mindfs-launcher-input-bg: rgba(255, 255, 255, 0.72);
+  --mindfs-launcher-text: #1a1a1c;
+  --mindfs-launcher-muted: #5f6068;
+  --mindfs-launcher-accent: #00814a;
+  --mindfs-launcher-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 22px 56px rgba(70, 60, 110, 0.16);
+  --mindfs-launcher-error-bg: rgba(220, 38, 38, 0.10);
+  --mindfs-launcher-error-text: #b91c1c;
+
+  /* 壁纸：浅色下必须够浓，否则白玻璃贴白底 = 看不见 */
+  --bg-gradient-start: #e8eefb;
+  --bg-gradient-end: #e4ecff;
+  --bg-gradient-composite:
+    radial-gradient(1100px 860px at 22% 6%, rgba(255, 140, 190, 0.32), transparent 56%),
+    radial-gradient(1000px 800px at 76% 16%, rgba(110, 165, 255, 0.34), transparent 58%),
+    radial-gradient(1050px 820px at 58% 96%, rgba(170, 130, 255, 0.28), transparent 56%),
+    radial-gradient(900px 720px at 34% 66%, rgba(90, 220, 200, 0.22), transparent 55%),
+    linear-gradient(146deg, #fdeef6 0%, #e2edff 38%, #ebe4ff 68%, #e2f7f1 100%);
+
+  --text-primary: #1a1a1c;
+  --text-secondary: #5f6068;
+  --border-color: rgba(60, 60, 67, 0.14);
+
+  /* 玻璃层：浅色版要更白更实，才压得住底下浓彩不影响读字 */
+  --fork-sidebar-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.56);
+  --fork-right-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.56);
+  --fork-main-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.74);
+
+  --sidebar-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.56);
+  --content-bg: rgba(255, 255, 255, 0.74);
+  --panel-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.64);
+  --menu-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
+
+  --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
+  --mobile-overlay-bg: #eef3fd;
+
+  --panel-border: rgba(255, 255, 255, 0.75);
+  --panel-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 18px 44px rgba(70, 60, 110, 0.16);
+  --panel-focus-shadow: 0 0 0 3px rgba(0, 168, 98, 0.26);
+
+  --mindfs-code-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.68);
+  --mindfs-code-text: #1f1f22;
+  --mindfs-code-border: rgba(60, 60, 67, 0.12);
+
+  --menu-border: rgba(255, 255, 255, 0.80);
+  --menu-divider: rgba(60, 60, 67, 0.10);
+  --menu-active-bg: rgba(0, 168, 98, 0.16);
+
+  --accent-color: #00814a;
+  --accent-hover: #006e3f;
+  --selection-bg: rgba(0, 168, 98, 0.18);
+
+  --root-badge-bg: rgba(0, 168, 98, 0.14);
+  --root-badge-border: rgba(0, 168, 98, 0.28);
+  --root-badge-text: #10603f;
+}
+
+/* 高光反转：浅色下白色 inset 几乎看不见，层次改由彩色外阴影撑起 */
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="left"],
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="right"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 12px 36px rgba(70, 60, 110, 0.15);
+}
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="main"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.50),
+    0 12px 36px rgba(70, 60, 110, 0.13);
+}
+:root[data-theme="glass"][data-scheme="light"] [style*="var(--menu-bg)"],
+:root[data-theme="glass"][data-scheme="light"] [style*="var(--panel-bg)"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.50),
+    0 18px 44px rgba(70, 60, 110, 0.16);
+}
+:root[data-theme="glass"][data-scheme="light"] .fork-shell__footer--floating > * {
+  background:
+    var(--fork-glass-grain),
+    rgba(255, 255, 255, 0.72) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.60),
+    0 16px 40px rgba(70, 60, 110, 0.18);
+}
+:root[data-theme="glass"][data-scheme="light"] .mindfs-sidebar-resize-rail::before {
+  background: linear-gradient(transparent, rgba(60, 60, 67, 0.06) 12%, rgba(60, 60, 67, 0.20), rgba(60, 60, 67, 0.06) 88%, transparent);
+}
+:root[data-theme="glass"][data-scheme="light"] pre[class*="language-"],
+:root[data-theme="glass"][data-scheme="light"] code[class*="language-"] {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] .plugin-shadcn-sandbox {
+  --vp-surface-bg: rgba(255, 255, 255, 0.72);
+  --vp-surface-bg-elevated: rgba(255, 255, 255, 0.90);
+  --vp-text: #1a1a1c;
+  --vp-text-muted: #5f6068;
+  --vp-border: rgba(255, 255, 255, 0.70);
+  --vp-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 18px 44px rgba(70, 60, 110, 0.16);
+}
+:root[data-theme="glass"][data-scheme="light"] ::-webkit-scrollbar-thumb {
+  background: rgba(60, 60, 67, 0.22);
+  background-clip: content-box;
+}
+:root[data-theme="glass"][data-scheme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(60, 60, 67, 0.36);
+  background-clip: content-box;
+}
+:root[data-theme="glass"][data-scheme="light"] a { color: #00814a; }
+:root[data-theme="glass"][data-scheme="light"] a:hover { color: #006e3f; }
+:root[data-theme="glass"][data-scheme="light"] #root { background: transparent !important; }
+
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="glass"] [data-fork-region],
+  :root[data-theme="glass"] [style*="var(--menu-bg)"],
+  :root[data-theme="glass"] [style*="var(--panel-bg)"],
+  :root[data-theme="glass"] .fork-shell__footer--floating > * {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  :root[data-theme="glass"] {
+    --fork-sidebar-bg: #16161b;
+    --fork-right-bg: #16161b;
+    --fork-main-bg: #0b0b0e;
+    --panel-bg: #21212a;
+    --menu-bg: #24242e;
+  }
+  :root[data-theme="glass"][data-scheme="light"] {
+    --fork-sidebar-bg: #eef3fc;
+    --fork-right-bg: #eef3fc;
+    --fork-main-bg: #fbfcff;
+    --panel-bg: #ffffff;
+    --menu-bg: #ffffff;
+  }
+}
+
 
 /* ============================================================
  * 4. 区域级微调 —— ForkShell 挂的结构钩子
