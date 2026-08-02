@@ -535,9 +535,20 @@
   /* 壁纸：浅色下必须够浓，否则白玻璃贴白底 = 看不见 */
   --bg-gradient-start: #e8eefb;
   --bg-gradient-end: #e4ecff;
+
+  /* 顶部先铺一段纯 --bg-gradient-start，再淡入光斑，末端与状态栏无缝。
+     原因：Android 沉浸状态栏那块 scrim 取的是 --mindfs-system-bar-bg（同为
+     #e8eefb），而原生把 WebView 整体下推了状态栏高度（MainActivity 的
+     view.setPadding(0, systemInsets.top, 0, 0)），页面 y=0 就贴着状态栏底边。
+     光斑若一路铺到 y=0，两者色差会在这条线上显出一道横向接缝。
+     配套把上面两团光斑的中心也下移，否则它们大半被这段遮罩吃掉、显得被削平。
+     淡出色必须写成同色 alpha 0（而不是 transparent），跨浏览器插值才不会发灰。
+     深色版不需要这层：光斑 alpha 只有 0.055，底色与状态栏同为纯黑，看不出接缝。 */
+  --fork-wallpaper-top-fade: 132px;
   --bg-gradient-composite:
-    radial-gradient(1100px 860px at 22% 6%, rgba(255, 140, 190, 0.32), transparent 56%),
-    radial-gradient(1000px 800px at 76% 16%, rgba(110, 165, 255, 0.34), transparent 58%),
+    linear-gradient(to bottom, #e8eefb 0, rgba(232, 238, 251, 0) var(--fork-wallpaper-top-fade)),
+    radial-gradient(1100px 860px at 22% 20%, rgba(255, 140, 190, 0.32), transparent 56%),
+    radial-gradient(1000px 800px at 76% 28%, rgba(110, 165, 255, 0.34), transparent 58%),
     radial-gradient(1050px 820px at 58% 96%, rgba(170, 130, 255, 0.28), transparent 56%),
     radial-gradient(900px 720px at 34% 66%, rgba(90, 220, 200, 0.22), transparent 55%),
     linear-gradient(146deg, #fdeef6 0%, #e2edff 38%, #ebe4ff 68%, #e2f7f1 100%);

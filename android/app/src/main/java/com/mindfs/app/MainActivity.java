@@ -49,6 +49,9 @@ public class MainActivity extends BridgeActivity {
     private int safeAreaBottomPx = 0;
     private int imeBottomPx = 0;
     private View statusBarScrim = null;
+    // 页面（web 层）最后推来的状态栏色。onResume / onConfigurationChanged 都会调
+    // applySystemBarStyle()，若无条件按系统 uiMode 重刷，应用内选的主题会被打回去。
+    private Integer pageStatusBarColor = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -151,7 +154,11 @@ public class MainActivity extends BridgeActivity {
             controller.setAppearanceLightStatusBars(!darkMode);
             controller.setAppearanceLightNavigationBars(false);
         }
-        updateStatusBarScrimColor(darkMode ? Color.parseColor("#020617") : Color.WHITE);
+        updateStatusBarScrimColor(
+            pageStatusBarColor != null
+                ? pageStatusBarColor
+                : (darkMode ? Color.parseColor("#020617") : Color.WHITE)
+        );
     }
 
     private void ensureStatusBarScrim() {
@@ -778,7 +785,10 @@ public class MainActivity extends BridgeActivity {
                     return;
                 }
                 int color = Color.parseColor(value);
-                runOnUiThread(() -> updateStatusBarScrimColor(color));
+                runOnUiThread(() -> {
+                    pageStatusBarColor = color;
+                    updateStatusBarScrimColor(color);
+                });
             } catch (Exception ex) {
                 Log.w(TAG, "failed to set status bar color from page: " + rawColor, ex);
             }
