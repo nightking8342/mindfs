@@ -3,6 +3,8 @@ import { useI18n } from "../i18n";
 import { AppShell } from "./AppShell";
 // import 即自执行：在首次渲染前把 data-scheme 写好，避免明暗闪烁
 import "../services/forkScheme";
+import { observeEdgeSpecular } from "../services/forkLiquidGlass";
+import { observeTabIndicators } from "../services/forkTabIndicator";
 
 /**
  * ForkShell —— fork 自己的布局壳，接管上游 AppShell。
@@ -96,6 +98,38 @@ function useThemeId(): string {
   return themeId;
 }
 
+/**
+ * 首页看板面板的玻璃效果。
+ *
+ * 材质本体（全透明 + 六层边缘反光）在 fork-theme.css 里，纯 CSS 即可；
+ * 这里只补 JS 非做不可的一件事：把指针位置写成 --fork-mx / --fork-my，
+ * 供镜面高光的径向渐变定位。事件委托，一个监听器覆盖所有面板。
+ *
+ * 折射（SDF 位移贴图）暂不启用——当前方案玻璃本体不模糊也无底色，
+ * 叠位移只会让底下的字发虚。forkLiquidGlass 的实现保留备用。
+ */
+function useGlassPanels(themeId: string): void {
+  useEffect(() => {
+    if (themeId !== "glass") {
+      return;
+    }
+    const main = document.querySelector<HTMLElement>('[data-fork-region="main"]');
+    if (!main) return;
+    return observeEdgeSpecular(main, '[style*="rgba(148, 163, 184, 0.06)"]');
+  }, [themeId]);
+}
+
+/**
+ * 上游标签栏（首页看板的模板筛选）的滑动指示器。
+ *
+ * 不按主题分支：侧栏的 ForkGlassTabs 在所有主题下都是滑动指示器，这里跟着
+ * 一致，配色交给 --fork-tabs-indicator-* 变量各主题自己定。排除掉带
+ * data-fork-glass-tabs 的容器——那本来就是 ForkGlassTabs，已经自带指示器。
+ */
+function useTabIndicators(): void {
+  useEffect(() => observeTabIndicators(document, '[role="tablist"]:not([data-fork-glass-tabs])'), []);
+}
+
 const sidebarStyle: React.CSSProperties = {
   gridArea: "sidebar",
   borderRight: "var(--fork-sidebar-border, 1px solid var(--border-color))",
@@ -162,6 +196,8 @@ export function ForkShell(props: ForkShellProps) {
   const viewport = useViewport();
   const upstreamFallback = useUpstreamShellFallback();
   const themeId = useThemeId();
+  useGlassPanels(themeId);
+  useTabIndicators();
   const isMobile = viewport === "mobile";
   const isTablet = viewport === "tablet";
   // 液态玻璃主题要求内容从输入栏玻璃下方滚过，因此把 footer 移进主区浮起来。

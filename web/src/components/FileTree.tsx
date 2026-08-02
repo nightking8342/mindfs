@@ -24,6 +24,8 @@ import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
 import { ForkSchemeSwitch } from "./ForkSchemeSwitch";
+import { ForkSidebarActions, ForkGlobeIcon, ForkHomeIcon, ForkInstallIcon, type ForkSidebarAction } from "./ForkSidebarActions";
+import { ForkGlassTabs } from "./ForkGlassTabs";
 import { fetchAgentCatalog, fetchAgents, restartAgent, type AgentStatus } from "../services/agents";
 import {
   createAgentAPIProvider,
@@ -3487,70 +3489,17 @@ export function FileTree({
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 6, overflow: "visible" }}>
         <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 34px)" }}>
-          <div
-            role="tablist"
-            aria-label={t("fileTree.projectTabs")}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 0,
-              padding: "2px",
-              borderRadius: "8px",
-              border: "1px solid rgba(100, 116, 139, 0.36)",
-              background: "rgba(148, 163, 184, 0.10)",
-              minWidth: 0,
-              width: "100%",
-            }}
-          >
-            {([
-              ["files", t("fileTree.files")],
-              ["git", "git"],
-              ["worktrees", t("fileTree.worktrees")],
-              ["related", t("fileTree.relatedFiles")],
-            ] as const).map(([value, label], index) => {
-              const active = projectTreeTab === value;
-              const flexGrow = value === "related" ? 1.45 : value === "worktrees" ? 1.15 : 0.85;
-              return (
-                <React.Fragment key={value}>
-                  {index > 0 ? (
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        width: "1px",
-                        height: "16px",
-                        background: "rgba(100, 116, 139, 0.32)",
-                        margin: "0 1px",
-                        flexShrink: 0,
-                      }}
-                    />
-                  ) : null}
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => setProjectTreeTab(value)}
-                    style={{
-                      border: "none",
-                      borderRadius: "6px",
-                      background: active ? "var(--accent-color)" : "transparent",
-                      color: active ? "#fff" : "var(--text-secondary)",
-                      padding: "3px 5px",
-                      fontSize: "11px",
-                      fontWeight: 700,
-                      lineHeight: "14px",
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                      minWidth: 0,
-                      flex: `${flexGrow} 1 auto`,
-                      boxShadow: active ? "0 1px 3px rgba(37, 99, 235, 0.28)" : "none",
-                    }}
-                  >
-                    {label}
-                  </button>
-                </React.Fragment>
-              );
-            })}
-          </div>
+          <ForkGlassTabs
+            ariaLabel={t("fileTree.projectTabs")}
+            value={projectTreeTab}
+            onChange={setProjectTreeTab}
+            tabs={[
+              { value: "files" as const, label: t("fileTree.files"), grow: 0.85 },
+              { value: "git" as const, label: "git", grow: 0.85 },
+              { value: "worktrees" as const, label: t("fileTree.worktrees"), grow: 1.15 },
+              { value: "related" as const, label: t("fileTree.relatedFiles"), grow: 1.45 },
+            ]}
+          />
         </div>
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
@@ -4460,112 +4409,30 @@ export function FileTree({
         {footerTopContent ? (
           <div style={{ width: "100%" }}>{footerTopContent}</div>
         ) : null}
-        {shouldShowInstallButton ? (
-          relayActionLabel ? (
-            <button
-              type="button"
-              disabled={relayActionDisabled}
-              onClick={() => onRelayAction?.()}
-              style={{
-                width: "100%",
-                border: "1px solid var(--border-color)",
-                background: relayActionDisabled ? "rgba(148, 163, 184, 0.2)" : "var(--accent-color)",
-                color: relayActionDisabled ? "var(--text-secondary)" : "#fff",
-                borderRadius: "10px",
-                padding: "10px 12px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "8px",
-                cursor: relayActionDisabled ? "not-allowed" : "pointer",
-                fontSize: "12px",
-                fontWeight: 600,
-              }}
-            >
-              <span>{relayActionLabel}</span>
-            </button>
-          ) : null
-        ) : relayActionLabel ? (
-          <button
-            type="button"
-            disabled={relayActionDisabled}
-            onClick={() => onRelayAction?.()}
-            style={{
-              width: "100%",
-              border: "1px solid var(--border-color)",
-              background: relayActionDisabled ? "rgba(148, 163, 184, 0.2)" : "var(--accent-color)",
-              color: relayActionDisabled ? "var(--text-secondary)" : "#fff",
-              borderRadius: "10px",
-              padding: "10px 12px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              cursor: relayActionDisabled ? "not-allowed" : "pointer",
-              fontSize: "12px",
-              fontWeight: 600,
-            }}
-          >
-            <span>{relayActionLabel}</span>
-          </button>
-        ) : null}
+        <ForkSidebarActions
+          actions={[
+            relayActionLabel
+              ? {
+                  key: "relay",
+                  label: relayActionLabel,
+                  icon: ForkGlobeIcon,
+                  onClick: () => onRelayAction?.(),
+                  disabled: relayActionDisabled,
+                  primary: true,
+                }
+              : null,
+            isNativeApp && onGoHome
+              ? { key: "home", label: t("fileTree.goHome"), icon: ForkHomeIcon, onClick: () => onGoHome() }
+              : null,
+            shouldShowInstallButton
+              ? { key: "install", label: installLabel, icon: ForkInstallIcon, onClick: () => { void handleInstall(); } }
+              : null,
+          ].filter(Boolean) as ForkSidebarAction[]}
+        />
         {relayActionHelp ? (
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", lineHeight: 1.5, textAlign: "center" }}>
             {relayActionHelp}
           </div>
-        ) : null}
-        {isNativeApp && onGoHome ? (
-          <button
-            type="button"
-            onClick={() => onGoHome()}
-            style={{
-              width: "100%",
-              border: "1px solid var(--border-color)",
-              background: "var(--text-primary)",
-              color: "var(--sidebar-bg)",
-              borderRadius: "10px",
-              padding: "10px 12px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              cursor: "pointer",
-              fontSize: "12px",
-              fontWeight: 600,
-            }}
-          >
-            <span>{t("fileTree.goHome")}</span>
-          </button>
-        ) : null}
-        {shouldShowInstallButton ? (
-          <button
-            type="button"
-            onClick={() => { void handleInstall(); }}
-            style={{
-              width: "100%",
-              border:
-                "1px solid color-mix(in srgb, var(--accent-color) 72%, var(--border-color))",
-              background: "var(--accent-color)",
-              color: "#fff",
-              borderRadius: "10px",
-              padding: "10px 12px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              cursor: "pointer",
-              fontSize: "12px",
-              fontWeight: 600,
-              transition: "all 0.15s ease",
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 16V4" />
-              <path d="m7 9 5-5 5 5" />
-              <path d="M20 16.5v1.5A2 2 0 0 1 18 20H6a2 2 0 0 1-2-2v-1.5" />
-            </svg>
-            <span>{installLabel}</span>
-          </button>
         ) : null}
         {shouldShowInstallHelp ? (
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", lineHeight: 1.5, textAlign: "center" }}>

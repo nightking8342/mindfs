@@ -351,6 +351,41 @@
 :root[data-theme="glass"] a { color: #00d47e; }
 :root[data-theme="glass"] a:hover { color: #2ce89a; }
 
+/* 标签栏：容器压暗成凹槽，滑动指示器本身做成一小块玻璃。
+   用 [role="tablist"] 而不是 [data-fork-glass-tabs]，一条同时覆盖 fork 的
+   ForkGlassTabs 和被 forkTabIndicator 增强过的上游标签栏——后者拿不到
+   这些变量就会退回 fallback 的实心强调色，与侧栏对不上。 */
+:root[data-theme="glass"] [role="tablist"] {
+  --fork-tabs-bg: rgba(255, 255, 255, 0.04);
+  --fork-tabs-border: rgba(255, 255, 255, 0.10);
+  --fork-tabs-active-color: #ffffff;
+  --fork-tabs-indicator-bg: rgba(255, 255, 255, 0.14);
+  --fork-tabs-indicator-filter: blur(12px) saturate(150%);
+  --fork-tabs-indicator-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+:root[data-theme="glass"][data-scheme="light"] [role="tablist"] {
+  --fork-tabs-bg: rgba(255, 255, 255, 0.30);
+  --fork-tabs-border: rgba(255, 255, 255, 0.55);
+  --fork-tabs-active-color: #10603f;
+  --fork-tabs-indicator-bg: rgba(255, 255, 255, 0.80);
+  --fork-tabs-indicator-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.60),
+    0 2px 8px rgba(70, 60, 110, 0.16);
+}
+
+/* codex 是扁平克制的路子，指示器不做玻璃，只用低饱和填充 */
+:root[data-theme="codex"] [role="tablist"] {
+  --fork-tabs-bg: rgba(255, 255, 255, 0.03);
+  --fork-tabs-border: rgba(255, 255, 255, 0.09);
+  --fork-tabs-indicator-bg: rgba(255, 255, 255, 0.10);
+  --fork-tabs-indicator-shadow: none;
+  --fork-tabs-active-color: #ededed;
+}
+
 /* --- 折射高光：变量给不了 inset 阴影的地方，用选择器补上 --- */
 
 /* 两侧栏：各是一整块玻璃板。顶部亮边 + 整圈发丝边 + 底部反光＝厚度感；
@@ -389,20 +424,22 @@
     0 20px 50px rgba(0, 0, 0, 0.62);
 }
 
-/* 浮动输入栏：浮在最上层，所以模糊最强、边缘最亮 */
+/* 浮动输入栏：容器只管定位与事件，**不做玻璃**。
+   ActionBar 里真正的输入框写的是 background: var(--panel-bg) +
+   box-shadow: var(--panel-shadow)，早已被上面那条属性选择器命中、自带玻璃。
+   在容器上再套一层会比输入框大出一圈——顶部 28px（那是「不开启 worktree」
+   提示行的高度）、底部 12px（ActionBar 的 padding-bottom）、左右各 16px，
+   看上去就是玻璃边框与输入框对不齐。 */
 :root[data-theme="glass"] .fork-shell__footer--floating > * {
   pointer-events: auto;
-  backdrop-filter: blur(44px) saturate(135%);
-  -webkit-backdrop-filter: blur(44px) saturate(135%);
-  border-radius: 18px;
-  background:
-    var(--fork-glass-grain),
-    rgba(255, 255, 255, 0.09) !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.42),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.10),
-    0 18px 46px rgba(0, 0, 0, 0.7);
+}
+
+/* 这两层（App.tsx 的 footer 外壳、ActionBar 最外层）浮动时纯属定位容器，
+   背景必须让位：它们写死 var(--content-bg)，浅色下高达 0.74，
+   会在输入框外糊出一个更大的白矩形（深色下 0.02 看不见，才没早暴露）。 */
+:root[data-theme="glass"] .fork-shell__footer--floating > *,
+:root[data-theme="glass"] .fork-shell__footer--floating > * > * {
+  background: transparent !important;
 }
 
 /* 拖拽条落在两块玻璃板的缝隙里，静态时用白色半透明而非强调色——
@@ -567,15 +604,6 @@
     inset 0 0 0 1px rgba(255, 255, 255, 0.50),
     0 18px 44px rgba(70, 60, 110, 0.16);
 }
-:root[data-theme="glass"][data-scheme="light"] .fork-shell__footer--floating > * {
-  background:
-    var(--fork-glass-grain),
-    rgba(255, 255, 255, 0.72) !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 1),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.60),
-    0 16px 40px rgba(70, 60, 110, 0.18);
-}
 :root[data-theme="glass"][data-scheme="light"] .mindfs-sidebar-resize-rail::before {
   background: linear-gradient(transparent, rgba(60, 60, 67, 0.06) 12%, rgba(60, 60, 67, 0.20), rgba(60, 60, 67, 0.06) 88%, transparent);
 }
@@ -607,9 +635,19 @@
   :root[data-theme="glass"] [data-fork-region],
   :root[data-theme="glass"] [style*="var(--menu-bg)"],
   :root[data-theme="glass"] [style*="var(--panel-bg)"],
+  :root[data-theme="glass"] .markdown-viewer pre[class],
+  :root[data-theme="glass"] .markdown-viewer div:has(> table),
   :root[data-theme="glass"] .fork-shell__footer--floating > * {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+  :root[data-theme="glass"] .markdown-viewer pre[class],
+  :root[data-theme="glass"] .markdown-viewer div:has(> table) {
+    background: #1c1c22 !important;
+  }
+  :root[data-theme="glass"][data-scheme="light"] .markdown-viewer pre[class],
+  :root[data-theme="glass"][data-scheme="light"] .markdown-viewer div:has(> table) {
+    background: #ffffff !important;
   }
   :root[data-theme="glass"] {
     --fork-sidebar-bg: #16161b;
@@ -625,6 +663,322 @@
     --panel-bg: #ffffff;
     --menu-bg: #ffffff;
   }
+}
+
+
+/* ------------------------------------------------------------
+ * 首页看板面板 —— 边缘厚度反光
+ *
+ * 玻璃本体刻意**全透明、不模糊**：看得见的只是边缘那圈光，玻璃本身隐形。
+ * 这比「半透明 + 高斯模糊」更接近真实的无色玻璃，且内容零遮挡、几乎无开销。
+ *
+ * 六层 inset 各司其职，负 spread 是关键——它让阴影向内收缩，配合偏移后
+ * 只在单侧显形，才有「某条边亮」而不是「四周一圈亮」。
+ * 必须挂在 ::before 上：本体若带 backdrop-filter，会与 inset 阴影相互影响。
+ *
+ * 外阴影同样得靠负 spread，但理由不同：这些面板的父级是横向滚动容器
+ * （inline `overflow: auto hidden`），它会把溢出的阴影**硬切成直角**——
+ * 面板底下只有 12px padding、左右只有 1px，而 `0 18px 50px` 要向外扩 50px，
+ * 于是三块面板的阴影糊成一整片、再被裁出一个直角矩形，看着就像面板背后
+ * 垫了块不透明底板。负 spread 把阴影收回裁剪盒内（下方最多露 8px），
+ * 阴影因此只在底缘显形——面板下方本来也就放不下更大的阴影。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"] {
+  position: relative;
+  background: rgba(255, 255, 255, 0) !important;
+  backdrop-filter: saturate(160%);
+  -webkit-backdrop-filter: saturate(160%);
+  border-radius: 18px !important;
+  box-shadow: 0 8px 16px -8px rgba(0, 0, 0, 0.72) !important;
+}
+
+:root[data-theme="glass"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 2;
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.64),
+    inset 1.8px 3px 0 -2px rgba(255, 255, 255, 0.85),
+    inset -2px -2px 0 -2px rgba(255, 255, 255, 0.85),
+    inset -3px -9px 1px -6px rgba(255, 255, 255, 0.55),
+    inset 3px 9px 1px -6px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 5px 0 rgba(0, 0, 0, 0.12);
+}
+
+/* 镜面高光，坐标由 observeEdgeSpecular 写入 */
+:root[data-theme="glass"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  background: radial-gradient(
+    220px circle at var(--fork-mx, 50%) var(--fork-my, 50%),
+    rgba(255, 255, 255, 0.28),
+    transparent 65%
+  );
+}
+:root[data-theme="glass"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"]:hover::after {
+  opacity: 1;
+}
+
+/* 浅色下纯白边会糊进亮背景，压暗一档并改用彩色投影拉层次 */
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"] {
+  box-shadow: 0 8px 16px -8px rgba(70, 60, 110, 0.42) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="main"] [style*="rgba(148, 163, 184, 0.06)"]::before {
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.92),
+    inset 1.8px 3px 0 -2px rgba(255, 255, 255, 1),
+    inset -2px -2px 0 -2px rgba(255, 255, 255, 1),
+    inset -3px -9px 1px -6px rgba(255, 255, 255, 0.75),
+    inset 3px 9px 1px -6px rgba(255, 255, 255, 0.55),
+    inset 0 -1px 5px 0 rgba(60, 60, 90, 0.16);
+}
+
+
+/* ------------------------------------------------------------
+ * Markdown 代码块与表格 —— 玻璃卡片
+ *
+ * 对话流与文件预览共用同一个 MarkdownViewer（外层 .markdown-viewer），
+ * 所以这一段同时管住「对话里贴出来的代码/表格」和「打开 .md 文档」两处。
+ * 命中的是稳定 class 而非 inline style 字符串，比本文件里那几条属性选择器结实。
+ *
+ * 与首页看板的取舍不同：那里的面板是空容器，可以做成全透明只留一圈边缘光；
+ * 这里承载正文，玻璃必须留底色 + backdrop-filter，否则代码直接落在壁纸上没法读。
+ *
+ * 两个硬约束：
+ *   1. 边缘光走元素自身的 inset 阴影，不像看板那样挂 ::before ——
+ *      <pre> 和表格外壳都是 overflow: auto 的滚动容器，绝对定位的伪元素
+ *      会跟着内容一起滚走；inset 阴影画在边框盒上，横向滚动时纹丝不动。
+ *      六层参数与圆角直接沿用看板那套，两处观感一致。腾出来的 ::before
+ *      拿去画 macOS 圆点（见下一段）。
+ *   2. 外阴影一律用负 spread 收进自身轮廓：这些块外面常套着 overflow: hidden
+ *      的对话气泡/预览容器，扩散出去的部分会被裁成直角（首页看板踩过这个坑）。
+ *
+ * 选择器上的两处讲究：
+ *   - `pre[class]` 而不是 `pre`：代码块一定带 class 属性（有语言时是
+ *     language-xxx，无语言时 React 渲染成 class=""），而 Mermaid 的渲染错误块
+ *     没有 class——把它排除掉，红框红字的报错语义才不会被玻璃洗掉。
+ *   - `div:has(> table)`：表格的圆角外壳是 ReactMarkdown 包的匿名 div。老
+ *     WebView 不支持 :has() 时这条整体失效，退化成上游原样，不影响功能。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"] .markdown-viewer pre[class],
+:root[data-theme="glass"] .markdown-viewer div:has(> table) {
+  background: var(--fork-glass-grain), rgba(255, 255, 255, 0.06) !important;
+  backdrop-filter: blur(20px) saturate(145%);
+  -webkit-backdrop-filter: blur(20px) saturate(145%);
+  border: none !important;
+  border-radius: 18px !important;
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.64),
+    inset 1.8px 3px 0 -2px rgba(255, 255, 255, 0.85),
+    inset -2px -2px 0 -2px rgba(255, 255, 255, 0.85),
+    inset -3px -9px 1px -6px rgba(255, 255, 255, 0.55),
+    inset 3px 9px 1px -6px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 5px 0 rgba(0, 0, 0, 0.12),
+    0 10px 20px -10px rgba(0, 0, 0, 0.65) !important;
+}
+
+/* ------------------------------------------------------------
+ * 左上角的 macOS 三色圆点
+ *
+ * 一个伪元素画三个点：本体是红点，另两个用 box-shadow 平移复制出来——
+ * 比往上游组件里塞三个 span 干净得多。
+ *
+ * 挂载点按「谁在滚动」分两种：
+ *   - 代码块外面有一层不滚动的定位 wrapper（MarkdownCodeBlock 的最外层 div，
+ *     inline 已经是 position: relative），absolute 定位即可。
+ *   - 表格外壳自己就是横向滚动容器、没有外层可借，只能让伪元素参与正常流
+ *     并 position: sticky：横向滚表格时圆点钉在左上角不跟着跑，同时用它的
+ *     高度撑出一条「标题栏」，把表头顶下去。
+ * 圆点占的高度必须从内容里让出来，否则会压在首行代码上。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"] .markdown-viewer div:has(> pre[class])::before,
+:root[data-theme="glass"] .markdown-viewer div:has(> table)::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #ff5f57;
+  box-shadow:
+    17px 0 0 #febc2e,
+    34px 0 0 #28c840;
+  z-index: 2;
+}
+
+:root[data-theme="glass"] .markdown-viewer div:has(> pre[class])::before {
+  position: absolute;
+  top: 15px;
+  left: 17px;
+}
+:root[data-theme="glass"] .markdown-viewer pre[class] {
+  padding-top: 40px !important;
+}
+
+:root[data-theme="glass"] .markdown-viewer div:has(> table)::before {
+  display: block;
+  position: sticky;
+  left: 17px;
+  margin: 15px 0 14px 17px;
+}
+
+/* 表头做成压在玻璃上的一条亮带，替代上游那层在深色下看不见的 rgba(0,0,0,0.04) */
+:root[data-theme="glass"] .markdown-viewer thead {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 单元格横线：上游写死 rgba(0,0,0,0.03)，深色玻璃上等于没有 */
+:root[data-theme="glass"] .markdown-viewer td {
+  border-top-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* 末行的分隔线会横穿圆角底缘，露出一条直线，抹掉 */
+:root[data-theme="glass"] .markdown-viewer tbody tr:last-child {
+  border-bottom: none !important;
+}
+
+/* 行内代码：同样是 rgba(0,0,0,0.05) 打底，深色下整个消失。
+   这里刻意不加 backdrop-filter——一段正文里可能有几十个行内代码，
+   每个都起一层合成层不值当，用实色半透明 + 一圈发丝边即可。 */
+:root[data-theme="glass"] .markdown-viewer :not(pre) > code {
+  background: rgba(255, 255, 255, 0.10) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.10);
+}
+
+/* 浅色：玻璃更白更实压住底下的浓彩壁纸，高光由白色 inset 换成彩色外阴影 */
+:root[data-theme="glass"][data-scheme="light"] .markdown-viewer pre[class],
+:root[data-theme="glass"][data-scheme="light"] .markdown-viewer div:has(> table) {
+  background: var(--fork-glass-grain), rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.92),
+    inset 1.8px 3px 0 -2px rgba(255, 255, 255, 1),
+    inset -2px -2px 0 -2px rgba(255, 255, 255, 1),
+    inset -3px -9px 1px -6px rgba(255, 255, 255, 0.75),
+    inset 3px 9px 1px -6px rgba(255, 255, 255, 0.55),
+    inset 0 -1px 5px 0 rgba(60, 60, 90, 0.16),
+    0 10px 20px -10px rgba(70, 60, 110, 0.38) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] .markdown-viewer thead {
+  background: rgba(255, 255, 255, 0.55) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] .markdown-viewer td {
+  border-top-color: rgba(60, 60, 67, 0.08) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] .markdown-viewer :not(pre) > code {
+  background: rgba(255, 255, 255, 0.72) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.80);
+}
+
+
+/* ------------------------------------------------------------
+ * Git diff 配色 —— 深色下的可读性修复
+ *
+ * 上游 GitDiffViewer / MarkdownViewer 把 diff 行的前景色写死成浅色主题用的
+ * 深绿 #166534 / 深红 #991b1b / 深蓝 #1d4ed8。深色下这三个色落在各自的半透明
+ * 底色上，对比度只有 1.5:1 上下——就是「灰蒙蒙、字看不清」的来源（AA 要 4.5:1）。
+ * 这里把前景换成亮色、底色各补一档。
+ *
+ * 命中方式分两种，按色值的专属程度决定：
+ *   - #166534 / #991b1b 只出现在 diff 与 Mermaid 报错块，按颜色单独命中即可，
+ *     顺带把报错块的红字也提亮（那里同样是深红压深底）。
+ *   - #1d4ed8 在 ActionBar / SessionList / ToolCallCard 里还兼作强调蓝，
+ *     只按颜色命中会误伤，必须与 hunk 专属的底色成对匹配。
+ *
+ * 注意选择器里的颜色必须写成 rgb() 而不是源码里的 hex：React 是逐属性
+ * 赋值（el.style.color = "#166534"）的，浏览器序列化 style 属性时会把 hex
+ * 规范化成 rgb(22, 101, 52)，`[style*="#166534"]` 一个都匹配不上。同理
+ * alpha 的末位 0 会被去掉——源码里的 rgba(59, 130, 246, 0.10) 在 DOM 里是
+ * 0.1，写成 0.10 同样匹配不上（0.14 / 0.22 这类不受影响，照抄即可）。
+ * var() 则原样保留。
+ *
+ * 两个组件用的是同一组值，因此 git 面板的 diff 与对话里贴的 ```diff 代码块
+ * 一起被修好。浅色变体不覆盖——上游这套值本来就是给浅色配的。
+ * ------------------------------------------------------------ */
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(34, 197, 94, 0.14)"],
+:root[data-theme="codex"] [style*="rgba(34, 197, 94, 0.14)"] {
+  background: rgba(34, 197, 94, 0.19) !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(239, 68, 68, 0.14)"],
+:root[data-theme="codex"] [style*="rgba(239, 68, 68, 0.14)"] {
+  background: rgba(248, 113, 113, 0.19) !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(59, 130, 246, 0.1)"],
+:root[data-theme="codex"] [style*="rgba(59, 130, 246, 0.1)"] {
+  background: rgba(96, 165, 250, 0.16) !important;
+}
+
+/* 前景。add/del 的行内差异高亮是子 span，继承父行颜色，只改父行即可 */
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgb(22, 101, 52)"],
+:root[data-theme="codex"] [style*="rgb(22, 101, 52)"] {
+  color: #7ee2a8 !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgb(153, 27, 27)"],
+:root[data-theme="codex"] [style*="rgb(153, 27, 27)"] {
+  color: #fca5a5 !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(59, 130, 246, 0.1)"][style*="rgb(29, 78, 216)"],
+:root[data-theme="codex"] [style*="rgba(59, 130, 246, 0.1)"][style*="rgb(29, 78, 216)"] {
+  color: #93c5fd !important;
+}
+
+/* 行内差异高亮（改动的那几个词）：底色要比整行更强才分得出来 */
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(22, 163, 74, 0.22)"],
+:root[data-theme="codex"] [style*="rgba(22, 163, 74, 0.22)"] {
+  background: rgba(34, 197, 94, 0.34) !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgba(220, 38, 38, 0.22)"],
+:root[data-theme="codex"] [style*="rgba(220, 38, 38, 0.22)"] {
+  background: rgba(248, 113, 113, 0.32) !important;
+}
+
+/* +N / -N 统计数字。这两个色值在 Git 面板、历史、任务对话框里也用作
+   成功/失败文字，全都是深色下需要提亮的场景，一并命中是对的 */
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgb(21, 128, 61)"],
+:root[data-theme="codex"] [style*="rgb(21, 128, 61)"] {
+  color: #4ade80 !important;
+}
+:root[data-theme="glass"]:not([data-scheme="light"]) [style*="rgb(185, 28, 28)"],
+:root[data-theme="codex"] [style*="rgb(185, 28, 28)"] {
+  color: #f87171 !important;
+}
+
+
+/* ------------------------------------------------------------
+ * 上游标签栏 —— 与侧栏 ForkGlassTabs 对齐
+ *
+ * 指示器由 services/forkTabIndicator.ts 注入（首页看板的标签栏长在 App.tsx
+ * 上万行 JSX 里，换组件的代价是每次合并上游都在那儿解冲突）。这里只做两件
+ * CSS 才能做的事：抹掉上游「选中项直接上底色」那层，以及把按钮抬到指示器
+ * 上方。不限主题——侧栏在所有主题下都是滑动指示器，这里保持一致。
+ * ------------------------------------------------------------ */
+[role="tablist"]:not([data-fork-glass-tabs]) > [role="tab"] {
+  position: relative;
+  z-index: 1;
+  /* 上游的选中底色与投影交给指示器，这里必须让位，否则两层底色叠在一起 */
+  background: transparent !important;
+  box-shadow: none !important;
+  transition: color 0.18s ease;
+}
+[role="tablist"]:not([data-fork-glass-tabs]) > [role="tab"][aria-selected="true"] {
+  color: var(--fork-tabs-active-color, #fff) !important;
+}
+
+/* 标签之间那几条竖线：有了滑动指示器后会被压在底下露出一截，去掉 */
+[role="tablist"]:not([data-fork-glass-tabs]) > span[aria-hidden="true"] {
+  background: transparent !important;
+}
+
+/* 容器材质对齐侧栏那套变量（非 glass 主题下 fallback 即上游原值） */
+[role="tablist"]:not([data-fork-glass-tabs]) {
+  border-color: var(--fork-tabs-border, rgba(100, 116, 139, 0.36)) !important;
+  background: var(--fork-tabs-bg, rgba(148, 163, 184, 0.10)) !important;
 }
 
 
