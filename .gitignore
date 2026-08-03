@@ -3,6 +3,7 @@
 .mindfs/
 .specify/
 .gemini/
+.playwright-mcp/
 .DS_Store
 Thumbs.db
 *.tmp
