@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	types "mindfs/server/internal/agent/types"
+	"mindfs/server/internal/agent/types"
+	"mindfs/server/internal/commandexec"
 
 	acp "github.com/coder/acp-go-sdk"
 )
@@ -32,6 +33,9 @@ type Process struct {
 	conn      *acp.ClientSideConnection
 	client    *mindfsClient
 	waitCh    chan error
+
+	shells    []commandexec.ShellSpec
+	terminals *terminalManager
 
 	mu            sync.RWMutex
 	sessions      map[string]*sessionState // sessionKey -> state
@@ -330,22 +334,73 @@ func (c *mindfsClient) WriteTextFile(ctx context.Context, params acp.WriteTextFi
 }
 
 func (c *mindfsClient) CreateTerminal(ctx context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, nil
+	cwd := ""
+	if params.Cwd != nil {
+		cwd = *params.Cwd
+	}
+	terminalID, err := c.proc.terminals.create(
+		ctx,
+		string(params.SessionId),
+		c.proc.shells,
+		params.Command,
+		params.Args,
+		cwd,
+		envVariablesToStrings(params.Env),
+		intPtrValue(params.OutputByteLimit),
+	)
+	if err != nil {
+		return acp.CreateTerminalResponse{}, err
+	}
+	log.Printf("[agent/acp] terminal.create agent=%s session=%s id=%s command=%q", c.proc.agentLabel(), params.SessionId, terminalID, params.Command)
+	return acp.CreateTerminalResponse{TerminalId: terminalID}, nil
 }
 
 func (c *mindfsClient) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, nil
+	output, status, exited, exists := c.proc.terminals.output(params.TerminalId)
+	if !exists {
+		return acp.TerminalOutputResponse{}, acp.NewInvalidParams(map[string]any{"error": "terminal not found: " + params.TerminalId})
+	}
+	resp := acp.TerminalOutputResponse{
+		Output:    output,
+		Truncated: c.proc.terminals.truncated(params.TerminalId),
+	}
+	if exited {
+		resp.ExitStatus = &acp.TerminalExitStatus{
+			ExitCode: &status.ExitCode,
+			Signal:   signalPtr(status.Signal),
+		}
+	}
+	return resp, nil
 }
 
 func (c *mindfsClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	if !c.proc.terminals.release(params.TerminalId) {
+		return acp.ReleaseTerminalResponse{}, acp.NewInvalidParams(map[string]any{"error": "terminal not found: " + params.TerminalId})
+	}
+	log.Printf("[agent/acp] terminal.release agent=%s session=%s id=%s", c.proc.agentLabel(), params.SessionId, params.TerminalId)
 	return acp.ReleaseTerminalResponse{}, nil
 }
 
 func (c *mindfsClient) WaitForTerminalExit(ctx context.Context, params acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, nil
+	status, exited, exists := c.proc.terminals.waitForExit(ctx, params.TerminalId)
+	if !exists {
+		return acp.WaitForTerminalExitResponse{}, acp.NewInvalidParams(map[string]any{"error": "terminal not found: " + params.TerminalId})
+	}
+	if !exited {
+		// Request was cancelled (ctx done) before the command finished.
+		return acp.WaitForTerminalExitResponse{}, ctx.Err()
+	}
+	return acp.WaitForTerminalExitResponse{
+		ExitCode: &status.ExitCode,
+		Signal:   signalPtr(status.Signal),
+	}, nil
 }
 
 func (c *mindfsClient) KillTerminal(ctx context.Context, params acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	if !c.proc.terminals.kill(params.TerminalId) {
+		return acp.KillTerminalResponse{}, acp.NewInvalidParams(map[string]any{"error": "terminal not found: " + params.TerminalId})
+	}
+	log.Printf("[agent/acp] terminal.kill agent=%s session=%s id=%s", c.proc.agentLabel(), params.SessionId, params.TerminalId)
 	return acp.KillTerminalResponse{}, nil
 }
 
@@ -398,7 +453,7 @@ func newMessageChunkUpdate(sessionID, content string, meta map[string]any) Sessi
 }
 
 // Start spawns an agent process with ACP mode.
-func Start(ctx context.Context, agentName, command string, args []string, cwd string, env map[string]string) (*Process, error) {
+func Start(ctx context.Context, agentName, command string, args []string, cwd string, env map[string]string, shells []commandexec.ShellSpec) (*Process, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -428,6 +483,8 @@ func Start(ctx context.Context, agentName, command string, args []string, cwd st
 		sessions:     make(map[string]*sessionState),
 		sessionsByID: make(map[string]*sessionState),
 		waitCh:       make(chan error, 1),
+		shells:       shells,
+		terminals:    newTerminalManager(),
 	}
 	proc.client = &mindfsClient{proc: proc}
 	go streamProcessStderr(proc, stderr)
@@ -616,18 +673,28 @@ func (p *Process) CancelCurrentTurn(sessionKey string) error {
 	})
 }
 
-// CloseSession removes a session from the process.
+// CloseSession removes a session from the process and kills any terminals it
+// spawned (ACP terminals belong to a session).
 func (p *Process) CloseSession(sessionKey string) {
 	p.mu.Lock()
 	if sess, ok := p.sessions[sessionKey]; ok {
 		delete(p.sessionsByID, string(sess.ID))
 		delete(p.sessions, sessionKey)
+		sessionID := string(sess.ID)
+		p.mu.Unlock()
+		if p.terminals != nil {
+			p.terminals.closeSession(sessionID)
+		}
+		return
 	}
 	p.mu.Unlock()
 }
 
-// Close terminates the process.
+// Close terminates the process and all of its terminals.
 func (p *Process) Close() error {
+	if p.terminals != nil {
+		p.terminals.closeAll()
+	}
 	p.mu.Lock()
 	cmd := p.cmd
 	waitCh := p.waitCh
@@ -924,6 +991,31 @@ func (p *Process) wrapPromptError(sessionKey, sessionID string, err error) error
 	}
 	log.Printf("[agent/acp] send.error agent=%s session_key=%s err=%v", p.agentLabel(), sessionKey, err)
 	return err
+}
+
+func envVariablesToStrings(env []acp.EnvVariable) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		out = append(out, entry.Name+"="+entry.Value)
+	}
+	return out
+}
+
+func intPtrValue(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func signalPtr(signal string) *string {
+	if strings.TrimSpace(signal) == "" {
+		return nil
+	}
+	return &signal
 }
 
 func (p *Process) captureStderrHint(line string) {

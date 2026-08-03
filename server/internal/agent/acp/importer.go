@@ -182,7 +182,7 @@ func (i *Importer) openProcess(ctx context.Context, rootPath string) (*Process, 
 	if cwd == "" {
 		return nil, "", errors.New("root path required")
 	}
-	proc, err := Start(ctx, i.agentName, i.command, i.args, cwd, i.env)
+	proc, err := Start(ctx, i.agentName, i.command, i.args, cwd, i.env, nil)
 	if err != nil {
 		return nil, "", err
 	}

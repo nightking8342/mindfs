@@ -11,6 +11,7 @@ import (
 
 	"mindfs/server/internal/agent/logs"
 	types "mindfs/server/internal/agent/types"
+	"mindfs/server/internal/commandexec"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 )
@@ -27,6 +28,7 @@ type OpenOptions struct {
 	Env             map[string]string
 	Cwd             string
 	ResumeSessionID string
+	Shells          []commandexec.ShellSpec
 }
 
 type Runtime struct {
@@ -243,7 +245,7 @@ func (r *Runtime) getOrCreateProcess(opts OpenOptions) (*Process, error) {
 	}
 	r.mu.Unlock()
 
-	proc, err := Start(r.processCtx, opts.AgentName, opts.Command, opts.Args, opts.Cwd, opts.Env)
+	proc, err := Start(r.processCtx, opts.AgentName, opts.Command, opts.Args, opts.Cwd, opts.Env, opts.Shells)
 	if err != nil {
 		return nil, err
 	}

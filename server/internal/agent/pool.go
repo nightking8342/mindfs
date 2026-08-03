@@ -12,6 +12,7 @@ import (
 	"mindfs/server/internal/agent/claude"
 	"mindfs/server/internal/agent/codex"
 	agenttypes "mindfs/server/internal/agent/types"
+	"mindfs/server/internal/commandexec"
 )
 
 // Pool routes agent session creation to protocol-specific runtimes.
@@ -168,6 +169,7 @@ func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definitio
 			Env:             cloneEnv(def.Env),
 			Cwd:             def.ResolveCwd(in.RootPath),
 			ResumeSessionID: in.AgentSessionID,
+			Shells:          poolShellSpecs(p.cfg.Shells),
 		})
 	}
 }
@@ -222,6 +224,22 @@ func cloneEnv(env map[string]string) map[string]string {
 	out := make(map[string]string, len(env))
 	for key, value := range env {
 		out[key] = value
+	}
+	return out
+}
+
+func poolShellSpecs(shells []Shell) []commandexec.ShellSpec {
+	if len(shells) == 0 {
+		return nil
+	}
+	out := make([]commandexec.ShellSpec, 0, len(shells))
+	for _, shell := range shells {
+		out = append(out, commandexec.ShellSpec{
+			Command:       shell.Command,
+			Args:          append([]string(nil), shell.Args...),
+			LongShellArgs: append([]string(nil), shell.LongShellArgs...),
+			CommandPrefix: shell.CommandPrefix,
+		})
 	}
 	return out
 }
