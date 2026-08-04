@@ -47,6 +47,9 @@ type Process struct {
 	commands      []acp.AvailableCommand
 	stderrHint    stderrHintState
 	activePrompt  activePromptState
+
+	elicitation   *elicitationRegistry
+	activeSession activeSessionState
 }
 
 type CapabilitySnapshot struct {
@@ -68,6 +71,14 @@ type activePromptState struct {
 	cancel context.CancelFunc
 }
 
+// activeSessionState tracks the most recently active ACP session on a process.
+// It is used to route agent-initiated requests (like elicitation) that the Go
+// SDK does not yet attach a session id to.
+type activeSessionState struct {
+	mu sync.Mutex
+	id string
+}
+
 var stderrMessagePattern = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 
 type sessionState struct {
@@ -79,6 +90,12 @@ type sessionState struct {
 	contextWindow types.ContextWindow
 	onUpdate      func(SessionUpdate)
 	mu            sync.RWMutex
+
+	// emitMu serializes handler invocations. The SDK drains notifications on a
+	// single goroutine but dispatches each id-bearing request (elicitation,
+	// permission) on its own, so without this the upper-layer handler — which
+	// keeps unsynchronized per-turn state — would be entered concurrently.
+	emitMu sync.Mutex
 }
 
 type qwenSlashCommandNotification struct {
@@ -100,6 +117,29 @@ func (s *sessionState) getOnUpdate() func(SessionUpdate) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.onUpdate
+}
+
+// emit delivers an update to the registered handler, serialized per session.
+// It reports whether a handler was registered. All update delivery must go
+// through this method: the upper-layer handler keeps unsynchronized per-turn
+// state (aux buffer, thought buffer, response text), and the SDK invokes
+// request handlers on goroutines that run concurrently with the notification
+// goroutine.
+func (s *sessionState) emit(update SessionUpdate) bool {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	handler := s.getOnUpdate()
+	if handler == nil {
+		return false
+	}
+	handler(update)
+	return true
+}
+
+// emitHandler returns emit as a plain handler func for call sites that want to
+// capture delivery and invoke it later.
+func (s *sessionState) emitHandler() sessionUpdateHandler {
+	return func(update SessionUpdate) { s.emit(update) }
 }
 
 func (s *sessionState) setModels(models *acp.SessionModelState) {
@@ -173,7 +213,12 @@ func (s *sessionState) getContextWindow() types.ContextWindow {
 type SessionUpdate struct {
 	Type      UpdateType
 	SessionID string
+	AgentName string
 	Raw       acp.SessionUpdate
+	// TrustedMeta carries meta that MindFS itself produced (never parsed from
+	// the agent's wire payload), so it is exempt from sanitizing. Forgery is
+	// impossible because this field has no JSON representation on the wire.
+	TrustedMeta map[string]any
 }
 
 // UpdateType defines the type of session update.
@@ -206,7 +251,10 @@ func (p *Process) getSessionUpdateHandler(sessionID string) sessionUpdateHandler
 	if session == nil {
 		return nil
 	}
-	return session.getOnUpdate()
+	if session.getOnUpdate() == nil {
+		return nil
+	}
+	return session.emitHandler()
 }
 
 func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
@@ -214,12 +262,15 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 	if session == nil {
 		return nil
 	}
-	handler := session.getOnUpdate()
-	if handler == nil {
+	// Only sessions this process still tracks may become the elicitation
+	// routing target; a late update for a closed session would otherwise
+	// point activeSession at a session that can no longer receive anything.
+	c.proc.setActiveSession(string(params.SessionId))
+	if session.getOnUpdate() == nil {
 		return nil
 	}
 
-	internalUpdate := wrapSessionUpdate(string(params.SessionId), params.Update)
+	internalUpdate := wrapSessionUpdate(c.proc.agentLabel(), string(params.SessionId), params.Update)
 	if params.Update.AvailableCommandsUpdate != nil {
 		session.setCommands(params.Update.AvailableCommandsUpdate.AvailableCommands)
 		c.proc.mu.Lock()
@@ -252,7 +303,7 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 	}
 
 	if internalUpdate.Type != "" {
-		handler(internalUpdate)
+		session.emit(internalUpdate)
 	} else {
 		raw, _ := json.Marshal(params.Update)
 		log.Printf("[agent/acp] unhandled raw=%s", string(raw))
@@ -264,35 +315,34 @@ func (c *mindfsClient) RequestPermission(ctx context.Context, params acp.Request
 	// Emit a synthetic tool_call update for permission-gated operations so upper
 	// layers can track tool execution and associate file paths immediately.
 	if session := c.proc.getSessionByID(string(params.SessionId)); session != nil {
-		if handler := session.getOnUpdate(); handler != nil {
-			toolCall := &acp.SessionUpdateToolCall{
-				Content:    params.ToolCall.Content,
-				Locations:  params.ToolCall.Locations,
-				RawInput:   params.ToolCall.RawInput,
-				RawOutput:  params.ToolCall.RawOutput,
-				Title:      "",
-				ToolCallId: params.ToolCall.ToolCallId,
-				Status:     acp.ToolCallStatusPending,
-			}
-			if params.ToolCall.Title != nil {
-				toolCall.Title = *params.ToolCall.Title
-			}
-			if params.ToolCall.Kind != nil {
-				toolCall.Kind = *params.ToolCall.Kind
-			} else {
-				toolCall.Kind = acp.ToolKindOther
-			}
-			if params.ToolCall.Status != nil {
-				toolCall.Status = *params.ToolCall.Status
-			}
-			handler(SessionUpdate{
-				Type:      UpdateTypeToolCall,
-				SessionID: string(params.SessionId),
-				Raw: acp.SessionUpdate{
-					ToolCall: toolCall,
-				},
-			})
+		toolCall := &acp.SessionUpdateToolCall{
+			Content:    params.ToolCall.Content,
+			Locations:  params.ToolCall.Locations,
+			RawInput:   params.ToolCall.RawInput,
+			RawOutput:  params.ToolCall.RawOutput,
+			Title:      "",
+			ToolCallId: params.ToolCall.ToolCallId,
+			Status:     acp.ToolCallStatusPending,
 		}
+		if params.ToolCall.Title != nil {
+			toolCall.Title = *params.ToolCall.Title
+		}
+		if params.ToolCall.Kind != nil {
+			toolCall.Kind = *params.ToolCall.Kind
+		} else {
+			toolCall.Kind = acp.ToolKindOther
+		}
+		if params.ToolCall.Status != nil {
+			toolCall.Status = *params.ToolCall.Status
+		}
+		session.emit(SessionUpdate{
+			Type:      UpdateTypeToolCall,
+			AgentName: c.proc.agentLabel(),
+			SessionID: string(params.SessionId),
+			Raw: acp.SessionUpdate{
+				ToolCall: toolCall,
+			},
+		})
 	}
 	// TODO: Forward to frontend for user approval
 	// For now, auto-approve with first allow option
@@ -404,10 +454,12 @@ func (c *mindfsClient) KillTerminal(ctx context.Context, params acp.KillTerminal
 	return acp.KillTerminalResponse{}, nil
 }
 
-func (c *mindfsClient) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+func (c *mindfsClient) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
 	case "_qwencode/slash_command":
 		return nil, c.handleQwenSlashCommandNotification(params)
+	case "_x.ai/ask_user_question":
+		return c.handleXAIAskUserQuestion(ctx, params)
 	default:
 		return nil, acp.NewMethodNotFound(method)
 	}
@@ -485,6 +537,7 @@ func Start(ctx context.Context, agentName, command string, args []string, cwd st
 		waitCh:       make(chan error, 1),
 		shells:       shells,
 		terminals:    newTerminalManager(),
+		elicitation:  newElicitationRegistry(),
 	}
 	proc.client = &mindfsClient{proc: proc}
 	go streamProcessStderr(proc, stderr)
@@ -504,6 +557,9 @@ func (p *Process) Initialize(ctx context.Context) error {
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientCapabilities: acp.ClientCapabilities{
 			Terminal: true,
+			Elicitation: &acp.ElicitationCapabilities{
+				Form: &acp.ElicitationFormCapabilities{},
+			},
 		},
 		ClientInfo: &acp.Implementation{
 			Name:    "mindfs",
@@ -565,6 +621,7 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	p.sessions[sessionKey] = sess
 	p.sessionsByID[string(resp.SessionId)] = sess
 	p.mu.Unlock()
+	p.setActiveSession(string(resp.SessionId))
 	return nil
 }
 
@@ -607,6 +664,7 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	p.sessions[sessionKey] = sess
 	p.sessionsByID[string(sess.ID)] = sess
 	p.mu.Unlock()
+	p.setActiveSession(string(sess.ID))
 	return nil
 }
 
@@ -627,6 +685,12 @@ func (p *Process) SendMessage(ctx context.Context, sessionKey, content string) e
 		return nil
 	}
 	log.Printf("[agent/acp] send.begin agent=%s session_key=%s content=%q", p.agentLabel(), sessionKey, content)
+
+	// Agent-initiated requests (elicitation) carry no session id, so they are
+	// routed to the most recently active session. Claim it here: an agent may
+	// ask before it emits any session/update for this turn, and processes are
+	// shared across every session of the same agent.
+	p.setActiveSession(string(sess.ID))
 
 	promptCtx, promptCancel := context.WithCancel(ctx)
 	promptID := time.Now().UnixNano()
@@ -652,12 +716,10 @@ func (p *Process) SendMessage(ctx context.Context, sessionKey, content string) e
 	}
 
 	// Signal completion
-	if onUpdate := sess.getOnUpdate(); onUpdate != nil {
-		onUpdate(SessionUpdate{
-			Type:      UpdateTypeMessageDone,
-			SessionID: string(sess.ID),
-		})
-	}
+	sess.emit(SessionUpdate{
+		Type:      UpdateTypeMessageDone,
+		SessionID: string(sess.ID),
+	})
 	log.Printf("[agent/acp] send.done agent=%s session_key=%s duration_ms=%d", p.agentLabel(), sessionKey, time.Since(start).Milliseconds())
 
 	return nil
@@ -668,30 +730,50 @@ func (p *Process) CancelCurrentTurn(sessionKey string) error {
 	if sess == nil {
 		return nil
 	}
+	p.releasePendingElicitations(sessionKey)
 	return p.conn.Cancel(context.Background(), acp.CancelNotification{
 		SessionId: sess.ID,
 	})
+}
+
+// releasePendingElicitations unblocks every ask_user request waiting on a
+// session. session/cancel does not cancel the SDK's inbound request contexts,
+// so without this a pending elicitation blocks the agent's turn — and holds a
+// handler captured from the cancelled turn — for the full elicitationTimeout.
+func (p *Process) releasePendingElicitations(sessionKey string) {
+	sess := p.getSessionByKey(sessionKey)
+	if sess == nil || p.elicitation == nil {
+		return
+	}
+	p.elicitation.abandonSession(string(sess.ID))
 }
 
 // CloseSession removes a session from the process and kills any terminals it
 // spawned (ACP terminals belong to a session).
 func (p *Process) CloseSession(sessionKey string) {
 	p.mu.Lock()
-	if sess, ok := p.sessions[sessionKey]; ok {
-		delete(p.sessionsByID, string(sess.ID))
-		delete(p.sessions, sessionKey)
-		sessionID := string(sess.ID)
+	sess, ok := p.sessions[sessionKey]
+	if !ok {
 		p.mu.Unlock()
-		if p.terminals != nil {
-			p.terminals.closeSession(sessionID)
-		}
 		return
 	}
+	sessionID := string(sess.ID)
+	delete(p.sessionsByID, sessionID)
+	delete(p.sessions, sessionKey)
 	p.mu.Unlock()
+
+	p.elicitation.abandonSession(sessionID)
+	p.clearActiveSession(sessionID)
+	if p.terminals != nil {
+		p.terminals.closeSession(sessionID)
+	}
 }
 
 // Close terminates the process and all of its terminals.
 func (p *Process) Close() error {
+	if p.elicitation != nil {
+		p.elicitation.abandonSession("")
+	}
 	if p.terminals != nil {
 		p.terminals.closeAll()
 	}
@@ -929,8 +1011,9 @@ func (p *Process) getSessionByID(sessionID string) *sessionState {
 }
 
 // convertSessionUpdate converts acp-go SessionUpdate to internal format
-func wrapSessionUpdate(sessionID string, update acp.SessionUpdate) SessionUpdate {
+func wrapSessionUpdate(agentName, sessionID string, update acp.SessionUpdate) SessionUpdate {
 	result := SessionUpdate{
+		AgentName: agentName,
 		SessionID: sessionID,
 		Raw:       update,
 	}
@@ -1103,6 +1186,53 @@ func (p *Process) cancelActivePrompt() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (p *Process) setActiveSession(id string) {
+	if p == nil {
+		return
+	}
+	p.activeSession.mu.Lock()
+	p.activeSession.id = id
+	p.activeSession.mu.Unlock()
+}
+
+// clearActiveSession drops the routing target when that session goes away, so
+// a stale id cannot make getActiveSession return nil for still-open sessions.
+func (p *Process) clearActiveSession(id string) {
+	if p == nil {
+		return
+	}
+	p.activeSession.mu.Lock()
+	if p.activeSession.id == id {
+		p.activeSession.id = ""
+	}
+	p.activeSession.mu.Unlock()
+}
+
+func (p *Process) getActiveSession() *sessionState {
+	if p == nil {
+		return nil
+	}
+	p.activeSession.mu.Lock()
+	id := p.activeSession.id
+	p.activeSession.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if id != "" {
+		if sess, ok := p.sessionsByID[id]; ok {
+			return sess
+		}
+	}
+	// The recorded session is gone (or none was recorded yet). Fall back to the
+	// only live session when there is exactly one, so an agent that asks before
+	// emitting any update still reaches the user.
+	if len(p.sessionsByID) == 1 {
+		for _, sess := range p.sessionsByID {
+			return sess
+		}
+	}
+	return nil
 }
 
 func sessionUpdateLogValue(data any) string {

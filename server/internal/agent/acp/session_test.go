@@ -9,7 +9,7 @@ import (
 )
 
 func TestWrapSessionUpdateRecognizesPlan(t *testing.T) {
-	update := wrapSessionUpdate("session-1", acpsdk.SessionUpdate{
+	update := wrapSessionUpdate("test-agent", "session-1", acpsdk.SessionUpdate{
 		Plan: &acpsdk.SessionUpdatePlan{
 			Entries: []acpsdk.PlanEntry{{Content: "Inspect files", Status: acpsdk.PlanEntryStatusPending}},
 		},

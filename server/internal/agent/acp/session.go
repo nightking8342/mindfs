@@ -281,8 +281,8 @@ func (s *session) SendMessage(ctx context.Context, content string) error {
 	return s.proc.SendMessage(ctx, s.sessionKey, content)
 }
 
-func (s *session) AnswerQuestion(context.Context, types.AskUserAnswer) error {
-	return errors.New("ask user question is not supported by acp sessions")
+func (s *session) AnswerQuestion(ctx context.Context, answer types.AskUserAnswer) error {
+	return s.proc.answerElicitation(ctx, answer)
 }
 
 func (s *session) CurrentModel() string {
@@ -454,6 +454,7 @@ func convertEvent(update SessionUpdate) types.Event {
 				Kind:      kind,
 				Content:   convertToolCallContent(raw.ToolCall.Content),
 				Locations: locations,
+				Meta:      mergeToolCallMeta(update.AgentName, string(raw.ToolCall.ToolCallId), update.TrustedMeta, raw.ToolCall.Meta),
 			}
 		} else {
 			logUnhandledConvertEvent(update, "tool_call")
@@ -490,6 +491,7 @@ func convertEvent(update SessionUpdate) types.Event {
 				Kind:      kind,
 				Content:   convertToolCallContent(raw.ToolCallUpdate.Content),
 				Locations: locations,
+				Meta:      mergeToolCallMeta(update.AgentName, string(raw.ToolCallUpdate.ToolCallId), update.TrustedMeta, raw.ToolCallUpdate.Meta),
 			}
 		} else {
 			logUnhandledConvertEvent(update, "tool_call_update")

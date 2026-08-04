@@ -27,3 +27,7 @@ harmony/.idea/
 harmony/.appanalyzer/
 harmony/local.properties
 harmony/entry/src/main/resources/rawfile/public/
+
+# 本地部署辅助产物（见 memory: mindfs-redeploy-detached）
+/redeploy-status.txt
+/verify-deploy.ps1
