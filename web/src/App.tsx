@@ -135,6 +135,8 @@ import { ToastContainer } from "./components/Toast";
 import { BottomSheet } from "./components/BottomSheet";
 import { ScheduledAgentTaskDialog } from "./components/ScheduledAgentTaskDialog";
 import { TaskTemplateDialog } from "./components/TaskTemplateDialog";
+import { WorktreeBranchSelector } from "./components/WorktreeBranchSelector";
+import { NoWorktreeIcon } from "./components/NoWorktreeIcon";
 import { renderToolIcon } from "./components/stream/ToolCallCard";
 import TokenEditor, { type TokenEditorHandle } from "./components/editor/TokenEditor";
 import {
@@ -162,6 +164,7 @@ import {
   type StageTemplate,
   type TaskTemplate,
 } from "./services/tasks";
+import { shouldApplyTaskDetail } from "./services/taskDetailOrder";
 import { mergeRelatedFileGroups, taskIdsForUpdatedSession } from "./services/taskRelatedFiles";
 import { useI18n, type MessageKey, type MessageParams } from "./i18n";
 
@@ -1842,36 +1845,47 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, taskInlineActiveToken, taskTemplateFilter, taskTemplates]);
 
   const applyTaskDetails = useCallback((rootId: string, details: TaskDetail[], persist = true) => {
-    const valid = details.filter((detail) => detail?.task?.id);
-    if (valid.length === 0) return;
+    const accepted = details.filter(
+      (detail) =>
+        detail?.task?.id &&
+        shouldApplyTaskDetail(taskDetailsByIdRef.current[detail.task.id], detail),
+    );
+    if (accepted.length === 0) return;
+    const nextSnapshot = { ...taskDetailsByIdRef.current };
+    accepted.forEach((detail) => {
+      nextSnapshot[detail.task.id] = detail;
+    });
+    taskDetailsByIdRef.current = nextSnapshot;
     setTaskDetailsById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
-        next[detail.task.id] = detail;
+      accepted.forEach((detail) => {
+        if (shouldApplyTaskDetail(next[detail.task.id], detail)) {
+          next[detail.task.id] = detail;
+        }
       });
       return next;
     });
     setTaskFirstInputById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
+      accepted.forEach((detail) => {
         next[detail.task.id] = firstTaskInputFromDetail(detail);
       });
       return next;
     });
     setTaskSessionKeysById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
+      accepted.forEach((detail) => {
         next[detail.task.id] = taskSessionKeysFromDetail(detail);
       });
       return next;
     });
     setKanbanTaskCountItems((prev) => {
       const byId = new Map(prev.map((task) => [task.id, task]));
-      valid.forEach((detail) => byId.set(detail.task.id, detail.task));
+      accepted.forEach((detail) => byId.set(detail.task.id, detail.task));
       return Array.from(byId.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
     });
     if (persist) {
-      void upsertCachedTaskDetails(rootId, valid);
+      void upsertCachedTaskDetails(rootId, accepted);
     }
   }, []);
 
@@ -10008,14 +10022,12 @@ export function App({ onGoHome }: AppProps) {
             if (detail?.task?.id) {
               applyTaskDetails(payload.root_id, [detail]);
             } else {
-              setTaskDetailsById((prev) => ({
-                ...prev,
-                [nextTask.id]: {
-                  task: nextTask,
-                  stage_runs: prev[nextTask.id]?.stage_runs || [],
-                  events: prev[nextTask.id]?.events || [],
-                },
-              }));
+              const current = taskDetailsByIdRef.current[nextTask.id];
+              applyTaskDetails(payload.root_id, [{
+                task: nextTask,
+                stage_runs: current?.stage_runs || [],
+                events: current?.events || [],
+              }]);
             }
             if (nextTask.worktree_path) {
               void refreshTaskWorktree(payload.root_id, nextTask.worktree_path, false);
@@ -14475,62 +14487,51 @@ export function App({ onGoHome }: AppProps) {
 	                        setTaskInlineEdit((prev) => prev ? { ...prev, createWorktree: !prev.createWorktree } : prev);
 	                      }}
 	                      disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                      aria-label={taskInlineEdit.createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                      title={taskInlineEdit.createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
                       style={{
                         height: "26px",
                         borderRadius: "6px",
-                        border: taskInlineEdit.createWorktree ? "1px solid var(--accent-color)" : "1px solid var(--border-color)",
-                        background: taskInlineEdit.createWorktree ? "rgba(37, 99, 235, 0.10)" : "rgba(100, 116, 139, 0.10)",
-                        color: taskInlineEdit.createWorktree ? "var(--accent-color)" : "var(--text-secondary)",
-                        padding: "0 8px",
+                        border: taskInlineEdit.createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)",
+                        background: taskInlineEdit.createWorktree ? "rgba(22, 163, 74, 0.08)" : "rgba(100, 116, 139, 0.10)",
+                        color: taskInlineEdit.createWorktree ? "#15803d" : "var(--text-secondary)",
+                        padding: taskInlineEdit.createWorktree ? "0 8px" : "0 8px 0 5px",
                         fontSize: "12px",
                         fontWeight: 800,
 	                        cursor: taskInlineSaving || !taskWorktreeControlsEditable ? "not-allowed" : "pointer",
 	                        whiteSpace: "nowrap",
 	                        opacity: taskInlineSaving || !taskWorktreeControlsEditable ? 0.72 : 1,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "3px",
                       }}
                     >
-                      {taskInlineEdit.createWorktree ? t("worktree.enableNew") : t("worktree.disableNew")}
+                      {taskInlineEdit.createWorktree ? "worktree" : (
+                        <>
+                          <NoWorktreeIcon size={12} />
+                          worktree
+                        </>
+                      )}
                     </button>
                     {taskInlineEdit.createWorktree ? (
                       <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
-	                        <select
-	                          value={taskInlineEdit.worktreeBranchMode === "new" ? "__new__" : taskInlineEdit.worktreeBranch}
-	                          disabled={taskInlineSaving || !taskWorktreeControlsEditable}
-                          onChange={(event) => {
-                            const value = event.target.value;
+	                        <WorktreeBranchSelector
+	                          branchMode={taskInlineEdit.worktreeBranchMode}
+	                          branch={taskInlineEdit.worktreeBranch}
+	                          branches={taskWorktreeBranches.branches}
+                          disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                          height={26}
+                          maxWidth={isMobile ? 160 : 240}
+                          menuAlign={isMobile ? "left" : "right"}
+                          menuPlacement="bottom"
+                          onChange={(nextMode, nextBranch) => {
                             setTaskInlineEdit((prev) => {
                               if (!prev) return prev;
-                              if (value === "__new__") {
-                                return { ...prev, worktreeBranchMode: "new", worktreeBranch: "" };
-                              }
-                              return { ...prev, worktreeBranchMode: "existing", worktreeBranch: value };
+                              return { ...prev, worktreeBranchMode: nextMode, worktreeBranch: nextBranch };
                             });
                           }}
-                          style={{
-                            height: "26px",
-                            width: "auto",
-                            minWidth: "92px",
-                            maxWidth: isMobile ? "160px" : "240px",
-                            borderRadius: "6px",
-                            border: "1px solid var(--border-color)",
-                            background: "var(--menu-bg)",
-                            color: "var(--text-primary)",
-                            fontSize: "12px",
-                            fontWeight: 700,
-                            padding: "0 7px",
-                            outline: "none",
-	                          }}
-	                        >
-	                          <option value="__new__">{t("worktree.createBranch")}</option>
-	                          {!taskWorktreeControlsEditable && taskInlineEdit.worktreeBranchMode === "existing" && taskInlineEdit.worktreeBranch ? (
-	                            <option value={taskInlineEdit.worktreeBranch}>{taskInlineEdit.worktreeBranch}</option>
-	                          ) : null}
-	                          {taskWorktreeBranches.branches.map((branch) => (
-	                            <option key={branch.name} value={branch.name}>
-                              {branch.current ? `${branch.name} ${t("worktree.current")}` : branch.name}
-                            </option>
-                          ))}
-                        </select>
+                        />
                         {taskWorktreeBranchesLoading ? (
                           <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span>
                         ) : taskWorktreeBranchError ? (
@@ -15047,25 +15048,6 @@ function TaskSessionErrorIcon() {
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v6" />
       <path d="M12 17h.01" />
-    </svg>
-  );
-}
-
-function NoWorktreeIcon() {
-  return (
-    <svg
-      width="8"
-      height="8"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M7 17L17 7" />
     </svg>
   );
 }

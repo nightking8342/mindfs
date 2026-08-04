@@ -18,6 +18,8 @@ import { renderToolIcon } from "./stream/ToolCallCard";
 import { useI18n, type MessageKey } from "../i18n";
 import { CompactUploadProgress } from "./CompactUploadProgress";
 import { fetchGitBranches, type GitBranchesPayload } from "../services/git";
+import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
+import { NoWorktreeIcon } from "./NoWorktreeIcon";
 
 type SessionInfo = {
   key: string;
@@ -1395,7 +1397,7 @@ export function ActionBar({
             ))}
           </div>
         ) : null}
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "30px minmax(0, 1fr) 30px" : "1fr", alignItems: "center", gap: isMobile ? "1px" : 0, padding: isMobile ? "0 1px" : 0, minWidth: 0, maxWidth: "100%" }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "30px minmax(0, 1fr) 30px" : "1fr", alignItems: isMobile ? "end" : "center", gap: isMobile ? "1px" : 0, padding: isMobile ? "0 1px" : 0, minWidth: 0, maxWidth: "100%" }}>
           {sidebarsSwapped ? mobileSessionSidebarButton : mobileFileSidebarButton}
 
           <div
@@ -1461,57 +1463,47 @@ export function ActionBar({
                   type="button"
                   onClick={() => setCreateWorktree((value) => !value)}
                   disabled={sending}
+                  aria-label={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                  title={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
                   style={{
                     height: "24px",
                     borderRadius: "6px",
-                    border: createWorktree ? "1px solid var(--accent-color)" : "1px solid var(--border-color)",
-                    background: createWorktree ? "rgba(37, 99, 235, 0.10)" : "rgba(100, 116, 139, 0.10)",
-                    color: createWorktree ? "var(--accent-color)" : "var(--text-secondary)",
-                    padding: "0 8px",
+                    border: createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)",
+                    background: createWorktree ? "rgba(22, 163, 74, 0.08)" : "rgba(100, 116, 139, 0.10)",
+                    color: createWorktree ? "#15803d" : "var(--text-secondary)",
+                    padding: createWorktree ? "0 8px" : "0 8px 0 5px",
                     fontSize: "11px",
                     fontWeight: 800,
                     cursor: sending ? "not-allowed" : "pointer",
                     whiteSpace: "nowrap",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "3px",
                   }}
                 >
-                  {createWorktree ? t("worktree.enableNew") : t("worktree.disableNew")}
+                  {createWorktree ? "worktree" : (
+                    <>
+                      <NoWorktreeIcon size={12} />
+                      worktree
+                    </>
+                  )}
                 </button>
                 {createWorktree ? (
                   <>
-                    <select
-                      value={worktreeBranchMode === "new" ? "__new__" : worktreeBranch}
+                    <WorktreeBranchSelector
+                      branchMode={worktreeBranchMode}
+                      branch={worktreeBranch}
+                      branches={worktreeBranches.branches}
                       disabled={sending}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        if (value === "__new__") {
-                          setWorktreeBranchMode("new");
-                          setWorktreeBranch("");
-                        } else {
-                          setWorktreeBranchMode("existing");
-                          setWorktreeBranch(value);
-                        }
+                      maxWidth={isMobile ? 150 : 240}
+                      menuAlign={isMobile ? "left" : "right"}
+                      menuPlacement="top"
+                      onChange={(nextMode, nextBranch) => {
+                        setWorktreeBranchMode(nextMode);
+                        setWorktreeBranch(nextBranch);
                       }}
-                      style={{
-                        height: "24px",
-                        minWidth: "92px",
-                        maxWidth: isMobile ? "150px" : "240px",
-                        borderRadius: "6px",
-                        border: "1px solid var(--border-color)",
-                        background: "var(--menu-bg)",
-                        color: "var(--text-primary)",
-                        fontSize: "11px",
-                        fontWeight: 700,
-                        padding: "0 7px",
-                        outline: "none",
-                      }}
-                    >
-                      <option value="__new__">{t("worktree.createBranch")}</option>
-                      {worktreeBranches.branches.map((branch) => (
-                        <option key={branch.name} value={branch.name}>
-                          {branch.current ? `${branch.name} ${t("worktree.current")}` : branch.name}
-                        </option>
-                      ))}
-                    </select>
+                    />
                     {worktreeBranchesLoading ? (
                       <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span>
                     ) : worktreeBranchError ? (
@@ -1783,6 +1775,7 @@ export function ActionBar({
                     }}
                     compact={true}
                     warnUnavailable={isSelectedAgentUnavailable}
+                    defaultExpandOptions
                   />
                 </div>
               ) : (
