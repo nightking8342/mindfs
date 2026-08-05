@@ -151,7 +151,9 @@ const mainStyle: React.CSSProperties = {
   minHeight: 0,
   position: "relative",
   zIndex: 1,
-  contain: "paint",
+  // layout paint：main 用 padding 推挤动画时，reflow 只限制在 main 内部，
+  // 不向外传播到 shell / 侧栏，缩小每帧 layout 成本
+  contain: "layout paint",
 };
 
 const rightStyle: React.CSSProperties = {
@@ -203,6 +205,10 @@ export function ForkShell(props: ForkShellProps) {
   // 液态玻璃主题要求内容从输入栏玻璃下方滚过，因此把 footer 移进主区浮起来。
   // 移动端不这么做：那里 footer 要参与 flex 布局给软键盘让位。
   const floatingFooter = themeId === "glass" && !isMobile;
+  // physical* 提前到 fallback 分支之前计算：下面的逻辑依赖它们，
+  // 而 hooks 必须在条件返回之前无条件调用。
+  const physicalLeftOpen = sidebarsSwapped ? rightOpen : leftOpen;
+  const physicalRightOpen = sidebarsSwapped ? leftOpen : rightOpen;
 
   if (upstreamFallback) {
     return <AppShell {...props} />;
@@ -221,8 +227,6 @@ export function ForkShell(props: ForkShellProps) {
         : "var(--fork-right-width, 280px)"
       : "0px";
   const mobileHeight = "var(--mindfs-viewport-height, 100dvh)";
-  const physicalLeftOpen = sidebarsSwapped ? rightOpen : leftOpen;
-  const physicalRightOpen = sidebarsSwapped ? leftOpen : rightOpen;
   const physicalLeftWidth = sidebarsSwapped ? rightWidth : sidebarWidth;
   const physicalRightWidth = sidebarsSwapped ? sidebarWidth : rightWidth;
   const physicalLeftContent = sidebarsSwapped ? rightSidebar : sidebar;
@@ -239,13 +243,16 @@ export function ForkShell(props: ForkShellProps) {
   } = {
     display: isMobile ? "flex" : "grid",
     flexDirection: isMobile ? "column" : undefined,
-    gridTemplateColumns: isMobile ? undefined : `${physicalLeftOpen ? physicalLeftWidth : "0px"} 1fr ${physicalRightOpen ? physicalRightWidth : "0px"}`,
+    // 桌面端单列 grid：main 占满。侧栏 absolute + transform 滑入滑出
+    // （内容不挤压，合成器动画），main 用 padding-left/right 动画推挤内容——
+    // 侧栏边缘与 main 内容边缘同 easing 同 duration，视觉上是「侧栏推开 main」。
+    gridTemplateColumns: isMobile ? undefined : "1fr",
     gridTemplateRows: isMobile ? undefined : floatingFooter ? "1fr" : "1fr auto",
     gridTemplateAreas: isMobile
       ? undefined
       : floatingFooter
-        ? `"sidebar main right"`
-        : `"sidebar main right" "sidebar footer right"`,
+        ? `"main"`
+        : `"main" "footer"`,
     minHeight: isMobile ? mobileHeight : "100vh",
     height: isMobile ? mobileHeight : "100dvh",
     background: isMobile
@@ -259,8 +266,61 @@ export function ForkShell(props: ForkShellProps) {
     overflow: "hidden",
     isolation: "isolate",
     boxSizing: "border-box",
-    transition: "grid-template-columns var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
     "--mindfs-actionbar-bottom-padding": "calc(var(--mindfs-safe-area-bottom) + var(--fork-actionbar-gap, 12px))",
+  };
+
+  // 桌面端 main：用 margin-left/right 推挤整个玻璃板。侧栏 absolute 盖在左侧
+  // margin 区域（间隙里），main 玻璃板随侧栏滑入/滑出同步移动，两者之间始终保留
+  // --fork-glass-gap 壁纸缝隙（不覆盖 main）。非 glass 主题 gap fallback 0，退回
+  // 贴边推挤。侧栏自身是 transform 合成动画，不挤压侧栏内容。
+  const desktopMainStyle: React.CSSProperties = {
+    ...mainStyle,
+    // 左右 margin 承担推挤；上下保留 CSS 里 glass 的 --fork-glass-gap（非 glass 0）
+    marginTop: "var(--fork-glass-gap, 0px)",
+    marginBottom: "var(--fork-glass-gap, 0px)",
+    marginLeft: physicalLeftOpen
+      ? `calc(var(--fork-glass-gap, 0px) + ${physicalLeftWidth})`
+      : "var(--fork-glass-gap, 0px)",
+    marginRight: physicalRightOpen
+      ? `calc(var(--fork-glass-gap, 0px) + ${physicalRightWidth})`
+      : "var(--fork-glass-gap, 0px)",
+    transition: [
+      "margin-left var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
+      "margin-right var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
+    ].join(", "),
+  };
+
+  // 桌面端侧栏：absolute 覆盖式，用 transform 平移实现展开/折叠。
+  // 合成器动画不触发 layout，实测真实侧栏 DOM 下零掉帧。
+  // glass 主题下侧栏玻璃板内缩一个 --fork-glass-gap：左/右/top/bottom 各留 gap，
+  // 宽度 = 轨道宽 - gap，让玻璃板右缘恰好落在 --fork-sidebar-width 上（折叠按钮
+  // 位置不变），main 玻璃板由 margin 推挤留出缝隙，侧栏不盖 main。非 glass 主题
+  // --fork-glass-gap 未定义 fallback 0，行为不变。
+  const desktopPaneStyle = (side: "left" | "right"): React.CSSProperties => {
+    const open = side === "left" ? physicalLeftOpen : physicalRightOpen;
+    const width = side === "left" ? physicalLeftWidth : physicalRightWidth;
+    return {
+      ...(side === "left" ? sidebarStyle : rightStyle),
+      position: "absolute",
+      top: "var(--fork-glass-gap, 0px)",
+      bottom: "var(--fork-glass-gap, 0px)",
+      [side]: "var(--fork-glass-gap, 0px)",
+      width: `calc(${width} - var(--fork-glass-gap, 0px))`,
+      zIndex: 20,
+      overflow: open ? "auto" : "hidden",
+      pointerEvents: open ? "auto" : "none",
+      // transform 只做 translateX 合成动画；translateZ(0) 提升为合成层。
+      // 折叠要完全移出视口，除了自身宽度还要把 left 侧漏出的 gap 一起移走
+      transform:
+        side === "left"
+          ? `translateX(${open ? "0%" : "calc(-100% - var(--fork-glass-gap, 0px))"}) translateZ(0)`
+          : `translateX(${open ? "0%" : "calc(100% + var(--fork-glass-gap, 0px))"}) translateZ(0)`,
+      willChange: "transform",
+      backfaceVisibility: "hidden",
+      // 纯 transform 动画。折叠后 translateX(±100%) 滑出视口（shell overflow:hidden
+      // 裁掉），不需要 visibility 延迟；pointer-events 已按 open 切换。
+      transition: "transform var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
+    };
   };
 
   const mobileSidebarStyle = (side: "left" | "right"): React.CSSProperties => ({
@@ -299,7 +359,12 @@ export function ForkShell(props: ForkShellProps) {
   };
 
   return (
-    <div className="fork-shell" data-fork-shell="" data-fork-viewport={viewport} style={shellStyle}>
+    <div
+      className="fork-shell"
+      data-fork-shell=""
+      data-fork-viewport={viewport}
+      style={shellStyle}
+    >
       {isMobile && (
         <div
           className="fork-shell__overlay"
@@ -311,20 +376,23 @@ export function ForkShell(props: ForkShellProps) {
         />
       )}
 
-      {(!isMobile || physicalLeftOpen) && physicalLeftContent ? (
+      {isMobile ? (
+        physicalLeftOpen && physicalLeftContent ? (
+          <aside
+            className="fork-shell__pane fork-shell__pane--left"
+            data-fork-region="left"
+            data-fork-open=""
+            style={mobileSidebarStyle("left")}
+          >
+            {physicalLeftContent}
+          </aside>
+        ) : null
+      ) : physicalLeftContent ? (
         <aside
           className="fork-shell__pane fork-shell__pane--left"
           data-fork-region="left"
           data-fork-open={physicalLeftOpen ? "" : undefined}
-          style={
-            isMobile
-              ? mobileSidebarStyle("left")
-              : {
-                  ...sidebarStyle,
-                  overflow: physicalLeftOpen ? "auto" : "hidden",
-                  pointerEvents: physicalLeftOpen ? "auto" : "none",
-                }
-          }
+          style={desktopPaneStyle("left")}
         >
           {physicalLeftContent}
         </aside>
@@ -345,10 +413,10 @@ export function ForkShell(props: ForkShellProps) {
               ? {
                   // 给浮起来的输入栏让出高度：内容在 content box 内滚动，不会被永久遮挡。
                   // 代价是内容不会真的滚到玻璃下方——可用性优先于那点动态效果。
-                  ...mainStyle,
+                  ...desktopMainStyle,
                   paddingBottom: "var(--fork-floating-footer-space, 96px)",
                 }
-              : mainStyle
+              : desktopMainStyle
         }
       >
         {main}
@@ -363,6 +431,8 @@ export function ForkShell(props: ForkShellProps) {
               left: 0,
               right: 0,
               bottom: "var(--fork-floating-footer-bottom, 16px)",
+              // main 玻璃板整体被 margin 推挤，footer 作为 main 内部 absolute 子元素
+              // 天然跟随玻璃板移动，不需要额外 padding 跟随。只保留原 inset 内边距。
               padding: "0 var(--fork-floating-footer-inset, 24px)",
               zIndex: 5,
               // 容器自身不吃事件，避免左右留白挡住内容；子元素在 fork-theme.css 里恢复
@@ -374,20 +444,23 @@ export function ForkShell(props: ForkShellProps) {
         ) : null}
       </main>
 
-      {(!isMobile || physicalRightOpen) && physicalRightContent ? (
+      {isMobile ? (
+        physicalRightOpen && physicalRightContent ? (
+          <aside
+            className="fork-shell__pane fork-shell__pane--right"
+            data-fork-region="right"
+            data-fork-open=""
+            style={mobileSidebarStyle("right")}
+          >
+            {physicalRightContent}
+          </aside>
+        ) : null
+      ) : physicalRightContent ? (
         <aside
           className="fork-shell__pane fork-shell__pane--right"
           data-fork-region="right"
           data-fork-open={physicalRightOpen ? "" : undefined}
-          style={
-            isMobile
-              ? mobileSidebarStyle("right")
-              : {
-                  ...rightStyle,
-                  overflow: physicalRightOpen ? "auto" : "hidden",
-                  pointerEvents: physicalRightOpen ? "auto" : "none",
-                }
-          }
+          style={desktopPaneStyle("right")}
         >
           {physicalRightContent}
         </aside>
@@ -402,8 +475,16 @@ export function ForkShell(props: ForkShellProps) {
             aria-label={physicalLeftOpen ? t("sidebar.collapse", { label: physicalLeftLabel }) : t("sidebar.expand", { label: physicalLeftLabel })}
             title={physicalLeftOpen ? t("sidebar.collapse", { label: physicalLeftLabel }) : t("sidebar.expand", { label: physicalLeftLabel })}
             style={{
-              left: physicalLeftOpen ? `calc(${physicalLeftWidth} - 6px)` : 0,
+              left: 0,
               cursor: physicalLeftOpen ? "w-resize" : "e-resize",
+              // 覆盖式：侧栏 absolute 固定左缘，按钮用 transform 跟随侧栏滑出/滑入，
+              // 与侧栏同一 transform 动画（合成器，不触发 layout）。
+              // 基类有 translateY(-50%) 垂直居中，必须合成进同一个 transform。
+              transform: physicalLeftOpen
+                ? `translateY(-50%) translateX(calc(${physicalLeftWidth} - 6px))`
+                : "translateY(-50%) translateX(0)",
+              transition: "transform var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
+              willChange: "transform",
             }}
           />
           {physicalRightContent ? (
@@ -414,8 +495,13 @@ export function ForkShell(props: ForkShellProps) {
               aria-label={physicalRightOpen ? t("sidebar.collapse", { label: physicalRightLabel }) : t("sidebar.expand", { label: physicalRightLabel })}
               title={physicalRightOpen ? t("sidebar.collapse", { label: physicalRightLabel }) : t("sidebar.expand", { label: physicalRightLabel })}
               style={{
-                right: physicalRightOpen ? `calc(${physicalRightWidth} - 6px)` : 0,
+                right: 0,
                 cursor: physicalRightOpen ? "e-resize" : "w-resize",
+                transform: physicalRightOpen
+                  ? `translateY(-50%) translateX(calc(-1 * (${physicalRightWidth} - 6px)))`
+                  : "translateY(-50%) translateX(0)",
+                transition: "transform var(--fork-sidebar-transition, 0.3s cubic-bezier(0.4, 0, 0.2, 1))",
+                willChange: "transform",
               }}
             />
           ) : null}

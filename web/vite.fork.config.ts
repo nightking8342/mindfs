@@ -18,6 +18,9 @@ const wsTarget = target.replace(/^http/, "ws");
 export default defineConfig(
   mergeConfig(baseConfig, {
     server: {
+      // 允许 ddnsto 内网穿透域名访问 dev server（Vite 默认只放行
+      // localhost/127.0.0.1/局域网 IP，外部 Host 会被安全校验拦下）
+      allowedHosts: ["mindfswhydev.x.ddnsto.com"],
       proxy: {
         // secure: false —— 后端是自签证书，不跳过校验代理会直接 502
         "/api": { target, changeOrigin: true, secure: false },

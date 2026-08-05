@@ -325,13 +325,17 @@
 
 /* --- 让每个区域成为「一块浮在壁纸上的玻璃板」 ---
    紧贴的三栏只有一条细线分隔，看不出板的边界；加上圆角 + 缝隙 + 整圈高光，
-   壁纸从缝里透出来，「一块玻璃」的观感才成立。移动端排除：那里侧栏是全屏抽屉。 */
+   壁纸从缝里透出来，「一块玻璃」的观感才成立。移动端排除：那里侧栏是全屏抽屉。
+
+   注意：桌面端侧栏现在是 absolute + transform 覆盖式（见 ForkShell），
+   margin 会让绝对定位错位、translateX(-100%) 折叠时多漏出缝隙宽度。
+   缝隙改由主区 margin 承担——侧栏玻璃紧贴主区边缘，靠主区的圆角缝隙透壁纸。 */
 :root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="left"] {
-  margin: var(--fork-glass-gap) 0 var(--fork-glass-gap) var(--fork-glass-gap);
+  margin: 0;
   border-radius: var(--fork-glass-radius);
 }
 :root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="right"] {
-  margin: var(--fork-glass-gap) var(--fork-glass-gap) var(--fork-glass-gap) 0;
+  margin: 0;
   border-radius: var(--fork-glass-radius);
 }
 :root[data-theme="glass"] .fork-shell:not([data-fork-viewport="mobile"]) [data-fork-region="main"] {
