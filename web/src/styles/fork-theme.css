@@ -411,7 +411,7 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.22),
     inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    0 4096px 36px -4096px rgba(0, 0, 0, 0.52);
+    0 12px 36px rgba(0, 0, 0, 0.52);
 }
 
 /* 菜单与面板：命中组件 inline style 里的 var(--menu-bg) / var(--panel-bg)。
@@ -598,12 +598,7 @@
   --root-badge-text: #10603f;
 }
 
-/* 高光反转：浅色下白色 inset 几乎看不见，层次改由彩色外阴影撑起。
-   ⚠️ 浅色主区（贴着状态栏那块）的外阴影不能往上投：玻璃板压在状态栏底边
-   下方，`0 12px 36px` 会叠在浅色壁纸/状态栏上露成一条偏紫暗带（实测 #e3e8f5
-   对状态栏 #e8eefb，差 15/255），把状态栏和玻璃板的衔接切开。
-   用「y 偏移拉到远超玻璃高度 + 负 spread 收缩」让投影整体落到主区底部之外，
-   顶部零阴影，下方保留层次。左右栏不与状态栏相接，阴影落在栏间缝隙里不显眼，保留。 */
+/* 高光反转：浅色下白色 inset 几乎看不见，层次改由彩色外阴影撑起 */
 :root[data-theme="glass"][data-scheme="light"] [data-fork-region="left"],
 :root[data-theme="glass"][data-scheme="light"] [data-fork-region="right"] {
   box-shadow:
@@ -615,7 +610,7 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
     inset 0 0 0 1px rgba(255, 255, 255, 0.50),
-    0 4096px 36px -4096px rgba(70, 60, 110, 0.13);
+    0 12px 36px rgba(70, 60, 110, 0.13);
 }
 :root[data-theme="glass"][data-scheme="light"] [style*="var(--menu-bg)"],
 :root[data-theme="glass"][data-scheme="light"] [style*="var(--panel-bg)"] {
