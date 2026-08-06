@@ -614,8 +614,20 @@
 :root[data-theme="glass"][data-scheme="light"] [data-fork-region="main"] {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.50),
-    0 4096px 36px -4096px rgba(70, 60, 110, 0.13);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.50);
+  /* 圆角顶部与状态栏无缝：玻璃板本色 rgba(255,255,255,0.74) 叠在浅色壁纸上
+     会比状态栏 #e8eefb 白出 15/255，圆角弧线处就是「一圈白边/阴影」的观感。
+     铺一层从状态栏色淡出的遮罩，让玻璃顶部平滑过渡到本色，圆角不再露怯。 */
+  position: relative;
+}
+:root[data-theme="glass"][data-scheme="light"] [data-fork-region="main"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 20px;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(to bottom, var(--mindfs-system-bar-bg, #e8eefb), rgba(232, 238, 251, 0));
 }
 :root[data-theme="glass"][data-scheme="light"] [style*="var(--menu-bg)"],
 :root[data-theme="glass"][data-scheme="light"] [style*="var(--panel-bg)"] {
