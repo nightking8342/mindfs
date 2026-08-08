@@ -236,12 +236,17 @@
      反而丢了玻璃感。光斑按三栏布局分布，放四角会被两侧栏挡住。 */
   --bg-gradient-start: #000000;
   --bg-gradient-end: #000000;
-  --bg-gradient-composite:
+  /* 壁纸光斑层：全主题唯一的颜色来源，main 与侧栏共用一份定义。
+     只含渐变层、不含底部纯色——background-image 不接受纯色值，若把纯色塞进来
+     整条会被浏览器判定非法而丢失。底部色由各用途的 background-color 单独提供：
+       --bg-gradient-composite（桌面背景简写）= var(--fork-wallpaper), 底部色
+       --fork-mobile-drawer-bg-image（抽屉）= 噪点 + var(--fork-wallpaper) */
+  --fork-wallpaper:
     radial-gradient(1100px 860px at 22% 6%, rgba(120, 170, 255, 0.055), transparent 56%),
     radial-gradient(1000px 800px at 76% 16%, rgba(150, 130, 255, 0.05), transparent 58%),
     radial-gradient(1050px 820px at 58% 96%, rgba(90, 190, 255, 0.045), transparent 56%),
-    radial-gradient(900px 720px at 34% 66%, rgba(255, 255, 255, 0.028), transparent 55%),
-    #000000;
+    radial-gradient(900px 720px at 34% 66%, rgba(255, 255, 255, 0.028), transparent 55%);
+  --bg-gradient-composite: var(--fork-wallpaper), #000000;
 
   /* 移动端 shell 背景。ForkShell 的移动分支走 --fork-shell-bg-mobile 这条
      回退链（ForkShell.tsx:259），链里没有 --bg-gradient-composite——此前未定义
@@ -302,14 +307,12 @@
      拆成两层（ForkShell.tsx 的 mobileSidebarStyle 已改为 backgroundImage +
      backgroundColor 分开写）：
        --fork-mobile-drawer-bg-image：噪点 + 壁纸光斑渐变（background-image，
-         不能含尾部纯色——background-image 不接受纯色值，会整条非法被丢）
+         不能含尾部纯色——background-image 不接受纯色值，会整条非法被丢；
+         光斑层引用共享的 --fork-wallpaper，与 main 同源，改壁纸一处生效）
        --fork-mobile-drawer-bg：半透明底色（background-color） */
   --fork-mobile-drawer-bg-image:
     var(--fork-glass-grain),
-    radial-gradient(1100px 860px at 22% 6%, rgba(120, 170, 255, 0.055), transparent 56%),
-    radial-gradient(1000px 800px at 76% 16%, rgba(150, 130, 255, 0.05), transparent 58%),
-    radial-gradient(1050px 820px at 58% 96%, rgba(90, 190, 255, 0.045), transparent 56%),
-    radial-gradient(900px 720px at 34% 66%, rgba(255, 255, 255, 0.028), transparent 55%);
+    var(--fork-wallpaper);
   --fork-mobile-drawer-bg: rgba(22, 22, 26, 0.82);
   --mobile-overlay-bg: #000000;
 
@@ -623,13 +626,17 @@
      淡出色必须写成同色 alpha 0（而不是 transparent），跨浏览器插值才不会发灰。
      深色版不需要这层：光斑 alpha 只有 0.055，底色与状态栏同为纯黑，看不出接缝。 */
   --fork-wallpaper-top-fade: 132px;
-  --bg-gradient-composite:
+  /* 壁纸光斑层：浅色全部渐变（顶部淡出 + 光斑 + 粉蓝底色渐变）都在这一份里，
+     main 与抽屉共用，改壁纸一处生效。浅色尾部是渐变非纯色，background-image
+     可完整承载，无需像深色那样拆纯色。 */
+  --fork-wallpaper:
     linear-gradient(to bottom, #e8eefb 0, rgba(232, 238, 251, 0) var(--fork-wallpaper-top-fade)),
     radial-gradient(1100px 860px at 22% 20%, rgba(255, 140, 190, 0.32), transparent 56%),
     radial-gradient(1000px 800px at 76% 28%, rgba(110, 165, 255, 0.34), transparent 58%),
     radial-gradient(1050px 820px at 58% 96%, rgba(170, 130, 255, 0.28), transparent 56%),
     radial-gradient(900px 720px at 34% 66%, rgba(90, 220, 200, 0.22), transparent 55%),
     linear-gradient(146deg, #fdeef6 0%, #e2edff 38%, #ebe4ff 68%, #e2f7f1 100%);
+  --bg-gradient-composite: var(--fork-wallpaper);
 
   --text-primary: #1a1a1c;
   --text-secondary: #5f6068;
@@ -646,17 +653,11 @@
   --menu-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
 
   --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
-  /* 移动端抽屉：与深色同理，自铺壁纸渐变 + 噪点 + 半透明白（原因见深色块注释）。
-     浅色 composite 尾部是 linear-gradient(146deg) 渐变非纯色，可完整留在 image；
-     底色单独给半透明白。 */
+  /* 移动端抽屉：与深色同理，噪点 + 共享壁纸渐变 + 半透明白（原因见深色块注释）。
+     光斑层引用 --fork-wallpaper，与 main 同一份定义。 */
   --fork-mobile-drawer-bg-image:
     var(--fork-glass-grain),
-    linear-gradient(to bottom, #e8eefb 0, rgba(232, 238, 251, 0) var(--fork-wallpaper-top-fade, 132px)),
-    radial-gradient(1100px 860px at 22% 20%, rgba(255, 140, 190, 0.32), transparent 56%),
-    radial-gradient(1000px 800px at 76% 28%, rgba(110, 165, 255, 0.34), transparent 58%),
-    radial-gradient(1050px 820px at 58% 96%, rgba(170, 130, 255, 0.28), transparent 56%),
-    radial-gradient(900px 720px at 34% 66%, rgba(90, 220, 200, 0.22), transparent 55%),
-    linear-gradient(146deg, #fdeef6 0%, #e2edff 38%, #ebe4ff 68%, #e2f7f1 100%);
+    var(--fork-wallpaper);
   --fork-mobile-drawer-bg: rgba(255, 255, 255, 0.78);
   --mobile-overlay-bg: #eef3fd;
   /* 移动端 shell 背景：与深色版同理，走 --bg-gradient-composite 让竖屏也拿到
