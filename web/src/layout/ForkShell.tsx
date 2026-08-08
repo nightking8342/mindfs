@@ -330,7 +330,12 @@ export function ForkShell(props: ForkShellProps) {
     [side]: 0,
     width: "var(--fork-mobile-drawer-width, 75vw)",
     zIndex: 2000,
-    background: "var(--fork-mobile-drawer-bg, var(--mindfs-topbar-bg, var(--mobile-sidebar-bg, var(--sidebar-bg))))",
+    // 抽屉玻璃要铺壁纸渐变，必须拆成 backgroundImage + backgroundColor 分开写：
+    // --fork-mobile-drawer-bg-image 是噪点+壁纸渐变（background-image 不接受纯色值，
+    // 若用 background 简写把纯色塞进变量，整个声明会非法被丢）；底色单独走
+    // --fork-mobile-drawer-bg（background-color），回退链保留旧链。
+    backgroundImage: "var(--fork-mobile-drawer-bg-image, none)",
+    backgroundColor: "var(--fork-mobile-drawer-bg, var(--mindfs-topbar-bg, var(--mobile-sidebar-bg, var(--sidebar-bg))))",
     boxShadow: side === "left" ? "4px 0 24px rgba(0,0,0,0.15)" : "-4px 0 24px rgba(0,0,0,0.15)",
     transition: "transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
     display: "flex",
