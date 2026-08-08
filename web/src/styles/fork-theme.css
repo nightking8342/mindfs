@@ -40,7 +40,7 @@
  *   --fork-shell-bg / --fork-shell-bg-mobile
  *   --fork-sidebar-bg / --fork-right-bg / --fork-main-bg / --fork-footer-bg
  *   --fork-sidebar-border / --fork-right-border
- *   --fork-mobile-drawer-bg / --fork-overlay-bg
+ *   --fork-mobile-drawer-wallpaper-image / --fork-mobile-drawer-wallpaper-color / --fork-overlay-bg
  */
 
 /* ============================================================
@@ -240,7 +240,7 @@
      只含渐变层、不含底部纯色——background-image 不接受纯色值，若把纯色塞进来
      整条会被浏览器判定非法而丢失。底部色由各用途的 background-color 单独提供：
        --bg-gradient-composite（桌面背景简写）= var(--fork-wallpaper), 底部色
-       --fork-mobile-drawer-bg-image（抽屉）= 噪点 + var(--fork-wallpaper) */
+       --fork-mobile-drawer-wallpaper-image（移动抽屉壁纸层）= var(--fork-wallpaper) */
   --fork-wallpaper:
     radial-gradient(1100px 860px at 22% 6%, rgba(120, 170, 255, 0.055), transparent 56%),
     radial-gradient(1000px 800px at 76% 16%, rgba(150, 130, 255, 0.05), transparent 58%),
@@ -297,23 +297,17 @@
   --mobile-sidebar-bg:
     var(--fork-glass-grain),
     rgba(22, 22, 26, 0.94);
-  /* 移动端抽屉背景。回退链是 --fork-mobile-drawer-bg → --mindfs-topbar-bg →
-     --mobile-sidebar-bg → --sidebar-bg（ForkShell.tsx:333），--mindfs-topbar-bg
-     排前挡路、且是纯色无噪点——不定义的话抽屉会落到 rgab(255,255,255,0.075)
-     的纯半透明白，没有玻璃颗粒质感。
-     关键：移动端抽屉是 position:fixed 盖在 main 内容之上的弹层，背后不是壁纸
-     而是主区内容，所以「透出壁纸渐变」这条路走不通（透出来的是模糊内容）。
-     要让抽屉有和桌面侧栏一样的玻璃渐变，必须让抽屉**自己铺壁纸渐变**——
-     拆成两层（ForkShell.tsx 的 mobileSidebarStyle 已改为 backgroundImage +
-     backgroundColor 分开写）：
-       --fork-mobile-drawer-bg-image：噪点 + 壁纸光斑渐变（background-image，
-         不能含尾部纯色——background-image 不接受纯色值，会整条非法被丢；
-         光斑层引用共享的 --fork-wallpaper，与 main 同源，改壁纸一处生效）
-       --fork-mobile-drawer-bg：半透明底色（background-color） */
-  --fork-mobile-drawer-bg-image:
-    var(--fork-glass-grain),
-    var(--fork-wallpaper);
-  --fork-mobile-drawer-bg: rgba(22, 22, 26, 0.82);
+  /* 移动端抽屉壁纸层。抽屉盖在 main 内容之上，背后不是壁纸而是主区内容，
+     backdrop 透不出 shell 壁纸——所以 ForkShell 在抽屉**外面**铺一张 fixed 壁纸层
+     （drawerWallpaperStyle）覆盖抽屉区域，给抽屉玻璃做 backdrop。
+     壁纸层必须用 background-attachment: fixed：它只有 75vw，默认 attachment 下渐变
+     相对壁纸层盒定位，光斑坐标会和 main 透出的 shell 壁纸（相对整个视口）错开；
+     fixed 后渐变相对视口，抽屉区域显示的就是视口里那一小块壁纸，与 main 同坐标系。
+     image/color 拆开：background-image 不接受纯色值，光斑渐变单独走 image，底部
+     纯黑单独走 color。光斑层引用共享的 --fork-wallpaper，与 main 同源，改壁纸一处生效。
+     抽屉玻璃本身（aside）用 --fork-sidebar-bg（噪点 + 半透明白），与桌面侧栏同款。 */
+  --fork-mobile-drawer-wallpaper-image: var(--fork-wallpaper);
+  --fork-mobile-drawer-wallpaper-color: #000000;
   --mobile-overlay-bg: #000000;
 
   --panel-border: rgba(255, 255, 255, 0.20);
@@ -458,9 +452,10 @@
 }
 
 /* 移动端抽屉：与桌面侧栏同材质同高光。抽屉的 box-shadow 来自 ForkShell inline
-   （4px 0 24px 外阴影，ForkShell.tsx:334），它**整条覆盖**了桌面侧栏规则的
-   box-shadow——所以深浅抽屉的 inset 顶亮边/发丝边全被顶掉，只剩一条外阴影，
-   这就是「边缘没有白边」的原因。必须 !important 才能压过 inline 补回高光。
+   （4px 0 24px 外阴影），它**整条覆盖**了桌面侧栏规则的 box-shadow——所以深浅抽屉的
+   inset 顶亮边/发丝边全被顶掉，只剩一条外阴影，这就是「边缘没有白边」的原因。
+   必须 !important 才能压过 inline 补回高光。壁纸层（drawerWallpaperStyle）在 aside
+   之外、抽屉之下，不再盖住这里的高光。
    注意 data-scheme 挂在 <html> 上（forkScheme.ts 写 html[data-scheme]），
    .fork-shell 上没有该属性，所以必须用 :root[...] 前缀才能命中。 */
 :root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] [data-fork-region="left"] {
@@ -491,6 +486,13 @@
     -4px 0 24px rgba(70, 60, 110, 0.15) !important;
 }
 
+/* 抽屉拖动跟手：useDrawerDrag 在 touchstart 时给抽屉 + 壁纸层设 data-dragging 取消
+   过渡（transform 跟手不延迟），松手后移除恢复过渡做弹回/滑出动画。所有主题通用。 */
+.fork-shell__pane[data-dragging],
+.fork-shell__drawer-wallpaper[data-dragging] {
+  transition: none !important;
+}
+
 /* 菜单与面板：命中组件 inline style 里的 var(--menu-bg) / var(--panel-bg)。
    依赖上游的书写形式，属于脆规则——上游改写法即静默失效，
    但退化结果只是少了模糊与高光，不影响功能。 */
@@ -503,6 +505,22 @@
     inset 0 0 0 1px rgba(255, 255, 255, 0.10),
     inset 0 -1px 0 rgba(255, 255, 255, 0.09),
     0 20px 50px rgba(0, 0, 0, 0.62);
+}
+
+/* 移动端输入框：ActionBar 的 inline box-shadow 在 isMobile 分支写成 none，
+   盖掉了上面 [style*="var(--panel-bg)"] 那条玻璃阴影规则——浅色下 panel-border 是
+   白边（0.75）在浅背景上几乎不可见，输入框（panel-bg 0.64）和外层 content-bg(0.74)
+   糊成一块。补回 var(--panel-shadow) 与宽屏同款（inset 高光 + 浮起外阴影），
+   边框沿用上游白边，整体观感与宽屏输入框一致。 */
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] [data-mindfs-command-input-width="1"] {
+  box-shadow: var(--panel-shadow) !important;
+}
+
+/* 浅色下移动端输入框边框要可见：--panel-border 是 0.75 白，在浅色玻璃/壁纸上几乎
+   看不见，输入框和 footer 玻璃糊成一块。边框加深为灰蓝半透明，输入框才有明确的
+   控件边界（深色下白边本就可见，保持原样；阴影仍用 var(--panel-shadow) 与宽屏一致）。 */
+:root[data-theme="glass"][data-scheme="light"] .fork-shell[data-fork-viewport="mobile"] [data-mindfs-command-input-width="1"] {
+  border-color: rgba(80, 95, 135, 0.40) !important;
 }
 
 /* 浮动输入栏：容器只管定位与事件，**不做玻璃**。
@@ -520,6 +538,25 @@
    会在输入框外糊出一个更大的白矩形（深色下 0.02 看不见，才没早暴露）。 */
 :root[data-theme="glass"] .fork-shell__footer--floating > *,
 :root[data-theme="glass"] .fork-shell__footer--floating > * > * {
+  background: transparent !important;
+}
+
+/* 移动端底部输入栏：floatingFooter 只在桌面（glass && !isMobile），移动端 footer 走
+   普通分支，footer 背景链落到 --mobile-overlay-bg（浅色 #eef3fd 不透明），ActionBar
+   外层又是 content-bg(0.74 白)——两层白紧贴输入框（panel-bg 0.64 + 白边框 + 淡投影），
+   浅色下输入框和外层糊成一块、看不出边框。修法：footer 背景用 main 同款玻璃
+   （--fork-main-bg + blur），ActionBar 外层 content-bg 让位透出——输入框浮在
+   footer 玻璃上，与桌面输入框浮在 main 玻璃上的结构一致，inset 高光/外投影/白边框
+   才有对比。输入框自身（更深层级，panel-bg）不受影响。 */
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] .fork-shell__footer {
+  /* blur 用移动端 main 的 4px，不用桌面 24px：24px 会把 --fork-glass-grain 噪点
+     糊成整屏灰雾（见下方移动端 main 注释），footer 虽小但同样会发灰。 */
+  background: var(--fork-main-bg, transparent) !important;
+  backdrop-filter: blur(4px) saturate(125%);
+  -webkit-backdrop-filter: blur(4px) saturate(125%);
+}
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] .fork-shell__footer > *,
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] .fork-shell__footer > * > * {
   background: transparent !important;
 }
 
@@ -589,6 +626,8 @@
 :root[data-theme="glass"][data-scheme="light"] {
   color-scheme: light;
 
+  /* 宽屏状态栏色：壁纸顶部 fade 的 #e8eefb，与桌面顶部观感衔接。
+     窄屏（手机竖屏）由下方媒体查询覆盖为 main 玻璃的渲染色。 */
   --mindfs-system-bar-bg: #e8eefb;
   --mindfs-topbar-bg: rgba(255, 255, 255, 0.62);
 
@@ -653,12 +692,10 @@
   --menu-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
 
   --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
-  /* 移动端抽屉：与深色同理，噪点 + 共享壁纸渐变 + 半透明白（原因见深色块注释）。
-     光斑层引用 --fork-wallpaper，与 main 同一份定义。 */
-  --fork-mobile-drawer-bg-image:
-    var(--fork-glass-grain),
-    var(--fork-wallpaper);
-  --fork-mobile-drawer-bg: rgba(255, 255, 255, 0.78);
+  /* 移动端抽屉壁纸层：与深色同理，铺在抽屉外的 fixed 壁纸层上（原因见深色块注释）。
+     浅色壁纸自带完整底色渐变（含顶部淡出与粉蓝底），无需额外 color。 */
+  --fork-mobile-drawer-wallpaper-image: var(--fork-wallpaper);
+  --fork-mobile-drawer-wallpaper-color: transparent;
   --mobile-overlay-bg: #eef3fd;
   /* 移动端 shell 背景：与深色版同理，走 --bg-gradient-composite 让竖屏也拿到
      壁纸光斑（此前未定义回退到 #eef3fd 纯色，玻璃变「白板」） */
@@ -686,6 +723,16 @@
   --root-badge-bg: rgba(0, 168, 98, 0.14);
   --root-badge-border: rgba(0, 168, 98, 0.28);
   --root-badge-text: #10603f;
+}
+
+/* 窄屏状态栏沉浸色：主界面顶部盖着 main 玻璃（--fork-main-bg 0.74 白 + blur），
+   把壁纸顶部的 #e8eefb 推成近白（渲染色 ≈#fafafe）。状态栏若按宽屏的 #e8eefb 会在
+   手机竖屏压出一条偏蓝横向接缝（R 通道差约 20）。只覆盖窄屏（与 ForkShell 的
+   MOBILE_BREAKPOINT 同值 768px），宽屏保持 #e8eefb 不受影响。 */
+@media (max-width: 768px) {
+  :root[data-theme="glass"][data-scheme="light"] {
+    --mindfs-system-bar-bg: #fafafe;
+  }
 }
 
 /* 高光反转：浅色下白色 inset 几乎看不见，层次改由彩色外阴影撑起 */
