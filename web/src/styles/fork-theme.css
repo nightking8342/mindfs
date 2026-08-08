@@ -292,6 +292,13 @@
   --mobile-sidebar-bg:
     var(--fork-glass-grain),
     rgba(22, 22, 26, 0.94);
+  /* 移动端抽屉背景。回退链是 --fork-mobile-drawer-bg → --mindfs-topbar-bg →
+     --mobile-sidebar-bg → --sidebar-bg（ForkShell.tsx:333），--mindfs-topbar-bg
+     排前挡路、且是纯色无噪点——不定义的话抽屉会落到 rgab(255,255,255,0.075)
+     的纯半透明白，没有玻璃颗粒质感。这里显式带上噪点，与桌面侧栏同材质。 */
+  --fork-mobile-drawer-bg:
+    var(--fork-glass-grain),
+    rgba(22, 22, 26, 0.94);
   --mobile-overlay-bg: #000000;
 
   --panel-border: rgba(255, 255, 255, 0.20);
@@ -426,16 +433,47 @@
    桌面 1280px 宽、同样 140px 噪点平铺被糊开后颗粒占比小，看不出；
    手机 390px 竖屏主区占满全宽，每颗白噪点被 blur(24px) 扩散成一大团、
    正好铺满屏幕 = 亮度从 11% 飙到 26% 的「灰蒙蒙」。降到 4px 后与桌面
-   观感一致（实测 11.8% vs 桌面 11.1%）。抽屉同理——blur(40px) 更狠，
-   盖在内容上也需要挡字，但 40px 已把噪点糊成雾，一并降到 16px。 */
+   观感一致（实测 11.8% vs 桌面 11.1%）。
+
+   注意抽屉不降 blur：抽屉底色很实（深 0.94 / 浅 0.95），噪点被实底压制，
+   不存在主区那种全屏无遮挡的雾化问题；降了反而丢掉玻璃模糊感。 */
 .fork-shell[data-fork-viewport="mobile"] [data-fork-region="main"] {
   backdrop-filter: blur(4px) saturate(125%);
   -webkit-backdrop-filter: blur(4px) saturate(125%);
 }
-.fork-shell[data-fork-viewport="mobile"] [data-fork-region="left"],
-.fork-shell[data-fork-viewport="mobile"] [data-fork-region="right"] {
-  backdrop-filter: blur(16px) saturate(135%);
-  -webkit-backdrop-filter: blur(16px) saturate(135%);
+
+/* 移动端抽屉：与桌面侧栏同材质同高光。抽屉的 box-shadow 来自 ForkShell inline
+   （4px 0 24px 外阴影，ForkShell.tsx:334），它**整条覆盖**了桌面侧栏规则的
+   box-shadow——所以深浅抽屉的 inset 顶亮边/发丝边全被顶掉，只剩一条外阴影，
+   这就是「边缘没有白边」的原因。必须 !important 才能压过 inline 补回高光。
+   注意 data-scheme 挂在 <html> 上（forkScheme.ts 写 html[data-scheme]），
+   .fork-shell 上没有该属性，所以必须用 :root[...] 前缀才能命中。 */
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] [data-fork-region="left"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+    4px 0 24px rgba(0, 0, 0, 0.15) !important;
+}
+:root[data-theme="glass"] .fork-shell[data-fork-viewport="mobile"] [data-fork-region="right"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+    -4px 0 24px rgba(0, 0, 0, 0.15) !important;
+}
+/* 浅色抽屉高光反转：白玻璃贴白背景对比趋近零，高光改由彩色外阴影压层次 */
+:root[data-theme="glass"][data-scheme="light"] .fork-shell[data-fork-viewport="mobile"] [data-fork-region="left"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    4px 0 24px rgba(70, 60, 110, 0.15) !important;
+}
+:root[data-theme="glass"][data-scheme="light"] .fork-shell[data-fork-viewport="mobile"] [data-fork-region="right"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    -4px 0 24px rgba(70, 60, 110, 0.15) !important;
 }
 
 /* 菜单与面板：命中组件 inline style 里的 var(--menu-bg) / var(--panel-bg)。
@@ -596,6 +634,8 @@
   --menu-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
 
   --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
+  /* 移动端抽屉：带上噪点，与桌面侧栏同材质（原因见深色块注释） */
+  --fork-mobile-drawer-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
   --mobile-overlay-bg: #eef3fd;
   /* 移动端 shell 背景：与深色版同理，走 --bg-gradient-composite 让竖屏也拿到
      壁纸光斑（此前未定义回退到 #eef3fd 纯色，玻璃变「白板」） */
