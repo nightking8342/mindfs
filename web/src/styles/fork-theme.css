@@ -243,6 +243,14 @@
     radial-gradient(900px 720px at 34% 66%, rgba(255, 255, 255, 0.028), transparent 55%),
     #000000;
 
+  /* 移动端 shell 背景。ForkShell 的移动分支走 --fork-shell-bg-mobile 这条
+     回退链（ForkShell.tsx:259），链里没有 --bg-gradient-composite——此前未定义
+     就一路落到 --mindfs-topbar-bg / #000000，壁纸光斑整个丢失，玻璃只剩
+     半透明白糊在纯黑上，就是手机竖屏「灰蒙蒙」的来源。
+     注意：这条链里的 var(--bg-gradient-start) 是链尾兜底，这里仍用
+     --bg-gradient-composite，与桌面分支同源，移动端光斑分布保持一致。 */
+  --fork-shell-bg-mobile: var(--bg-gradient-composite, #000000);
+
   --text-primary: #f4f4f6;
   --text-secondary: #a6a6b0;
   --border-color: rgba(255, 255, 255, 0.16);
@@ -414,6 +422,22 @@
     0 12px 36px rgba(0, 0, 0, 0.52);
 }
 
+/* 移动端主区玻璃：blur(24px) 会把 --fork-glass-grain 噪点糊成整屏灰雾。
+   桌面 1280px 宽、同样 140px 噪点平铺被糊开后颗粒占比小，看不出；
+   手机 390px 竖屏主区占满全宽，每颗白噪点被 blur(24px) 扩散成一大团、
+   正好铺满屏幕 = 亮度从 11% 飙到 26% 的「灰蒙蒙」。降到 4px 后与桌面
+   观感一致（实测 11.8% vs 桌面 11.1%）。抽屉同理——blur(40px) 更狠，
+   盖在内容上也需要挡字，但 40px 已把噪点糊成雾，一并降到 16px。 */
+.fork-shell[data-fork-viewport="mobile"] [data-fork-region="main"] {
+  backdrop-filter: blur(4px) saturate(125%);
+  -webkit-backdrop-filter: blur(4px) saturate(125%);
+}
+.fork-shell[data-fork-viewport="mobile"] [data-fork-region="left"],
+.fork-shell[data-fork-viewport="mobile"] [data-fork-region="right"] {
+  backdrop-filter: blur(16px) saturate(135%);
+  -webkit-backdrop-filter: blur(16px) saturate(135%);
+}
+
 /* 菜单与面板：命中组件 inline style 里的 var(--menu-bg) / var(--panel-bg)。
    依赖上游的书写形式，属于脆规则——上游改写法即静默失效，
    但退化结果只是少了模糊与高光，不影响功能。 */
@@ -573,6 +597,9 @@
 
   --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
   --mobile-overlay-bg: #eef3fd;
+  /* 移动端 shell 背景：与深色版同理，走 --bg-gradient-composite 让竖屏也拿到
+     壁纸光斑（此前未定义回退到 #eef3fd 纯色，玻璃变「白板」） */
+  --fork-shell-bg-mobile: var(--bg-gradient-composite, #eef3fd);
 
   --panel-border: rgba(255, 255, 255, 0.75);
   --panel-shadow:
