@@ -297,23 +297,15 @@
   --mobile-sidebar-bg:
     var(--fork-glass-grain),
     rgba(22, 22, 26, 0.94);
-  /* 移动端抽屉背景。回退链是 --fork-mobile-drawer-bg → --mindfs-topbar-bg →
-     --mobile-sidebar-bg → --sidebar-bg（ForkShell.tsx:333），--mindfs-topbar-bg
-     排前挡路、且是纯色无噪点——不定义的话抽屉会落到 rgab(255,255,255,0.075)
-     的纯半透明白，没有玻璃颗粒质感。
-     关键：移动端抽屉是 position:fixed 盖在 main 内容之上的弹层，背后不是壁纸
-     而是主区内容，所以「透出壁纸渐变」这条路走不通（透出来的是模糊内容）。
-     要让抽屉有和桌面侧栏一样的玻璃渐变，必须让抽屉**自己铺壁纸渐变**——
-     拆成两层（ForkShell.tsx 的 mobileSidebarStyle 已改为 backgroundImage +
-     backgroundColor 分开写）：
-       --fork-mobile-drawer-bg-image：噪点 + 壁纸光斑渐变（background-image，
-         不能含尾部纯色——background-image 不接受纯色值，会整条非法被丢；
-         光斑层引用共享的 --fork-wallpaper，与 main 同源，改壁纸一处生效）
-       --fork-mobile-drawer-bg：半透明底色（background-color） */
-  --fork-mobile-drawer-bg-image:
+  /* 移动端抽屉背景：半透明玻璃，透出背后的 shell 壁纸（与 main 同源）。
+     回退链是 --fork-mobile-drawer-bg → --mindfs-topbar-bg → --mobile-sidebar-bg
+     → --sidebar-bg（ForkShell.tsx:337），--mindfs-topbar-bg 排前挡路、且是纯色
+     无噪点——不定义的话抽屉会落到 rgba(255,255,255,0.075) 的纯半透明白，
+     没有玻璃颗粒质感。这里显式带噪点 + 半透明底，配合 ForkShell 里抽屉打开时
+     main 内容让位（opacity 0），抽屉 backdrop 采样到干净壁纸，与桌面侧栏观感一致。 */
+  --fork-mobile-drawer-bg:
     var(--fork-glass-grain),
-    var(--fork-wallpaper);
-  --fork-mobile-drawer-bg: rgba(22, 22, 26, 0.82);
+    rgba(22, 22, 26, 0.38);
   --mobile-overlay-bg: #000000;
 
   --panel-border: rgba(255, 255, 255, 0.20);
@@ -653,12 +645,10 @@
   --menu-bg: var(--fork-glass-grain), rgba(255, 255, 255, 0.88);
 
   --mobile-sidebar-bg: var(--fork-glass-grain), rgba(252, 253, 255, 0.95);
-  /* 移动端抽屉：与深色同理，噪点 + 共享壁纸渐变 + 半透明白（原因见深色块注释）。
-     光斑层引用 --fork-wallpaper，与 main 同一份定义。 */
-  --fork-mobile-drawer-bg-image:
+  /* 移动端抽屉：与深色同理，半透明玻璃透出 shell 壁纸（原因见深色块注释） */
+  --fork-mobile-drawer-bg:
     var(--fork-glass-grain),
-    var(--fork-wallpaper);
-  --fork-mobile-drawer-bg: rgba(255, 255, 255, 0.78);
+    rgba(255, 255, 255, 0.50);
   --mobile-overlay-bg: #eef3fd;
   /* 移动端 shell 背景：与深色版同理，走 --bg-gradient-composite 让竖屏也拿到
      壁纸光斑（此前未定义回退到 #eef3fd 纯色，玻璃变「白板」） */
