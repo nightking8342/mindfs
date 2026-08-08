@@ -996,6 +996,15 @@
   background: var(--fork-tabs-bg, rgba(148, 163, 184, 0.10)) !important;
 }
 
+/* 上游用 scrollbar-width: none 隐藏这个横向滚动条，那只对 Firefox 生效。Chromium
+   下指示器弹簧动画欠阻尼超调（width 瞬时超过目标 tab、pos 回弹越过目标），会把
+   scrollWidth 瞬时撑出容器右缘，触发 overflow-x: auto 的横向滚动条、动画结束又消失。
+   这里补上 Chromium 的隐藏规则，与上游意图一致；!important 压过 glass/codex 的
+   全局 ::-webkit-scrollbar 美化（:root[data-theme=...] 特异性更高） */
+[role="tablist"]:not([data-fork-glass-tabs])::-webkit-scrollbar {
+  display: none !important;
+}
+
 
 /* ============================================================
  * 4. 区域级微调 —— ForkShell 挂的结构钩子
