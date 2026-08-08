@@ -330,9 +330,12 @@ export function ForkShell(props: ForkShellProps) {
     [side]: 0,
     width: "var(--fork-mobile-drawer-width, 75vw)",
     zIndex: 2000,
-    // 抽屉是半透明玻璃，透出背后的 shell 壁纸（与 main 同源）——不自铺壁纸。
-    // 背景走 --fork-mobile-drawer-bg（噪点 + 半透明底色），靠 backdrop-filter 透出。
-    background: "var(--fork-mobile-drawer-bg, var(--mindfs-topbar-bg, var(--mobile-sidebar-bg, var(--sidebar-bg))))",
+    // 抽屉玻璃要铺壁纸渐变，必须拆成 backgroundImage + backgroundColor 分开写：
+    // --fork-mobile-drawer-bg-image 是噪点+壁纸渐变（background-image 不接受纯色值，
+    // 若用 background 简写把纯色塞进变量，整个声明会非法被丢）；底色单独走
+    // --fork-mobile-drawer-bg（background-color），回退链保留旧链。
+    backgroundImage: "var(--fork-mobile-drawer-bg-image, none)",
+    backgroundColor: "var(--fork-mobile-drawer-bg, var(--mindfs-topbar-bg, var(--mobile-sidebar-bg, var(--sidebar-bg))))",
     boxShadow: side === "left" ? "4px 0 24px rgba(0,0,0,0.15)" : "-4px 0 24px rgba(0,0,0,0.15)",
     transition: "transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
     display: "flex",
@@ -410,11 +413,6 @@ export function ForkShell(props: ForkShellProps) {
                 flex: 1,
                 minHeight: 0,
                 minWidth: 0,
-                // 抽屉打开时 main 内容让位：透明度降到 0，让抽屉盖在 shell 壁纸上，
-                // backdrop 采样到的是干净壁纸而非 main 内容——和桌面侧栏「贴壁纸」观感一致。
-                // 用 opacity 而不是 visibility，保留布局高度避免抖动。
-                opacity: physicalLeftOpen || physicalRightOpen ? 0 : 1,
-                transition: "opacity 0.18s ease",
               }
             : floatingFooter
               ? {
