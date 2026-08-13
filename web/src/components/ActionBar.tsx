@@ -20,6 +20,7 @@ import { CompactUploadProgress } from "./CompactUploadProgress";
 import { fetchGitBranches, type GitBranchesPayload } from "../services/git";
 import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
 import { NoWorktreeIcon } from "./NoWorktreeIcon";
+import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
 
 type SessionInfo = {
   key: string;
@@ -71,6 +72,7 @@ function getSelectionPreview(text?: string): string {
 type ActionBarProps = {
   status?: WSStatus;
   agentsVersion?: number;
+  codexRateLimitsRefreshToken?: number;
   currentRootId?: string | null;
   currentRootIsGitRepo?: boolean;
   currentSession?: SessionInfo | null;
@@ -397,6 +399,7 @@ function stripPlanCommandPrefix(input: string): string {
 export function ActionBar({
   status = "disconnected",
   agentsVersion = 0,
+  codexRateLimitsRefreshToken = 0,
   currentRootId,
   currentRootIsGitRepo = false,
   currentSession,
@@ -1081,7 +1084,9 @@ export function ActionBar({
 
   const handleEditorEnter = useCallback((event: KeyboardEvent | null) => {
     if (isCompositionActive(event)) {
-      return false;
+      // Stop Lexical's plain-text Enter handler without preventing the native
+      // event, so an IME can finish committing its composition text.
+      return true;
     }
     if (event?.shiftKey) {
       return false;
@@ -1235,7 +1240,7 @@ export function ActionBar({
   ) : null;
 
   return (
-    <div style={{ width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}>
+    <div data-onboarding="action-bar" style={{ width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}>
       <div style={{ width: "100%", minWidth: 0, display: "flex", flexDirection: "column", gap: isMobile ? "0" : "6px" }}>
         {queuedMessages.length > 0 ? (
           <div
@@ -1405,117 +1410,13 @@ export function ActionBar({
               display: "flex",
               flexDirection: "column",
               alignItems: "flex-start",
-              gap: planModeActive || (!currentSession && currentRootIsGitRepo && mode !== "command") ? "4px" : 0,
+              gap: 0,
               minWidth: 0,
             }}
           >
-            {planModeActive ? (
-              <div
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "5px",
-                  height: "20px",
-                  padding: "0 5px 0 8px",
-                  borderRadius: "999px",
-                  border: "1px solid rgba(37, 99, 235, 0.22)",
-                  background: "rgba(37, 99, 235, 0.10)",
-                  color: "#2563eb",
-                  fontSize: "11px",
-                  fontWeight: 700,
-                  lineHeight: 1,
-                }}
-              >
-                <span>Plan</span>
-                <button
-                  type="button"
-                  aria-label={t("action.closePlanMode")}
-                  title={t("action.closePlanMode")}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => void onSetPlanMode?.(false, planSessionKey, planRootId)}
-                  style={{
-                    width: "14px",
-                    height: "14px",
-                    border: "none",
-                    borderRadius: "999px",
-                    background: "transparent",
-                    color: "currentColor",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                    lineHeight: 1,
-                    padding: 0,
-                  }}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M0 0h24v24H0z" fill="none" />
-                    <path fill="currentColor" fillRule="evenodd" d="M21 12a9 9 0 1 1-18 0a9 9 0 0 1 18 0M7.293 16.707a1 1 0 0 1 0-1.414L10.586 12L7.293 8.707a1 1 0 0 1 1.414-1.414L12 10.586l3.293-3.293a1 1 0 1 1 1.414 1.414L13.414 12l3.293 3.293a1 1 0 0 1-1.414 1.414L12 13.414l-3.293 3.293a1 1 0 0 1-1.414 0" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
-            ) : null}
-
-            {!currentSession && currentRootIsGitRepo && mode !== "command" ? (
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0, paddingLeft: "2px" }}>
-                <button
-                  type="button"
-                  onClick={() => setCreateWorktree((value) => !value)}
-                  disabled={sending}
-                  aria-label={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                  title={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                  style={{
-                    height: "24px",
-                    borderRadius: "6px",
-                    border: createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)",
-                    background: createWorktree ? "rgba(22, 163, 74, 0.08)" : "rgba(100, 116, 139, 0.10)",
-                    color: createWorktree ? "#15803d" : "var(--text-secondary)",
-                    padding: createWorktree ? "0 8px" : "0 8px 0 5px",
-                    fontSize: "11px",
-                    fontWeight: 800,
-                    cursor: sending ? "not-allowed" : "pointer",
-                    whiteSpace: "nowrap",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: "3px",
-                  }}
-                >
-                  {createWorktree ? "worktree" : (
-                    <>
-                      <NoWorktreeIcon size={12} />
-                      worktree
-                    </>
-                  )}
-                </button>
-                {createWorktree ? (
-                  <>
-                    <WorktreeBranchSelector
-                      branchMode={worktreeBranchMode}
-                      branch={worktreeBranch}
-                      branches={worktreeBranches.branches}
-                      disabled={sending}
-                      maxWidth={isMobile ? 150 : 240}
-                      menuAlign={isMobile ? "left" : "right"}
-                      menuPlacement="top"
-                      onChange={(nextMode, nextBranch) => {
-                        setWorktreeBranchMode(nextMode);
-                        setWorktreeBranch(nextBranch);
-                      }}
-                    />
-                    {worktreeBranchesLoading ? (
-                      <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span>
-                    ) : worktreeBranchError ? (
-                      <span title={worktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>{t("common.loadingFailed")}</span>
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
-            ) : null}
-
             <div
               data-mindfs-command-input-width="1"
+              data-onboarding="message-input"
               style={{
                 background: "var(--panel-bg)",
                 border: isFocused
@@ -1535,6 +1436,29 @@ export function ActionBar({
                 overflow: "visible",
               }}
             >
+			{planModeActive || (!currentSession && currentRootIsGitRepo && mode !== "command") || (mode !== "command" && agent === "codex") ? (
+			  <div style={{ position: "absolute", left: isMobile ? "4px" : "2px", right: isMobile ? "4px" : "8px", bottom: "calc(100% + 4px)", zIndex: 7, minWidth: 0, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "8px", pointerEvents: "none" }}>
+				<div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0, pointerEvents: "auto" }}>
+				  {planModeActive ? (
+					<div style={{ display: "inline-flex", alignItems: "center", gap: "5px", height: "20px", padding: "0 5px 0 8px", borderRadius: "999px", border: "1px solid rgba(37, 99, 235, 0.22)", background: "linear-gradient(rgba(37, 99, 235, 0.10), rgba(37, 99, 235, 0.10)), var(--mobile-overlay-bg)", color: "#2563eb", fontSize: "11px", fontWeight: 700, lineHeight: 1, flexShrink: 0 }}>
+					  <span>Plan</span>
+					  <button type="button" aria-label={t("action.closePlanMode")} title={t("action.closePlanMode")} onMouseDown={(event) => event.preventDefault()} onClick={() => void onSetPlanMode?.(false, planSessionKey, planRootId)} style={{ width: "14px", height: "14px", border: "none", borderRadius: "999px", background: "transparent", color: "currentColor", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: "14px", lineHeight: 1, padding: 0 }}>
+						<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none" /><path fill="currentColor" fillRule="evenodd" d="M21 12a9 9 0 1 1-18 0a9 9 0 0 1 18 0M7.293 16.707a1 1 0 0 1 0-1.414L10.586 12L7.293 8.707a1 1 0 0 1 1.414-1.414L12 10.586l3.293-3.293a1 1 0 1 1 1.414 1.414L13.414 12l3.293 3.293a1 1 0 0 1-1.414 1.414L12 13.414l-3.293 3.293a1 1 0 0 1-1.414 0" clipRule="evenodd" /></svg>
+					  </button>
+					</div>
+				  ) : null}
+				  {!currentSession && currentRootIsGitRepo ? (
+					<>
+					<button type="button" onClick={() => setCreateWorktree((value) => !value)} disabled={sending} aria-label={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} title={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} style={{ height: "24px", borderRadius: "6px", border: createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)", background: createWorktree ? "linear-gradient(rgba(22, 163, 74, 0.08), rgba(22, 163, 74, 0.08)), var(--mobile-overlay-bg)" : "linear-gradient(rgba(100, 116, 139, 0.10), rgba(100, 116, 139, 0.10)), var(--mobile-overlay-bg)", color: createWorktree ? "#15803d" : "var(--text-secondary)", padding: createWorktree ? "0 8px" : "0 8px 0 5px", fontSize: "11px", fontWeight: 800, cursor: sending ? "not-allowed" : "pointer", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "3px" }}>
+					  {createWorktree ? "worktree" : <><NoWorktreeIcon size={12} />worktree</>}
+					</button>
+					{createWorktree ? <><WorktreeBranchSelector branchMode={worktreeBranchMode} branch={worktreeBranch} branches={worktreeBranches.branches} disabled={sending} maxWidth={isMobile ? 150 : 240} menuAlign={isMobile ? "left" : "right"} menuPlacement="top" onChange={(nextMode, nextBranch) => { setWorktreeBranchMode(nextMode); setWorktreeBranch(nextBranch); }} />{worktreeBranchesLoading ? <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span> : worktreeBranchError ? <span title={worktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>{t("common.loadingFailed")}</span> : null}</> : null}
+					</>
+				  ) : null}
+				</div>
+				<div style={{ pointerEvents: "auto" }}><CodexRateLimitIndicator agent={agent} refreshToken={codexRateLimitsRefreshToken} /></div>
+			  </div>
+			) : null}
 	            <TokenEditor
 	              ref={editorRef}
 	              placeholder={inputPlaceholder}
@@ -1668,8 +1592,9 @@ export function ActionBar({
               }}
             />
 
-            <div style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
+            <div data-onboarding="input-controls" style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
               <div
+                data-onboarding="session-ring"
                 onMouseDown={handleDragStart}
                 onTouchStart={handleDragStart}
                 onClick={() => {
@@ -1746,10 +1671,11 @@ export function ActionBar({
                 ) : null}
               </div>
 
-              <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} />
-              {mode !== "command" ? (
-                <div>
-                  <AgentSelector
+              <>
+                <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" />
+                {mode !== "command" ? (
+                  <div>
+                    <AgentSelector
                     agent={agent}
                     model={model}
                     mode={agentMode}
@@ -1776,18 +1702,22 @@ export function ActionBar({
                     compact={true}
                     warnUnavailable={isSelectedAgentUnavailable}
                     defaultExpandOptions
+                    onboardingId="agent-selector"
+                    />
+                  </div>
+                ) : (
+                  <ShellSelector
+                    shell={shell}
+                    shells={shells}
+                    onShellChange={setShell}
+                    compact={true}
                   />
-                </div>
-              ) : (
-                <ShellSelector
-                  shell={shell}
-                  shells={shells}
-                  onShellChange={setShell}
-                  compact={true}
-                />
-              )}
+                )}
+              </>
 
-              <button
+              <>
+                <button
+                data-onboarding="attachment-action"
                 type="button"
                 onClick={() => attachmentInputRef.current?.click()}
                 disabled={!currentRootId || sending}
@@ -1815,8 +1745,9 @@ export function ActionBar({
                   <path d="M12 5v14" />
                   <path d="M5 12h14" />
                 </svg>
-              </button>
-              <button
+                </button>
+                <button
+                data-onboarding="send-action"
                 type="button"
                 onClick={showCancel ? handleCancel : handleSend}
                 disabled={showCancel ? cancelling : !canSend}
@@ -1829,7 +1760,8 @@ export function ActionBar({
                 ) : (
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                 )}
-              </button>
+                </button>
+              </>
               <input
                 ref={attachmentInputRef}
                 type="file"

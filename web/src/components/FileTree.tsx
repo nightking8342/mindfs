@@ -21,6 +21,7 @@ import {
 import { useI18n, type Locale, type MessageKey } from "../i18n";
 import { AgentMenuList } from "./AgentMenuList";
 import { AgentIcon } from "./AgentIcon";
+import { AgentSelector } from "./AgentSelector";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
 import { ForkSchemeSwitch } from "./ForkSchemeSwitch";
@@ -58,6 +59,10 @@ import {
   webPushReasonLabel,
   type WebPushStatus,
 } from "../services/webPush";
+import {
+  fetchSessionNamingPreference,
+  updateSessionNamingPreference,
+} from "../services/preferences";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -153,6 +158,7 @@ type FileTreeProps = {
   onAgentConfigSwitchProgressChange?: (
     update: AgentConfigSwitchProgress | null | ((prev: AgentConfigSwitchProgress | null) => AgentConfigSwitchProgress | null),
   ) => void;
+  onAgentConfigSwitched?: (agent: string) => void;
   onProjectTreeTabChange?: (tab: ProjectTreeTab) => void;
   creatingRootName?: string | null;
   creatingRootBusy?: boolean;
@@ -160,6 +166,7 @@ type FileTreeProps = {
   creatingRootSubmitOnBlur?: boolean;
   onCreateRootStart?: () => void;
   onOpenProjectAdd?: () => void;
+  onStartOnboarding?: () => void;
   onCreateRootNameChange?: (name: string) => void;
   onCreateRootSubmit?: () => void;
   onCreateRootCancel?: () => void;
@@ -537,6 +544,15 @@ function PencilIcon() {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  );
+}
+
+function OnboardingGuideIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 2048 2048" aria-hidden="true">
+      <path d="M0 0h2048v2048H0z" fill="none" />
+      <path fill="currentColor" d="M2048 512v1536H0V512h517q-2-16-3-32t-2-32q0-93 35-174t96-143t142-96T960 0q93 0 174 35t143 96t96 142t35 175q0 16-1 32t-4 32zM960 128q-66 0-124 25t-102 69t-69 102t-25 124t25 124t68 102t102 69t125 25t124-25t101-68t69-102t26-125t-25-124t-69-101t-102-69t-124-26m960 512h-555q-25 52-62 97t-85 77q103 40 186 106t140 152t89 188t31 212v64h-128v-64q0-123-44-228t-121-183t-182-121t-229-44q-111 0-210 38t-176 107t-126 162t-61 205h648l-230-230l91-90l384 384l-384 384l-91-90l230-230H256v-64q0-110 31-211t90-187t141-152t185-107q-98-69-148-175H128v1280h1792z" />
     </svg>
   );
 }
@@ -2006,6 +2022,7 @@ export function FileTree({
   agentConfigSwitchRequest = null,
   agentConfigSwitchProgress = null,
   onAgentConfigSwitchProgressChange,
+  onAgentConfigSwitched,
   onProjectTreeTabChange,
   creatingRootName = null,
   creatingRootBusy = false,
@@ -2013,6 +2030,7 @@ export function FileTree({
   creatingRootSubmitOnBlur = true,
   onCreateRootStart,
   onOpenProjectAdd,
+  onStartOnboarding,
   onCreateRootNameChange,
   onCreateRootSubmit,
   onCreateRootCancel,
@@ -2065,6 +2083,12 @@ export function FileTree({
   const [isAppearanceMenuOpen, setIsAppearanceMenuOpen] = React.useState(false);
   const [isLocaleMenuOpen, setIsLocaleMenuOpen] = React.useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = React.useState(false);
+  const [sessionNamingOpen, setSessionNamingOpen] = React.useState(false);
+  const [sessionNamingAgents, setSessionNamingAgents] = React.useState<AgentStatus[]>([]);
+  const [sessionNamingAgent, setSessionNamingAgent] = React.useState("");
+  const [sessionNamingModel, setSessionNamingModel] = React.useState("");
+  const [sessionNamingBusy, setSessionNamingBusy] = React.useState(false);
+  const [sessionNamingError, setSessionNamingError] = React.useState("");
   const [appearanceMode, setAppearanceModeState] = React.useState<AppearanceMode>(() => getAppearanceMode());
   const [isUpdateNotesOpen, setIsUpdateNotesOpen] = React.useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = React.useState<BeforeInstallPromptEvent | null>(null);
@@ -2588,6 +2612,46 @@ export function FileTree({
       .finally(() => setAgentConfigBusy(false));
   }, [resetAgentConfigEditingState, t]);
 
+  const openSessionNaming = React.useCallback(() => {
+    setAgentConfigFlow(null);
+    setAgentLifecycleOpen(false);
+    setRelayServicesOpen(false);
+    setIsMenuOpen(false);
+    setSessionNamingOpen(true);
+    setSessionNamingBusy(true);
+    setSessionNamingError("");
+    Promise.all([fetchAgents(true), fetchSessionNamingPreference()])
+      .then(([items, preference]) => {
+        const installed = items.filter((item) => item.installed);
+        setSessionNamingAgents(installed);
+        const selected = installed.find((item) => item.name === preference.agent) || installed[0];
+        const selectedModel = selected?.models?.find((item) => item.id === preference.model)?.id || "";
+        setSessionNamingAgent(selected?.name || "");
+        setSessionNamingModel(selectedModel);
+      })
+      .catch((error) => {
+        setSessionNamingError(error instanceof Error ? error.message : t("sessionNaming.loadFailed"));
+      })
+      .finally(() => setSessionNamingBusy(false));
+  }, [t]);
+
+  const saveSessionNaming = React.useCallback(async () => {
+    if (!sessionNamingAgent || sessionNamingBusy) return;
+    setSessionNamingBusy(true);
+    setSessionNamingError("");
+    try {
+      await updateSessionNamingPreference({
+        agent: sessionNamingAgent,
+        model: sessionNamingModel,
+      });
+      setSessionNamingOpen(false);
+    } catch (error) {
+      setSessionNamingError(error instanceof Error ? error.message : t("sessionNaming.saveFailed"));
+    } finally {
+      setSessionNamingBusy(false);
+    }
+  }, [sessionNamingAgent, sessionNamingBusy, sessionNamingModel, t]);
+
   React.useEffect(() => {
     if (!agentConfigSwitchRequest) {
       return;
@@ -3066,6 +3130,7 @@ export function FileTree({
     try {
       if (agentConfigSwitchSelection.type === "api_provider") {
         await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: agentConfigSwitchSelection.id });
+        onAgentConfigSwitched?.(agentConfigAgent);
         closeAgentConfigFlow();
         return;
       }
@@ -3077,6 +3142,7 @@ export function FileTree({
       }
       // The six stages are already done; only the probe is still running, and it
       // completes over WS as agent.config.switched.
+      onAgentConfigSwitched?.(agentConfigAgent);
       onAgentConfigSwitchProgressChange?.({
         agent: agentConfigAgent,
         backupID: agentConfigSwitchSelection.id,
@@ -3118,6 +3184,7 @@ export function FileTree({
     agentConfigBackups,
     agentConfigSwitchSelection,
     closeAgentConfigFlow,
+    onAgentConfigSwitched,
     onAgentConfigSwitchProgressChange,
     t,
   ]);
@@ -3491,6 +3558,7 @@ export function FileTree({
         <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 34px)" }}>
           <ForkGlassTabs
             ariaLabel={t("fileTree.projectTabs")}
+            dataOnboarding="project-tabs"
             value={projectTreeTab}
             onChange={setProjectTreeTab}
             tabs={[
@@ -3504,6 +3572,7 @@ export function FileTree({
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
+            data-onboarding="sidebar-menu"
             onClick={() => {
               setIsMenuOpen((open) => {
                 const nextOpen = !open;
@@ -3608,6 +3677,19 @@ export function FileTree({
                 >
                   <AgentInstallIcon />
                   <span>{t("fileTree.agentInstallUpdate")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openSessionNaming}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 6h16" />
+                    <path d="M4 12h10" />
+                    <path d="M4 18h7" />
+                    <path d="m17 16 2 2 3-4" />
+                  </svg>
+                  <span>{t("fileTree.sessionNamingAgent")}</span>
                 </button>
                 <button
                   type="button"
@@ -3823,6 +3905,22 @@ export function FileTree({
                 );
               }) : null}
               <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
+              {onStartOnboarding ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartOnboarding();
+                    setIsMenuOpen(false);
+                    setIsAppearanceMenuOpen(false);
+                    setIsLocaleMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <OnboardingGuideIcon />
+                  <span>{t("onboarding.menu")}</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => {
@@ -4069,6 +4167,83 @@ export function FileTree({
               onBackgroundSwitch={closeAgentConfigFlow}
               onCloseSwitchProgress={closeAgentConfigSwitchProgress}
             />
+          </div>
+        ) : null}
+        {sessionNamingOpen ? (
+          <div
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 40,
+              padding: "14px",
+              borderRadius: "12px",
+              border: "1px solid var(--border-color)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 16px 36px rgba(15, 23, 42, 0.18)",
+            }}
+          >
+            <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }}>
+              {t("sessionNaming.title")}
+            </div>
+            <div
+              style={{
+                marginTop: "12px",
+                minHeight: "42px",
+                padding: "6px 8px",
+                border: "1px solid var(--border-color)",
+                borderRadius: "10px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "flex-start",
+                gap: "8px",
+              }}
+            >
+              {sessionNamingAgent ? (
+                <AgentSelector
+                  agent={sessionNamingAgent}
+                  model={sessionNamingModel}
+                  agents={sessionNamingAgents}
+                  onAgentChange={(agent, model) => {
+                    setSessionNamingAgent(agent);
+                    setSessionNamingModel(model || "");
+                  }}
+                  compact
+                  showChevron
+                  menuPlacement="bottom"
+                  defaultExpandOptions
+                  viewportMenu
+                  allowDefaultModel
+                />
+              ) : null}
+              <span style={{ minWidth: 0, marginLeft: "auto", fontSize: "12px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {sessionNamingBusy ? t("common.loading") : sessionNamingModel || t("agent.defaultModel")}
+              </span>
+            </div>
+            {sessionNamingError ? (
+              <div style={{ marginTop: "8px", color: "#dc2626", fontSize: "11px", lineHeight: 1.4 }}>
+                {sessionNamingError}
+              </div>
+            ) : null}
+            <div style={{ ...agentConfigActionRowStyle, marginTop: "12px" }}>
+              <button
+                type="button"
+                disabled={sessionNamingBusy}
+                onClick={() => setSessionNamingOpen(false)}
+                style={agentConfigSecondaryButtonStyle(sessionNamingBusy)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                disabled={sessionNamingBusy || !sessionNamingAgent}
+                onClick={() => void saveSessionNaming()}
+                style={agentConfigPrimaryButtonStyle(sessionNamingBusy || !sessionNamingAgent)}
+              >
+                {sessionNamingBusy ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
           </div>
         ) : null}
         {relayServicesOpen ? (

@@ -302,6 +302,8 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/candidates", h.protectedEndpoint(h.handleCandidates))
 	r.Post("/api/prompts", h.protectedEndpoint(h.handlePromptSave))
 	r.Get("/api/sessions", h.protectedEndpoint(h.handleSessions))
+	r.Get("/api/preferences/session-naming", h.protectedEndpoint(h.handleSessionNamingPreferenceGet))
+	r.Put("/api/preferences/session-naming", h.protectedEndpoint(h.handleSessionNamingPreferencePut))
 	r.Get("/api/replying-sessions", h.protectedEndpoint(h.handleReplyingSessions))
 	r.Get("/api/sessions/search", h.protectedEndpoint(h.handleSessionSearch))
 	r.Get("/api/sessions/children", h.protectedEndpoint(h.handleSessionChildren))
@@ -366,6 +368,8 @@ func (h *HTTPHandler) Routes() http.Handler {
 	// Agent status API
 	r.Get("/api/agents", h.protectedEndpoint(h.handleAgentsList))
 	r.Post("/api/agents/restart", h.protectedEndpoint(h.handleAgentRestart))
+	r.Get("/api/agents/codex/rate-limits", h.protectedEndpoint(h.handleCodexRateLimitsGet))
+	r.Post("/api/agents/codex/rate-limit-reset", h.protectedEndpoint(h.handleCodexRateLimitReset))
 	r.Get("/api/agent-config/defaults", h.protectedEndpoint(h.handleAgentConfigDefaults))
 	r.Get("/api/agent-config/backups", h.protectedEndpoint(h.handleAgentConfigBackupsList))
 	r.Post("/api/agent-config/backups", h.protectedEndpoint(h.handleAgentConfigBackupCreate))
@@ -1227,6 +1231,74 @@ func (h *HTTPHandler) handleAgentsList(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"agents": statuses,
 		"shells": shells,
+	})
+}
+
+type sessionNamingPreferenceRequest struct {
+	Agent string `json:"agent"`
+	Model string `json:"model"`
+}
+
+func (h *HTTPHandler) handleSessionNamingPreferenceGet(w http.ResponseWriter, _ *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	pref := h.AppContext.GetPreferences().SessionNamingDefaults()
+	respondJSON(w, http.StatusOK, map[string]any{
+		"agent": pref.Agent,
+		"model": pref.Model,
+	})
+}
+
+func (h *HTTPHandler) handleSessionNamingPreferencePut(w http.ResponseWriter, r *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil || h.AppContext.GetProber() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	var req sessionNamingPreferenceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
+		return
+	}
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.Model = strings.TrimSpace(req.Model)
+	if req.Agent == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session naming agent is required"))
+		return
+	}
+	validAgent := false
+	validModel := req.Model == ""
+	for _, status := range h.AppContext.GetProber().GetInstalledStatuses() {
+		if strings.TrimSpace(status.Name) != req.Agent {
+			continue
+		}
+		validAgent = true
+		if req.Model != "" {
+			for _, model := range status.Models {
+				if strings.TrimSpace(model.ID) == req.Model {
+					validModel = true
+					break
+				}
+			}
+		}
+		break
+	}
+	if !validAgent {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session naming agent is not installed"))
+		return
+	}
+	if !validModel {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session naming model is not supported by the selected agent"))
+		return
+	}
+	if err := h.AppContext.GetPreferences().UpdateSessionNamingDefaults(req.Agent, req.Model); err != nil {
+		respondError(w, http.StatusInternalServerError, errInvalidRequest(err.Error()))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"agent": req.Agent,
+		"model": req.Model,
 	})
 }
 

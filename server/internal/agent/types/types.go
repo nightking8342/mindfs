@@ -162,6 +162,13 @@ type ImportExternalSessionInput struct {
 	Agent          string
 	AgentSessionID string
 	AfterTimestamp time.Time
+	Cursor         ExternalSessionCursor
+}
+
+type ExternalSessionCursor struct {
+	SourcePath      string
+	Offset          int64
+	ModTimeUnixNano int64
 }
 
 type ImportedExchange struct {
@@ -188,6 +195,7 @@ type ImportedExternalSession struct {
 	Title          string
 	Exchanges      []ImportedExchange
 	Subagents      []ImportedSubagentSession
+	Cursor         ExternalSessionCursor
 }
 
 // ImportedSubagentSession describes an externally persisted child agent session.

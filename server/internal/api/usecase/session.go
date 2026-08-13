@@ -1058,6 +1058,8 @@ func (s *Service) BuildPrompt(in BuildPromptInput) string {
 	prompt := buildUserPrompt(in.Message, clientCtx)
 	if strings.TrimSpace(clientCtx.PluginCatalog) != "" {
 		prompt = buildPluginPrompt(clientCtx.PluginCatalog, in.Message, in.IsInitial)
+	} else if in.IsInitial {
+		prompt = prependReplyTips(prompt)
 	}
 	return prependSwitchHint(in, prompt)
 }
@@ -1211,6 +1213,7 @@ type SuggestSessionNameInput struct {
 	RootID       string
 	SessionKey   string
 	Agent        string
+	Model        string
 	FirstMessage string
 }
 
@@ -1363,6 +1366,7 @@ func sessionNameRunner(ctx context.Context, pool *agent.Pool, rootAbs string, in
 	sess, err := pool.GetOrCreate(ctx, agenttypes.OpenSessionInput{
 		SessionKey: sessionKey,
 		AgentName:  agentName,
+		Model:      strings.TrimSpace(in.Model),
 		RootPath:   tmpRoot,
 	})
 	if err != nil {
@@ -1396,9 +1400,19 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 		return nil, nil
 	}
 	agentName := strings.TrimSpace(in.Agent)
+	model := strings.TrimSpace(in.Model)
+	if prefs := s.Registry.GetPreferences(); prefs != nil {
+		namingDefaults := prefs.SessionNamingDefaults()
+		if strings.TrimSpace(namingDefaults.Agent) != "" {
+			agentName = strings.TrimSpace(namingDefaults.Agent)
+			model = strings.TrimSpace(namingDefaults.Model)
+		}
+	}
 	if agentName == "" {
 		return nil, nil
 	}
+	in.Agent = agentName
+	in.Model = model
 	message := normalizeSessionNameCandidate(in.FirstMessage)
 	if sessionNameScore(message) < sessionNameMinMessageLen {
 		return nil, nil
@@ -1431,14 +1445,8 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 
 	rawName, err := sessionNameRunner(nameCtx, pool, rootAbs, in)
 	if err != nil {
-		log.Printf("[session-name] suggest.error root=%s session=%s agent=%s err=%v", in.RootID, in.SessionKey, agentName, err)
-		if prober := s.Registry.GetProber(); prober != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-			prober.ReportRuntimeFailure(agentName, err)
-		}
+		log.Printf("[session-name] suggest.error root=%s session=%s agent=%s model=%q err=%v", in.RootID, in.SessionKey, agentName, model, err)
 		return nil, nil
-	}
-	if prober := s.Registry.GetProber(); prober != nil {
-		prober.ReportSuccess(agentName)
 	}
 
 	name := normalizeSessionNameCandidate(rawName)
@@ -1590,6 +1598,15 @@ func cancelRuntimeAfterNonRecoverableError(sess agenttypes.Session, pool *agent.
 
 func contextLineCount(exchanges []session.Exchange) int {
 	return len(exchanges)
+}
+
+const replyTips = "[REPLY_TIPS]\n\n" +
+	"- MindFS supports GitHub-flavored Markdown, fenced `mermaid` diagrams, mathematical formulas, and Markdown images.\n" +
+	"- When a useful workspace image exists, embed it with `![alt](path)` and prefer a workspace-root-relative path.\n" +
+	"- Never invent file paths or URLs. Use images or diagrams only when they materially improve the reply."
+
+func prependReplyTips(prompt string) string {
+	return replyTips + "\n\n[USER_PROMPT]\n" + strings.TrimSpace(prompt)
 }
 
 func buildUserPrompt(message string, clientCtx ClientContext) string {

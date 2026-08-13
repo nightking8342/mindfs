@@ -40,11 +40,15 @@ export function ForkGlassTabs<T extends string>({
   value,
   onChange,
   ariaLabel,
+  dataOnboarding,
 }: {
   tabs: Array<ForkGlassTab<T>>;
   value: T;
   onChange: (next: T) => void;
   ariaLabel?: string;
+  /** 透传上游 onboarding 锚点（如 `data-onboarding="project-tabs"`），
+   *  fork 用自己的标签栏替换上游 DOM 后，引导按该属性定位，缺了会静默失效。 */
+  dataOnboarding?: string;
 }) {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const buttonRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
@@ -151,6 +155,7 @@ export function ForkGlassTabs<T extends string>({
       role="tablist"
       aria-label={ariaLabel}
       data-fork-glass-tabs=""
+      data-onboarding={dataOnboarding}
       style={{
         position: "relative",
         display: "flex",

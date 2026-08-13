@@ -135,6 +135,7 @@ import { ToastContainer } from "./components/Toast";
 import { BottomSheet } from "./components/BottomSheet";
 import { ScheduledAgentTaskDialog } from "./components/ScheduledAgentTaskDialog";
 import { TaskTemplateDialog } from "./components/TaskTemplateDialog";
+import { OnboardingTour } from "./components/OnboardingTour";
 import { WorktreeBranchSelector } from "./components/WorktreeBranchSelector";
 import { NoWorktreeIcon } from "./components/NoWorktreeIcon";
 import { renderToolIcon } from "./components/stream/ToolCallCard";
@@ -167,6 +168,11 @@ import {
 import { shouldApplyTaskDetail } from "./services/taskDetailOrder";
 import { mergeRelatedFileGroups, taskIdsForUpdatedSession } from "./services/taskRelatedFiles";
 import { useI18n, type MessageKey, type MessageParams } from "./i18n";
+import {
+  completeOnboarding,
+  dismissOnboarding,
+  shouldAutoStartOnboarding,
+} from "./services/onboarding";
 
 // 类型定义
 type SessionMode = "chat" | "plugin" | "command";
@@ -1655,6 +1661,7 @@ export function App({ onGoHome }: AppProps) {
     "main",
   );
   const [agentsVersion, setAgentsVersion] = useState(0);
+  const [codexRateLimitsRefreshToken, setCodexRateLimitsRefreshToken] = useState(0);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const { isMobile, isTablet } = useResponsive();
   const [mobileEnterKeySends, setMobileEnterKeySends] = useState(loadMobileEnterKeySends);
@@ -1664,6 +1671,8 @@ export function App({ onGoHome }: AppProps) {
   const [isRightOpen, setIsRightOpen] = useState(
     () => window.innerWidth >= 768,
   );
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const onboardingAutoStartRef = useRef(false);
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
   const currentRootIdRef = useRef<string | null>(null);
 
@@ -2399,6 +2408,26 @@ export function App({ onGoHome }: AppProps) {
   const [e2eeState, setE2eeState] = useState<E2EEState>(() =>
     e2eeService.snapshot(),
   );
+  useEffect(() => {
+    if (
+      isMobile ||
+      onboardingAutoStartRef.current ||
+      !currentRootId ||
+      bootstrapState.phase !== "ready" ||
+      (e2eeState.required && !e2eeState.unlocked)
+    ) {
+      return;
+    }
+    onboardingAutoStartRef.current = true;
+    if (!shouldAutoStartOnboarding()) return;
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700);
+    return () => window.clearTimeout(timer);
+  }, [bootstrapState.phase, currentRootId, e2eeState.required, e2eeState.unlocked, isMobile]);
+  useEffect(() => {
+    if (isMobile && onboardingOpen) {
+      setOnboardingOpen(false);
+    }
+  }, [isMobile, onboardingOpen]);
   const [e2eeSecretInput, setE2eeSecretInput] = useState("");
   const [e2eePromptError, setE2eePromptError] = useState("");
   const [e2eePromptBusy, setE2eePromptBusy] = useState(false);
@@ -2925,6 +2954,31 @@ export function App({ onGoHome }: AppProps) {
     const target = `${window.location.pathname}${search}`;
     window.history.replaceState(null, "", target);
   }, []);
+
+  const handleOnboardingStepChange = useCallback((stepId: string) => {
+    const showingSidebar = stepId === "sidebar-menu" || stepId === "project-tabs";
+    const showingSessions = stepId === "session-actions";
+    const showingTasks = stepId === "project-home" || stepId === "main-menu" || stepId === "task-templates" || stepId === "task-template-menu" || stepId === "tasks";
+
+    if (showingTasks && currentRootId) {
+      selectedSessionRef.current = null;
+      setSelectedSession(null);
+      setSelectedSessionLoading(false);
+      setFile(null);
+      setGitDiff(null);
+      setSelectedDir(currentRootId);
+      handleMainContentViewChange("task-kanban");
+      replaceURLState({ root: currentRootId, file: "", session: "", cursor: 0, pluginQuery: {} });
+    }
+
+    if (!isMobile) {
+      setIsLeftOpen(true);
+      setIsRightOpen(true);
+      return;
+    }
+    setIsLeftOpen(showingSidebar);
+    setIsRightOpen(showingSessions);
+  }, [currentRootId, handleMainContentViewChange, isMobile, replaceURLState]);
 
   const redirectToRelayLogin = useCallback(() => {
     const next = encodeURIComponent(
@@ -8594,20 +8648,48 @@ export function App({ onGoHome }: AppProps) {
       interactionModeRef.current = "drawer";
       setInteractionMode("drawer");
       setDrawerOpenForRoot(root, true);
-      void restoreActiveSession(root, key).then((restored) => {
-        if (!restored) return;
+      const applyDrawerSession = (session: Session) => {
+        const activeDrawer = drawerSessionByRootRef.current[root];
+        if ((activeDrawer?.key || activeDrawer?.session_key) !== key) return;
         setDrawerSessionForRoot(root, {
-          ...(restored as any),
+          ...(activeDrawer as any),
+          ...(session as any),
           key,
           session_key: key,
           root_id: root,
-          task_id: (restored as any)?.task_id || taskId || "",
+          task_id: (session as any)?.task_id || taskId || "",
         } as Session);
+      };
+      void (async () => {
+        const restorePromise = restoreActiveSession(root, key);
+        if (!hasSessionExchanges(cached)) {
+          const persisted = await getCachedSession(root, key);
+          const latest = sessionCacheRef.current[cacheKey];
+          const immediate = hasSessionExchanges(latest) ? latest : persisted;
+          if (immediate) {
+            sessionCacheRef.current[cacheKey] = {
+              ...(immediate as any),
+              key,
+            } as Session;
+            bumpCacheVersion();
+            applyDrawerSession(immediate);
+          }
+        }
+        const restored = await restorePromise;
+        if (!restored) return;
+        applyDrawerSession(restored);
         loadedSessionRef.current[cacheKey] = true;
         clearSessionStale(root, key);
+      })().catch((error) => {
+        console.error("[task.session] failed to open drawer session", {
+          root,
+          sessionKey: key,
+          error,
+        });
       });
     },
     [
+      bumpCacheVersion,
       clearSessionStale,
       restoreActiveSession,
       rootSessionKey,
@@ -9203,6 +9285,7 @@ export function App({ onGoHome }: AppProps) {
             event.data?.contextWindow,
           );
           tokenStationRefreshRef.current?.();
+          setCodexRateLimitsRefreshToken((value) => value + 1);
           break;
         case "error":
           reportError(
@@ -11299,6 +11382,12 @@ export function App({ onGoHome }: AppProps) {
     );
   };
   const currentRootSlashCommandResult = slashCommandResultForSession(currentRootId, null);
+  const sessionViewerComposerOverlayInset =
+    String((actionBarSession as any)?.agent || "").toLowerCase() === "codex" ||
+    (actionBarSession as any)?.plan_mode ||
+    pendingPlanMode
+      ? 20
+      : 0;
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
@@ -11309,6 +11398,7 @@ export function App({ onGoHome }: AppProps) {
       )}
       targetSeq={selectedSession?.search_seq}
       targetSeqRequestKey={selectedSession?.search_target_id}
+      composerOverlayInset={sessionViewerComposerOverlayInset}
       loading={selectedSessionLoading}
       rootId={selectedSession?.root_id || currentRootId}
       rootPath={
@@ -12225,6 +12315,7 @@ export function App({ onGoHome }: AppProps) {
   kanbanStageColumns.sort((a, b) => a.index - b.index);
 	  const kanbanTaskPanel = currentRootId ? (
 	    <div
+	      data-onboarding="task-board"
 	      style={{
 	        maxHeight: "calc(100dvh - 92px)",
 	        overflow: "visible",
@@ -12254,6 +12345,7 @@ export function App({ onGoHome }: AppProps) {
         >
           <div
             role="tablist"
+            data-onboarding="task-templates"
             aria-label={t("task.templates")}
             style={{
               display: "flex",
@@ -12357,6 +12449,7 @@ export function App({ onGoHome }: AppProps) {
           <div ref={taskTemplateActionMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             <button
               type="button"
+              data-onboarding="task-template-menu"
               aria-label={t("task.templateMenu")}
               title={t("task.templateMenu")}
               onClick={() => setTaskTemplateActionMenuOpen((open) => !open)}
@@ -12507,6 +12600,7 @@ export function App({ onGoHome }: AppProps) {
         <div ref={taskCreateTemplateMenuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
+            data-onboarding="task-create"
             title={t("task.create")}
             aria-label={t("task.create")}
             disabled={!isAllTaskTemplateFilter && !selectedTaskTemplateForFilter}
@@ -12807,10 +12901,19 @@ export function App({ onGoHome }: AppProps) {
                             fontSize: "12px",
                             lineHeight: "18px",
                             fontWeight: firstInput ? 700 : 500,
+                            ...(!isAllTaskTemplateFilter
+                              ? {
+                                  display: "flex",
+                                  alignItems: "flex-start",
+                                  gap: "6px",
+                                  minWidth: 0,
+                                }
+                              : {}),
                           }}
                         >
                           <div
                             style={{
+                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
                               whiteSpace: "pre-wrap",
                               wordBreak: "break-word",
                               ...(!inputExpanded
@@ -12823,21 +12926,21 @@ export function App({ onGoHome }: AppProps) {
                                 : {}),
                             }}
                           >
-                            {!isAllTaskTemplateFilter ? (
-                              <span
-                                title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                                aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                                style={{ ...taskWorktreeTagStyle(taskWorktreeEnabled), float: "right", marginLeft: "6px" }}
-                              >
-                                {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                                worktree
-                              </span>
-                            ) : null}
                             {!isAllTaskTemplateFilter && taskNumberLabel ? (
                               <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
                             ) : null}
                             {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
                           </div>
+                          {!isAllTaskTemplateFilter ? (
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                          ) : null}
                         </div>
                         <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
@@ -14072,6 +14175,7 @@ export function App({ onGoHome }: AppProps) {
             }
             creatingRootBusy={creatingRootBusy}
             onOpenProjectAdd={handleOpenProjectAdd}
+            onStartOnboarding={isMobile ? undefined : () => setOnboardingOpen(true)}
             onCreateRootStart={handleCreateRootStart}
             onCreateRootNameChange={setCreatingRootName}
             onCreateRootSubmit={() => {
@@ -14108,6 +14212,11 @@ export function App({ onGoHome }: AppProps) {
             agentConfigSwitchRequest={agentConfigSwitchRequest}
             agentConfigSwitchProgress={agentConfigSwitchProgress}
             onAgentConfigSwitchProgressChange={setAgentConfigSwitchProgress}
+            onAgentConfigSwitched={(agentName) => {
+              if (agentName.trim().toLowerCase() === "codex") {
+                setCodexRateLimitsRefreshToken((value) => value + 1);
+              }
+            }}
             onProjectTreeTabChange={setProjectTreeTab}
             relayActionLabel={relayActionLabel}
             relayActionDisabled={relayActionDisabled}
@@ -14142,6 +14251,7 @@ export function App({ onGoHome }: AppProps) {
         rightSidebar={sessionSidebar}
         main={
           <div
+            data-onboarding="workspace"
             style={{
               width: "100%",
               flex: 1,
@@ -14211,6 +14321,7 @@ export function App({ onGoHome }: AppProps) {
             <ActionBar
               status={status}
               agentsVersion={agentsVersion}
+              codexRateLimitsRefreshToken={codexRateLimitsRefreshToken}
               currentRootId={currentRootId}
               currentRootIsGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
               currentSession={actionBarSession}
@@ -14327,6 +14438,27 @@ export function App({ onGoHome }: AppProps) {
           </BottomSheet>
         }
       />
+      {!isMobile ? <OnboardingTour
+        open={onboardingOpen}
+        isMobile={isMobile}
+        onStepChange={handleOnboardingStepChange}
+        onComplete={() => {
+          completeOnboarding();
+          setOnboardingOpen(false);
+          if (isMobile) {
+            setIsLeftOpen(false);
+            setIsRightOpen(false);
+          }
+        }}
+        onDismiss={() => {
+          dismissOnboarding();
+          setOnboardingOpen(false);
+          if (isMobile) {
+            setIsLeftOpen(false);
+            setIsRightOpen(false);
+          }
+        }}
+      /> : null}
       {bootstrapState.phase === "needs_pairing" &&
         e2eeState.required &&
         !e2eeState.unlocked ? (

@@ -802,6 +802,7 @@ export function ForkShell(props: ForkShellProps) {
       className="fork-shell"
       data-fork-shell=""
       data-fork-viewport={viewport}
+      data-onboarding="shell"
       style={shellStyle}
     >
       {isMobile && (
