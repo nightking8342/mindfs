@@ -1702,6 +1702,7 @@ export function ActionBar({
                     compact={true}
                     warnUnavailable={isSelectedAgentUnavailable}
                     defaultExpandOptions
+                    viewportMenu
                     onboardingId="agent-selector"
                     />
                   </div>

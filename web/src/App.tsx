@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
 import { Renderer } from "./renderer/Renderer";
 import {
@@ -1587,6 +1588,10 @@ export function App({ onGoHome }: AppProps) {
   const [confirmingExternalImport, setConfirmingExternalImport] =
     useState(false);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const [importMenuPos, setImportMenuPos] = useState<{
+    top: number;
+    right: number;
+  } | null>(null);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
   const projectAddPopoverRef = useRef<HTMLDivElement | null>(null);
   const worktreeCreatePopoverRef = useRef<HTMLDivElement | null>(null);
@@ -2720,8 +2725,12 @@ export function App({ onGoHome }: AppProps) {
   useEffect(() => {
     if (!importMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
-      if (!importMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      const inTrigger = importMenuRef.current?.contains(target);
+      const inMenu = (target as Element).closest?.("[data-import-menu]");
+      if (!inTrigger && !inMenu) {
         setImportMenuOpen(false);
+        setImportMenuPos(null);
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -13732,7 +13741,19 @@ export function App({ onGoHome }: AppProps) {
     <div ref={importMenuRef} style={{ position: "relative" }}>
       <button
         type="button"
-        onClick={() => setImportMenuOpen((open) => !open)}
+        onClick={() => {
+          setImportMenuOpen((open) => {
+            const next = !open;
+            if (next && importMenuRef.current) {
+              const rect = importMenuRef.current.getBoundingClientRect();
+              setImportMenuPos({
+                top: rect.bottom + 6,
+                right: window.innerWidth - rect.right,
+              });
+            }
+            return next;
+          });
+        }}
         aria-label={t("externalImport.open")}
         style={{
           border: "none",
@@ -13764,63 +13785,68 @@ export function App({ onGoHome }: AppProps) {
           <ImportIcon />
         )}
       </button>
-      {importMenuOpen ? (
-        <div
-          style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            right: 0,
-            width: "260px",
-            padding: "10px",
-            borderRadius: "12px",
-            border: "1px solid var(--border-color)",
-            background: "var(--menu-bg)",
-            boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
-            zIndex: 40,
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-          }}
-        >
-          <div
-            style={{
-              fontSize: "12px",
-              fontWeight: 700,
-              color: "var(--text-primary)",
-            }}
-          >
-            {t("externalImport.chooseAgent")}
-          </div>
-          <AgentMenuList
-            agents={availableAgents}
-            selectedAgent={externalImportAgent}
-            maxHeight="180px"
-            onSelect={(agentName) => {
-              setImportMenuOpen(false);
-              setExternalImportAgent(agentName);
-              setExternalSelectedKey("");
-              void enterImportMode(agentName);
-            }}
-          />
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              fontSize: "12px",
-              color: "var(--text-primary)",
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={externalFilterBound}
-              onChange={(e) => setExternalFilterBound(e.target.checked)}
-            />
-            <span>{t("externalImport.hideImported")}</span>
-          </label>
-        </div>
-      ) : null}
+      {importMenuOpen && importMenuPos
+        ? createPortal(
+            <div
+              data-import-menu=""
+              style={{
+                position: "fixed",
+                top: importMenuPos.top,
+                right: importMenuPos.right,
+                width: "260px",
+                padding: "10px",
+                borderRadius: "12px",
+                border: "1px solid var(--border-color)",
+                background: "var(--menu-bg)",
+                boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
+                zIndex: 5000,
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 700,
+                  color: "var(--text-primary)",
+                }}
+              >
+                {t("externalImport.chooseAgent")}
+              </div>
+              <AgentMenuList
+                agents={availableAgents}
+                selectedAgent={externalImportAgent}
+                maxHeight="180px"
+                onSelect={(agentName) => {
+                  setImportMenuOpen(false);
+                  setImportMenuPos(null);
+                  setExternalImportAgent(agentName);
+                  setExternalSelectedKey("");
+                  void enterImportMode(agentName);
+                }}
+              />
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  fontSize: "12px",
+                  color: "var(--text-primary)",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={externalFilterBound}
+                  onChange={(e) => setExternalFilterBound(e.target.checked)}
+                />
+                <span>{t("externalImport.hideImported")}</span>
+              </label>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
   const sessionSidebar =
