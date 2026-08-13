@@ -1703,6 +1703,7 @@ export function ActionBar({
                     warnUnavailable={isSelectedAgentUnavailable}
                     defaultExpandOptions
                     viewportMenu
+                    viewportAlign="right"
                     onboardingId="agent-selector"
                     />
                   </div>

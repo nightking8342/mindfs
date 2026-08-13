@@ -30,6 +30,8 @@ type AgentSelectorProps = {
   defaultExpandOptions?: boolean;
   onboardingId?: string;
   viewportMenu?: boolean;
+  /** viewportMenu 模式下的水平锚点：left 菜单左缘对齐按钮左缘，right 菜单右缘对齐按钮右缘 */
+  viewportAlign?: "left" | "right";
   allowDefaultModel?: boolean;
 };
 
@@ -157,6 +159,7 @@ export function AgentSelector({
   defaultExpandOptions = false,
   onboardingId,
   viewportMenu = false,
+  viewportAlign = "left",
   allowDefaultModel = false,
 }: AgentSelectorProps) {
   const { t } = useI18n();
@@ -302,7 +305,9 @@ export function AgentSelector({
       const viewportHeight = viewport?.height ?? window.innerHeight;
       const margin = 8;
       const maxLeft = viewportLeft + viewportWidth - menu.width - margin;
-      const left = Math.max(viewportLeft + margin, Math.min(anchor.left, maxLeft));
+      const desiredLeft =
+        viewportAlign === "right" ? anchor.right - menu.width : anchor.left;
+      const left = Math.max(viewportLeft + margin, Math.min(desiredLeft, maxLeft));
       const below = anchor.bottom + 8;
       const above = anchor.top - menu.height - 8;
       const top = menuPlacement === "bottom" && below + menu.height <= viewportTop + viewportHeight - margin
@@ -340,6 +345,7 @@ export function AgentSelector({
     menuHorizontalOffset,
     menuPlacement,
     submenuAgent,
+    viewportAlign,
     viewportMenu,
   ]);
 
