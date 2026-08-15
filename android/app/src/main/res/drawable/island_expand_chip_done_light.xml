@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏浅色卡片：状态标签（已完成） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="99dp" />
+    <solid android:color="#1A0F9F7C" />
+</shape>

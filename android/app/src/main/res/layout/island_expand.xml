@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  小米超级岛「展开态」自定义视图（fork 自研）。
+
+  经 miui.focus.rv.island.expand 注入，替换点击岛之后悬浮的卡片；
+  大岛 / 小岛仍由 miui.focus.param 的模板驱动（故意不设 miui.focus.rv，
+  否则 SystemUI 的 resolveFocusParam 会改读 miui.focus.param.custom，
+  整份 param_island 模板作废）。
+
+  只能使用 RemoteViews 白名单内的 View：LinearLayout / FrameLayout /
+  RelativeLayout / ImageView / TextView / Chronometer / ProgressBar 等，
+  ConstraintLayout、Space、自定义 View 一律会在远端 inflate 失败。
+  根容器不设背景：卡片底由 SystemUI 绘制，自带背景会叠成嵌套卡片。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingRight="16dp"
+    android:paddingTop="14dp"
+    android:paddingBottom="13dp">
+
+    <!-- 头部：图标 + 会话标题 / 项目名 + 状态标签 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <ImageView
+            android:id="@+id/island_icon"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="@null" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="8dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/island_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="#FFFFFFFF" />
+
+            <TextView
+                android:id="@+id/island_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textSize="10sp"
+                android:textColor="#FF93989E" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/island_chip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/island_expand_chip_replying"
+            android:paddingLeft="9dp"
+            android:paddingRight="9dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:textColor="#FFD7DADE" />
+    </LinearLayout>
+
+    <!--
+      摘要区：agent 当前动作 / 回复摘要。
+
+      纯 wrap_content，不设 layout_weight / minHeight：让摘要完全贴合文本高度。
+      展开态在突破 promoted 后随内容自适应高度，weight 反而会在宿主拉伸容器时
+      把摘要撑高、产生框内底部空白；去掉后摘要自然贴合，空白消失。
+    -->
+    <TextView
+        android:id="@+id/island_summary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/island_expand_summary_bg"
+        android:paddingLeft="11dp"
+        android:paddingRight="11dp"
+        android:paddingTop="9dp"
+        android:paddingBottom="9dp"
+        android:gravity="top"
+        android:ellipsize="end"
+        android:lineSpacingExtra="2dp"
+        android:textSize="11sp"
+        android:textColor="#FFB6BCC2" />
+
+    <!-- 底部：耗时 + 打开会话 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <!-- 回复中：系统自走秒表，无需轮询驱动 -->
+            <Chronometer
+                android:id="@+id/island_timer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFeatureSettings="tnum"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="#FFFFFFFF" />
+
+            <!-- 完成：定格耗时 -->
+            <TextView
+                android:id="@+id/island_elapsed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:visibility="gone"
+                android:fontFeatureSettings="tnum"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="#FF34C759" />
+
+            <TextView
+                android:id="@+id/island_timer_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="5dp"
+                android:maxLines="1"
+                android:textSize="9sp"
+                android:textColor="#FF8A9096" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/island_open"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/island_expand_btn"
+            android:minWidth="74dp"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp"
+            android:paddingTop="7dp"
+            android:paddingBottom="7dp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textColor="#FF04140F" />
+    </LinearLayout>
+</LinearLayout>

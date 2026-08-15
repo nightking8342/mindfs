@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 展开态摘要区底色：半透明白，深色岛背景上呈现为略亮的凹槽 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="12dp" />
+    <solid android:color="#0CFFFFFF" />
+</shape>

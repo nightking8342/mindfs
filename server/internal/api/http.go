@@ -556,6 +556,7 @@ func (h *HTTPHandler) handleReplyingSessions(w http.ResponseWriter, r *http.Requ
 			"rootTitle":    rootTitle,
 			"sessionKey":   item.SessionKey,
 			"sessionTitle": sessionTitle,
+			"agent":        item.Agent,
 			"status":       item.Status,
 			"summary":      item.Summary,
 			"updatedAt":    item.UpdatedAt,

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  紧凑胶囊视图（miui.focus.rv.tiny）。
+
+  自定义模式下 createCustomView 会取 miui.focus.rv.tiny，缺省则回落到 miui.focus.rv
+  ——而后者是整张卡片，塞进胶囊会被压变形。提供这份紧凑布局作为兜底：
+  OS2 的状态栏 tiny 视图用它，OS3 若不是由 param_island 驱动大岛也用它。
+
+  同样只能用 RemoteViews 白名单内的 View。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingLeft="4dp"
+    android:paddingRight="10dp">
+
+    <ImageView
+        android:id="@+id/tiny_icon"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:scaleType="fitCenter"
+        android:contentDescription="@null" />
+
+    <TextView
+        android:id="@+id/tiny_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="7dp"
+        android:maxWidth="120dp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:textColor="#FFFFFFFF" />
+
+    <TextView
+        android:id="@+id/tiny_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="8dp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="12sp"
+        android:textColor="#FFB6BCC2" />
+</LinearLayout>

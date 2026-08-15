@@ -77,6 +77,7 @@ type ReplyingSessionState struct {
 	RootID       string    `json:"rootId"`
 	SessionKey   string    `json:"sessionKey"`
 	SessionTitle string    `json:"sessionTitle"`
+	Agent        string    `json:"agent,omitempty"`
 	Status       string    `json:"status"`
 	Summary      string    `json:"summary"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -705,12 +706,32 @@ func (h *StreamHub) ListReplyingSessions() []ReplyingSessionState {
 			RootID:       state.RootID,
 			SessionKey:   sessionKey,
 			SessionTitle: state.SessionTitle,
+			Agent:        agentOf(state),
 			Status:       "replying",
 			Summary:      state.Summary,
 			UpdatedAt:    state.UpdatedAt,
 		})
 	}
 	return items
+}
+
+// agentOf 取该 pending session 当前动作所属的 agent 名：优先取最新一条用户消息
+// 显式携带的 agent，空则回退到排队中的第一条，便于回复轮询接口按 agent 区分动画。
+func agentOf(state *SessionPendingState) string {
+	if state == nil {
+		return ""
+	}
+	if state.User != nil {
+		if a := strings.TrimSpace(state.User.Agent); a != "" {
+			return a
+		}
+	}
+	for _, queued := range state.Queue {
+		if a := strings.TrimSpace(queued.Agent); a != "" {
+			return a
+		}
+	}
+	return ""
 }
 
 func (h *StreamHub) ReplayPending(rootID, clientID, sessionKey string) {

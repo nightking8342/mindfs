@@ -13,6 +13,7 @@ import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -229,6 +230,7 @@ public class ReplyPollerService extends Service {
         Log.i(TAG, "resume polling apiBaseUrl=" + apiBaseUrl);
         running = true;
         startForegroundCompat(FOREGROUND_ID, buildReplyPlaceholderNotification());
+        executor.execute(() -> FocusIslandSupport.refresh(this));
         scheduleNextPoll(0);
     }
 
@@ -353,6 +355,7 @@ public class ReplyPollerService extends Service {
             state.rootId = safe(item.optString("rootId", ""));
             state.rootTitle = safe(item.optString("rootTitle", ""));
             state.sessionTitle = safe(item.optString("sessionTitle", ""));
+            state.agent = safe(item.optString("agent", ""));
             state.summary = safe(item.optString("summary", ""));
             state.updatedAt = safe(item.optString("updatedAt", ""));
             state.status = ReplyStatus.REPLYING;
@@ -458,6 +461,7 @@ public class ReplyPollerService extends Service {
             ReplyState state = states.get(incoming.sessionKey);
             if (state == null) {
                 state = incoming;
+                state.startedAtElapsed = SystemClock.elapsedRealtime();
                 states.put(state.sessionKey, state);
             } else {
                 boolean wasCompleted = state.status == ReplyStatus.COMPLETED;
@@ -469,6 +473,11 @@ public class ReplyPollerService extends Service {
                 }
                 state.updatedAt = incoming.updatedAt;
                 state.status = ReplyStatus.REPLYING;
+                if (wasCompleted || state.startedAtElapsed <= 0L) {
+                    // 完成后同一会话又开始回复：秒表重新计时
+                    state.startedAtElapsed = SystemClock.elapsedRealtime();
+                    state.finishedAtElapsed = 0L;
+                }
             }
             removeCompletedKey(state.sessionKey);
         }
@@ -476,6 +485,7 @@ public class ReplyPollerService extends Service {
         for (ReplyState state : states.values()) {
             if (state.status == ReplyStatus.REPLYING && !currentKeys.contains(state.sessionKey)) {
                 state.status = ReplyStatus.COMPLETED;
+                state.finishedAtElapsed = SystemClock.elapsedRealtime();
                 addCompletedKey(state.sessionKey);
                 vibrateReplyCompletion();
             }
@@ -586,8 +596,10 @@ public class ReplyPollerService extends Service {
             ":" + state.rootId +
             ":" + state.rootTitle +
             ":" + state.sessionTitle +
+            ":" + state.agent +
             ":" + state.summary +
-            ":" + state.status.name();
+            ":" + state.status.name() +
+            ":island=" + (FocusIslandSupport.isEnabled() ? "1" : "0");
     }
 
     private List<ReplyState> visibleStates() {
@@ -748,7 +760,14 @@ public class ReplyPollerService extends Service {
         if (!TextUtils.isEmpty(text)) {
             builder.setTicker(text);
         }
-        return builder.build();
+        Notification notification = builder.build();
+        FocusIslandSupport.attach(this, notification, replying,
+            state.sessionTitle,
+            state.rootTitle.isEmpty() ? state.rootId : state.rootTitle,
+            title, text,
+            state.startedAtElapsed, state.elapsedText(), contentIntent,
+            state.agent);
+        return notification;
     }
 
     private Notification buildReplyChildNotification(ReplyState state) {
@@ -793,7 +812,14 @@ public class ReplyPollerService extends Service {
         if (!TextUtils.isEmpty(text)) {
             builder.setTicker(text);
         }
-        return builder.build();
+        Notification notification = builder.build();
+        FocusIslandSupport.attach(this, notification, replying,
+            state.sessionTitle,
+            state.rootTitle.isEmpty() ? state.rootId : state.rootTitle,
+            title, text,
+            state.startedAtElapsed, state.elapsedText(), contentIntent,
+            state.agent);
+        return notification;
     }
 
     private String buildReplyTitle(ReplyState state, String status) {
@@ -983,13 +1009,30 @@ public class ReplyPollerService extends Service {
         String rootId = "";
         String rootTitle = "";
         String sessionTitle = "";
+        String agent = "";
         String summary = "";
         String updatedAt = "";
         ReplyStatus status = ReplyStatus.REPLYING;
+        /** 超级岛展开态秒表基准，SystemClock.elapsedRealtime 时基；0 表示未知。 */
+        long startedAtElapsed = 0L;
+        long finishedAtElapsed = 0L;
 
         ReplyState(String sessionKey) {
             this.sessionKey = sessionKey;
             this.notificationId = notificationIdFor(sessionKey);
+        }
+
+        /** 完成态定格耗时；起止时间缺失（如服务重启）时返回 null，展开态相应隐藏计时。 */
+        String elapsedText() {
+            if (startedAtElapsed <= 0L || finishedAtElapsed <= startedAtElapsed) {
+                return null;
+            }
+            long seconds = (finishedAtElapsed - startedAtElapsed) / 1000L;
+            if (seconds >= 3600L) {
+                return String.format(Locale.US, "%d:%02d:%02d",
+                    seconds / 3600L, (seconds % 3600L) / 60L, seconds % 60L);
+            }
+            return String.format(Locale.US, "%02d:%02d", seconds / 60L, seconds % 60L);
         }
     }
 }
