@@ -115,6 +115,35 @@ final class FocusIslandSupport {
                        String sessionTitle, String projectTitle, String chatTitle, String chatContent,
                        long chronometerBase, String elapsedText, PendingIntent openIntent,
                        String agentName) {
+        attach(context, notification, replying, false,
+            sessionTitle, projectTitle, chatTitle, chatContent,
+            chronometerBase, elapsedText, openIntent, agentName);
+    }
+
+    /**
+     * 附加岛参数。agentName 为当前回复驱动的 agent（如 "claude" / "codex"），
+     * 岛图标按 agent 名取对应图标（{@link #agentIcon}），未知 agent 回退应用图标。
+     * askUserWaiting 为 true 表示该会话正停在 agent 提问等待用户回答，岛状态文案
+     * 显示「需要你输入」而不是「回复中…」。
+     */
+    static void attach(Context context, Notification notification, boolean replying, boolean askUserWaiting,
+                       String sessionTitle, String projectTitle, String chatTitle, String chatContent,
+                       long chronometerBase, String elapsedText, PendingIntent openIntent,
+                       String agentName) {
+        attach(context, notification, replying, askUserWaiting, "",
+            sessionTitle, projectTitle, chatTitle, chatContent,
+            chronometerBase, elapsedText, openIntent, agentName);
+    }
+
+    /**
+     * 附加岛参数。askUserQuestion 为等待输入时后端透出的问题+选项文本，展开态的
+     * 摘要区会优先显示它而不是笼统的「等待你的回答…」。
+     */
+    static void attach(Context context, Notification notification, boolean replying, boolean askUserWaiting,
+                       String askUserQuestion,
+                       String sessionTitle, String projectTitle, String chatTitle, String chatContent,
+                       long chronometerBase, String elapsedText, PendingIntent openIntent,
+                       String agentName) {
         if (!isEnabled() || notification == null) {
             return;
         }
@@ -132,7 +161,7 @@ final class FocusIslandSupport {
             // 无则走模板（读 param）。唯一渲染展开态自定义视图的 createCustomView 只在前一条
             // 分支里被调用，所以 miui.focus.rv 必须存在，且参数键要换成 param.custom。
             notification.extras.putString("miui.focus.param.custom",
-                buildParams(replying, sessionTitle, projectTitle, chatTitle, chatContent, agentName));
+                buildParams(replying, askUserWaiting, sessionTitle, projectTitle, chatTitle, chatContent, agentName));
             // 光色。自定义模式的 fillCustomViewNotifiParams 只搬 outEffectSrc，不读
             // outEffectColor；而 FocusNotificationController 转交岛数据时会直接从通知
             // extras 取 miui.effect.color，所以写在这里才生效。
@@ -148,14 +177,14 @@ final class FocusIslandSupport {
             // 通知栏焦点卡片（明/暗）。createCustomView 在 miui.focus.rv 为 null 时会提前
             // return，连带跳过 tiny / deco，所以这张即使用不上也必须给。
             notification.extras.putParcelable("miui.focus.rv",
-                buildCard(context, replying, sessionTitle, projectTitle, chatContent,
+                buildCard(context, replying, askUserWaiting, askUserQuestion, sessionTitle, projectTitle, chatContent,
                     chronometerBase, elapsedText, openIntent, false, agentName));
             notification.extras.putParcelable("miui.focus.rvNight",
-                buildCard(context, replying, sessionTitle, projectTitle, chatContent,
+                buildCard(context, replying, askUserWaiting, askUserQuestion, sessionTitle, projectTitle, chatContent,
                     chronometerBase, elapsedText, openIntent, true, agentName));
             // 岛展开态：点击岛后悬浮的卡片，恒为深色背景
             notification.extras.putParcelable("miui.focus.rv.island.expand",
-                buildCard(context, replying, sessionTitle, projectTitle, chatContent,
+                buildCard(context, replying, askUserWaiting, askUserQuestion, sessionTitle, projectTitle, chatContent,
                     chronometerBase, elapsedText, openIntent, true, agentName));
         } catch (Exception ex) {
             Log.w(TAG, "attach island params failed", ex);
@@ -166,10 +195,10 @@ final class FocusIslandSupport {
      * 焦点卡片 / 岛展开态共用布局：头部（图标 + 会话名 / 项目名 + 状态标签）、摘要区、
      * 底部（耗时 + 打开会话）。dark=true 用于岛展开态与通知栏深色模式。
      */
-    private static RemoteViews buildCard(Context context, boolean replying, String sessionTitle,
-                                         String projectTitle, String summary, long chronometerBase,
-                                         String elapsedText, PendingIntent openIntent, boolean dark,
-                                         String agentName) {
+    private static RemoteViews buildCard(Context context, boolean replying, boolean askUserWaiting,
+                                         String askUserQuestion, String sessionTitle, String projectTitle,
+                                         String summary, long chronometerBase, String elapsedText,
+                                         PendingIntent openIntent, boolean dark, String agentName) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.island_expand);
         views.setImageViewIcon(R.id.island_icon, agentIcon(context, agentName));
 
@@ -179,7 +208,7 @@ final class FocusIslandSupport {
         views.setTextViewText(R.id.island_subtitle, projectTitle == null ? "" : projectTitle);
         views.setTextColor(R.id.island_subtitle, dark ? 0xFF93989E : 0xFF6B7075);
 
-        views.setTextViewText(R.id.island_chip, replying ? "回复中" : "已完成");
+        views.setTextViewText(R.id.island_chip, chipText(replying, askUserWaiting));
         if (replying) {
             views.setInt(R.id.island_chip, "setBackgroundResource",
                 dark ? R.drawable.island_expand_chip_replying
@@ -192,8 +221,18 @@ final class FocusIslandSupport {
             views.setTextColor(R.id.island_chip, dark ? 0xFF34C759 : 0xFF0F9F7C);
         }
 
-        views.setTextViewText(R.id.island_summary,
-            summary == null || summary.isEmpty() ? (replying ? "正在生成回复…" : "回复已完成") : summary);
+        String summaryText = summary;
+        if (replying && askUserWaiting) {
+            // 等待输入：优先显示后端透出的问题+选项，没有才用占位
+            if (askUserQuestion != null && !askUserQuestion.isEmpty()) {
+                summaryText = askUserQuestion;
+            } else if (summary == null || summary.isEmpty()) {
+                summaryText = summaryPlaceholder(replying, true);
+            }
+        } else if (summary == null || summary.isEmpty()) {
+            summaryText = summaryPlaceholder(replying, false);
+        }
+        views.setTextViewText(R.id.island_summary, summaryText);
         views.setInt(R.id.island_summary, "setBackgroundResource",
             dark ? R.drawable.island_expand_summary_bg : R.drawable.island_expand_summary_bg_light);
         views.setTextColor(R.id.island_summary, dark ? 0xFFB6BCC2 : 0xFF4A4F55);
@@ -222,9 +261,26 @@ final class FocusIslandSupport {
         return views;
     }
 
-    private static String buildParams(boolean replying, String sessionTitle, String projectTitle,
+    /** 焦点卡片状态文案：等待用户输入时显示「需要你输入」。 */
+    private static String chipText(boolean replying, boolean askUserWaiting) {
+        if (replying && askUserWaiting) {
+            return "需要你输入";
+        }
+        return replying ? "回复中" : "已完成";
+    }
+
+    /** 摘要占位文案：等待用户输入时提示用户作答，否则沿用回复中/完成占位。 */
+    private static String summaryPlaceholder(boolean replying, boolean askUserWaiting) {
+        if (replying && askUserWaiting) {
+            return "等待你的回答…";
+        }
+        return replying ? "正在生成回复…" : "回复已完成";
+    }
+
+    private static String buildParams(boolean replying, boolean askUserWaiting,
+                                      String sessionTitle, String projectTitle,
                                       String chatTitle, String chatContent, String agentName) throws Exception {
-        String statusText = replying ? "回复中…" : "已完成";
+        String statusText = replying ? (askUserWaiting ? "需要你输入" : "回复中…") : "已完成";
         // 胶囊横向空间有限，只放项目名一行；会话标题交给展开态
         String islandPrimary = projectTitle != null && !projectTitle.isEmpty()
             ? projectTitle
@@ -239,7 +295,7 @@ final class FocusIslandSupport {
                 .put("textInfo", aTextInfo))
             .put("textInfo", new JSONObject()
                 .put("title", statusText)
-                .put("showHighlightColor", !replying));
+                .put("showHighlightColor", !replying || askUserWaiting));
         JSONObject smallIslandArea = new JSONObject()
             .put("picInfo", agentRef);
 
@@ -264,9 +320,9 @@ final class FocusIslandSupport {
             .put("updatable", true)
             .put("reopen", "reopen")
             .put("timeout", 720)
-            // 回复中每 5s 轮询更新一次，自动展开会变成骚扰；只有完成的那次更新展开提示
-            .put("islandFirstFloat", !replying)
-            .put("enableFloat", !replying)
+            // 回复中每 5s 轮询更新一次，自动展开会变成骚扰；完成与等待输入的那次更新要展开提示
+            .put("islandFirstFloat", !replying || askUserWaiting)
+            .put("enableFloat", !replying || askUserWaiting)
             // 展开态外圈光效开关，会被搬到 extras 的 miui.effect.src；只判非空。
             // 注意自定义模式不读 outEffectColor，光色须由 attach 直接写 miui.effect.color。
             .put("outEffectSrc", EFFECT_SRC)

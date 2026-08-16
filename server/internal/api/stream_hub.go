@@ -81,6 +81,12 @@ type ReplyingSessionState struct {
 	Status       string    `json:"status"`
 	Summary      string    `json:"summary"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+	// AskUserWaiting 为 true 表示该会话正停在 agent 提问（ask_user）等待用户回答，
+	// 客户端据此把通知/角标切成「需要你输入」而不是笼统的「回复中」。
+	AskUserWaiting bool `json:"askUserWaiting"`
+	// AskUserQuestion 是等待输入时的问题与选项文本（已格式化），供客户端在
+	// 通知/超级岛展开态直接展示；非等待输入时为空。
+	AskUserQuestion string `json:"askUserQuestion,omitempty"`
 }
 
 type PendingSessionSnapshot struct {
@@ -702,14 +708,17 @@ func (h *StreamHub) ListReplyingSessions() []ReplyingSessionState {
 		if state == nil || !state.Active || blank(sessionKey) || blank(state.RootID) {
 			continue
 		}
+		waiting := askUserWaiting(state)
 		items = append(items, ReplyingSessionState{
-			RootID:       state.RootID,
-			SessionKey:   sessionKey,
-			SessionTitle: state.SessionTitle,
-			Agent:        agentOf(state),
-			Status:       "replying",
-			Summary:      state.Summary,
-			UpdatedAt:    state.UpdatedAt,
+			RootID:          state.RootID,
+			SessionKey:      sessionKey,
+			SessionTitle:    state.SessionTitle,
+			Agent:           agentOf(state),
+			Status:          "replying",
+			Summary:         state.Summary,
+			UpdatedAt:       state.UpdatedAt,
+			AskUserWaiting:  waiting,
+			AskUserQuestion: askUserQuestionText(state),
 		})
 	}
 	return items
@@ -730,6 +739,130 @@ func agentOf(state *SessionPendingState) string {
 		if a := strings.TrimSpace(queued.Agent); a != "" {
 			return a
 		}
+	}
+	return ""
+}
+
+// askUserWaiting 报告该 pending session 是否正停在 agent 提问（ask_user）等待用户回答。
+// 取事件流中最后一次出现的 ask_user 工具调用：若仍是 running/pending 说明提问还在等
+// 回答；若已 complete/failed 或之后有别的活动，说明已离开提问态。空事件流不算等待。
+func askUserWaiting(state *SessionPendingState) bool {
+	if state == nil || len(state.ReplyingList) == 0 {
+		return false
+	}
+	for i := len(state.ReplyingList) - 1; i >= 0; i-- {
+		ev := state.ReplyingList[i]
+		if ev.Type != string(agenttypes.EventTypeToolCall) && ev.Type != string(agenttypes.EventTypeToolUpdate) {
+			continue
+		}
+		tc, ok := ev.Data.(agenttypes.ToolCall)
+		if !ok || tc.Kind != agenttypes.ToolKindAskUser {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(tc.Status))
+		return status == "" || status == "running" || status == "pending" || status == "in_progress"
+	}
+	return false
+}
+
+// askUserQuestionText 提取等待输入状态下的提问问题与选项，格式化为多行文本：
+//
+//	第一行：问题（优先每个 item 的 Question，空则回退 Header）
+//	后续行：该问题的选项（每项一行，带「• 」前缀）
+//
+// 只取最后一个 ask_user 事件的问题；无问题/非等待输入时返回空字符串。
+func askUserQuestionText(state *SessionPendingState) string {
+	if state == nil || len(state.ReplyingList) == 0 {
+		return ""
+	}
+	for i := len(state.ReplyingList) - 1; i >= 0; i-- {
+		ev := state.ReplyingList[i]
+		if ev.Type != string(agenttypes.EventTypeToolCall) && ev.Type != string(agenttypes.EventTypeToolUpdate) {
+			continue
+		}
+		tc, ok := ev.Data.(agenttypes.ToolCall)
+		if !ok || tc.Kind != agenttypes.ToolKindAskUser {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(tc.Status))
+		waiting := status == "" || status == "running" || status == "pending" || status == "in_progress"
+		if !waiting {
+			return ""
+		}
+		questions, ok := tc.Meta["questions"].([]agenttypes.AskUserQuestionItem)
+		if !ok {
+			// 事件从外部（WS 重放 / 历史恢复）进来时 Meta 可能已 JSON 化，
+			// questions 退化成 []any / []map[string]any，做一次宽松解析兜底。
+			return askUserQuestionTextFromAny(tc.Meta["questions"])
+		}
+		var b strings.Builder
+		for _, q := range questions {
+			text := strings.TrimSpace(q.Question)
+			if text == "" {
+				text = strings.TrimSpace(q.Header)
+			}
+			if text != "" {
+				b.WriteString(text)
+				b.WriteString("\n")
+			}
+			for _, opt := range q.Options {
+				label := strings.TrimSpace(opt.Label)
+				if label == "" {
+					continue
+				}
+				b.WriteString("• ")
+				b.WriteString(label)
+				b.WriteString("\n")
+			}
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	return ""
+}
+
+// askUserQuestionTextFromAny 从 JSON 化的 questions（[]any / []map[string]any）
+// 提取问题与选项文本。字段名兼容 AskUserQuestionItem 的 JSON 标签。
+func askUserQuestionTextFromAny(v any) string {
+	arr, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(stringValueOf(m["question"]))
+		if text == "" {
+			text = strings.TrimSpace(stringValueOf(m["header"]))
+		}
+		if text != "" {
+			b.WriteString(text)
+			b.WriteString("\n")
+		}
+		if opts, ok := m["options"].([]any); ok {
+			for _, optItem := range opts {
+				optMap, ok := optItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				label := strings.TrimSpace(stringValueOf(optMap["label"]))
+				if label == "" {
+					continue
+				}
+				b.WriteString("• ")
+				b.WriteString(label)
+				b.WriteString("\n")
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func stringValueOf(v any) string {
+	if s, ok := v.(string); ok {
+		return s
 	}
 	return ""
 }

@@ -358,6 +358,8 @@ public class ReplyPollerService extends Service {
             state.agent = safe(item.optString("agent", ""));
             state.summary = safe(item.optString("summary", ""));
             state.updatedAt = safe(item.optString("updatedAt", ""));
+            state.askUserWaiting = item.optBoolean("askUserWaiting", false);
+            state.askUserQuestion = safe(item.optString("askUserQuestion", ""));
             state.status = ReplyStatus.REPLYING;
             Log.i(TAG, "fetched session=" + sessionKey + " summaryLength=" + state.summary.length());
             next.put(sessionKey, state);
@@ -468,6 +470,8 @@ public class ReplyPollerService extends Service {
                 state.rootId = incoming.rootId;
                 state.rootTitle = incoming.rootTitle;
                 state.sessionTitle = incoming.sessionTitle;
+                state.askUserWaiting = incoming.askUserWaiting;
+                state.askUserQuestion = incoming.askUserQuestion;
                 if (wasCompleted || !incoming.summary.isEmpty()) {
                     state.summary = incoming.summary;
                 }
@@ -599,6 +603,8 @@ public class ReplyPollerService extends Service {
             ":" + state.agent +
             ":" + state.summary +
             ":" + state.status.name() +
+            ":ask=" + (state.askUserWaiting ? "1" : "0") +
+            ":q=" + state.askUserQuestion +
             ":island=" + (FocusIslandSupport.isEnabled() ? "1" : "0");
     }
 
@@ -630,6 +636,15 @@ public class ReplyPollerService extends Service {
         return false;
     }
 
+    private boolean hasAskUserWaitingState(List<ReplyState> states) {
+        for (ReplyState state : states) {
+            if (state.status == ReplyStatus.REPLYING && state.askUserWaiting) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private Notification buildReplyGroupSummaryNotification(List<ReplyState> states) {
         ReplyState target = states.get(0);
         Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
@@ -648,11 +663,12 @@ public class ReplyPollerService extends Service {
         );
 
         boolean hasReplying = hasReplyingState(states);
-        String status = hasReplying ? "回复中" : "回复完成";
+        boolean hasWaiting = hasAskUserWaitingState(states);
+        String status = hasWaiting ? "需要你输入" : (hasReplying ? "回复中" : "回复完成");
         String title = "MindFS";
         String text = buildAggregateLine(target);
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-            ? new Notification.Builder(this, hasReplying ? VISIBLE_PROGRESS_CHANNEL_ID : ALERT_CHANNEL_ID)
+            ? new Notification.Builder(this, (hasReplying && !hasWaiting) ? VISIBLE_PROGRESS_CHANNEL_ID : ALERT_CHANNEL_ID)
             : new Notification.Builder(this);
         builder
             .setSmallIcon(R.drawable.ic_stat_mindfs_notification)
@@ -695,7 +711,10 @@ public class ReplyPollerService extends Service {
     }
 
     private String buildAggregateLine(ReplyState state) {
-        String title = buildReplyTitle(state, state.status == ReplyStatus.COMPLETED ? "完成" : "回复中");
+        String statusText = state.status == ReplyStatus.COMPLETED
+            ? "完成"
+            : replyStatusText(state, "回复中");
+        String title = buildReplyTitle(state, statusText);
         if (state.summary.isEmpty()) {
             return title;
         }
@@ -723,6 +742,9 @@ public class ReplyPollerService extends Service {
 
     private Notification buildReplyNotification(ReplyState state) {
         boolean replying = state.status == ReplyStatus.REPLYING;
+        // 等待用户输入视为「需要响铃激活」而不是普通回复中的静默进度
+        boolean waiting = replying && state.askUserWaiting;
+        boolean alertChannel = !replying || waiting;
         Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
         if (launchIntent == null) {
             launchIntent = new Intent(this, MainActivity.class);
@@ -738,10 +760,10 @@ public class ReplyPollerService extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        String title = buildReplyTitle(state, replying ? "回复中" : "完成");
+        String title = buildReplyTitle(state, replyStatusText(state, replying ? "回复中" : "完成"));
         String text = state.summary;
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-            ? new Notification.Builder(this, replying ? VISIBLE_PROGRESS_CHANNEL_ID : ALERT_CHANNEL_ID)
+            ? new Notification.Builder(this, alertChannel ? ALERT_CHANNEL_ID : VISIBLE_PROGRESS_CHANNEL_ID)
             : new Notification.Builder(this);
         builder
             .setSmallIcon(R.drawable.ic_stat_mindfs_notification)
@@ -749,19 +771,20 @@ public class ReplyPollerService extends Service {
             .setContentText(text)
             .setContentIntent(contentIntent)
             .setOngoing(replying)
-            .setOnlyAlertOnce(replying)
+            .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(replying ? Notification.CATEGORY_SERVICE : Notification.CATEGORY_STATUS)
             .setStyle(new Notification.BigTextStyle().bigText(text));
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !replying) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && alertChannel) {
             builder.setSound(replyAlertSoundUri());
         }
         if (!TextUtils.isEmpty(text)) {
             builder.setTicker(text);
         }
         Notification notification = builder.build();
-        FocusIslandSupport.attach(this, notification, replying,
+        FocusIslandSupport.attach(this, notification, replying, state.askUserWaiting,
+            state.askUserQuestion,
             state.sessionTitle,
             state.rootTitle.isEmpty() ? state.rootId : state.rootTitle,
             title, text,
@@ -772,6 +795,9 @@ public class ReplyPollerService extends Service {
 
     private Notification buildReplyChildNotification(ReplyState state) {
         boolean replying = state.status == ReplyStatus.REPLYING;
+        // 等待用户输入视为「需要响铃激活」而不是普通回复中的静默进度
+        boolean waiting = replying && state.askUserWaiting;
+        boolean alertChannel = !replying || waiting;
         Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
         if (launchIntent == null) {
             launchIntent = new Intent(this, MainActivity.class);
@@ -787,10 +813,10 @@ public class ReplyPollerService extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        String title = buildReplyTitle(state, replying ? "回复中" : "完成");
+        String title = buildReplyTitle(state, replyStatusText(state, replying ? "回复中" : "完成"));
         String text = state.summary;
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-            ? new Notification.Builder(this, replying ? VISIBLE_PROGRESS_CHANNEL_ID : ALERT_CHANNEL_ID)
+            ? new Notification.Builder(this, alertChannel ? ALERT_CHANNEL_ID : VISIBLE_PROGRESS_CHANNEL_ID)
             : new Notification.Builder(this);
         builder
             .setSmallIcon(R.drawable.ic_stat_mindfs_notification)
@@ -798,7 +824,7 @@ public class ReplyPollerService extends Service {
             .setContentText(text)
             .setContentIntent(contentIntent)
             .setOngoing(replying)
-            .setOnlyAlertOnce(replying)
+            .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(replying ? Notification.CATEGORY_SERVICE : Notification.CATEGORY_STATUS)
@@ -806,14 +832,15 @@ public class ReplyPollerService extends Service {
             .setGroupSummary(false)
             .setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
             .setStyle(new Notification.BigTextStyle().bigText(text));
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !replying) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && alertChannel) {
             builder.setSound(replyAlertSoundUri());
         }
         if (!TextUtils.isEmpty(text)) {
             builder.setTicker(text);
         }
         Notification notification = builder.build();
-        FocusIslandSupport.attach(this, notification, replying,
+        FocusIslandSupport.attach(this, notification, replying, state.askUserWaiting,
+            state.askUserQuestion,
             state.sessionTitle,
             state.rootTitle.isEmpty() ? state.rootId : state.rootTitle,
             title, text,
@@ -824,6 +851,14 @@ public class ReplyPollerService extends Service {
 
     private String buildReplyTitle(ReplyState state, String status) {
         return buildReplyTitlePrefix(state) + " · " + status;
+    }
+
+    /** 等待用户输入时的状态文案；其余沿用传入的 status。 */
+    private String replyStatusText(ReplyState state, String defaultText) {
+        if (state.askUserWaiting && state.status == ReplyStatus.REPLYING) {
+            return "需要你输入";
+        }
+        return defaultText;
     }
 
     private String buildReplyTitlePrefix(ReplyState state) {
@@ -1012,6 +1047,8 @@ public class ReplyPollerService extends Service {
         String agent = "";
         String summary = "";
         String updatedAt = "";
+        boolean askUserWaiting = false;
+        String askUserQuestion = "";
         ReplyStatus status = ReplyStatus.REPLYING;
         /** 超级岛展开态秒表基准，SystemClock.elapsedRealtime 时基；0 表示未知。 */
         long startedAtElapsed = 0L;

@@ -552,14 +552,16 @@ func (h *HTTPHandler) handleReplyingSessions(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		payload = append(payload, map[string]any{
-			"rootId":       item.RootID,
-			"rootTitle":    rootTitle,
-			"sessionKey":   item.SessionKey,
-			"sessionTitle": sessionTitle,
-			"agent":        item.Agent,
-			"status":       item.Status,
-			"summary":      item.Summary,
-			"updatedAt":    item.UpdatedAt,
+			"rootId":          item.RootID,
+			"rootTitle":       rootTitle,
+			"sessionKey":      item.SessionKey,
+			"sessionTitle":    sessionTitle,
+			"agent":           item.Agent,
+			"status":          item.Status,
+			"summary":         item.Summary,
+			"updatedAt":       item.UpdatedAt,
+			"askUserWaiting":  item.AskUserWaiting,
+			"askUserQuestion": item.AskUserQuestion,
 		})
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"sessions": payload})
