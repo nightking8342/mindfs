@@ -406,6 +406,36 @@ func syncImportedSubagentSessions(
 			if err != nil {
 				return importedCount, err
 			}
+			// 双向兜底查重：live 路径（claudeSubagentRouter 的合成 agent）写的是裸
+			// parent_tool_call_id，而 importer 的 AgentSessionID 是
+			// "claude-subagent:<agentId>"。两者 key 形态不一致，上面的精确查找查不到，
+			// 会让同一子代理被重复创建（重进 MindFS 后子会话翻倍）。这里按
+			// parent_tool_call_id 的两种形态（裸/带前缀）再兜底查一次并复用。
+			if binding == nil {
+				if parentToolCallID := strings.TrimSpace(item.ParentToolCallID); parentToolCallID != "" {
+					for _, candidateKey := range []string{
+						"claude-subagent:" + parentToolCallID,
+						parentToolCallID,
+					} {
+						if candidateKey == agentSessionID {
+							continue // 与分析键相同，上面已查过
+						}
+						dup, dupErr := manager.FindAgentBindingByAgentSession(ctx, agentName, candidateKey)
+						if dupErr != nil {
+							return importedCount, dupErr
+						}
+						if dup != nil {
+							binding = dup
+							// 归一为裸 parent_tool_call_id，与 live 路径 key 保持一致，
+							// 避免再次裂成两种 key。
+							if strings.HasPrefix(agentSessionID, "claude-subagent:") && parentToolCallID != "" {
+								agentSessionID = parentToolCallID
+							}
+							break
+						}
+					}
+				}
+			}
 			var child *session.Session
 			start := 0
 			if binding == nil {

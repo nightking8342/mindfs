@@ -274,6 +274,71 @@ func TestImportExternalSessionCreatesNativeSubagentSession(t *testing.T) {
 	}
 }
 
+// TestSyncSubagentReusesLiveBareKeyBinding covers the "child session doubles
+// after re-entering MindFS" bug for claude. The live path persists subagent
+// bindings keyed on the bare parent_tool_call_id, while the importer/sync path
+// keys on "claude-subagent:<agentId>". Without a fallback, the same subagent is
+// created twice. Here a live bare-key binding exists and the sync must reuse it
+// instead of creating a duplicate.
+func TestSyncSubagentReusesLiveBareKeyBinding(t *testing.T) {
+	ctx := context.Background()
+	root := fs.NewRootInfo("root", "Root", t.TempDir())
+	manager := session.NewManager(root)
+
+	// Parent session that will be re-opened (re-enter MindFS triggers sync),
+	// bound to claude so InferAgentFromSession resolves it.
+	parent, err := manager.Create(ctx, session.CreateInput{Type: session.TypeChat, Agent: "claude", Name: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpdateAgentState(ctx, parent, "claude", 1, "parent-session"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A child already created by the live path, keyed on the bare
+	// parent_tool_call_id (as claudeSubagentRouter's synthetic agent does).
+	liveChild, err := manager.Create(ctx, session.CreateInput{
+		Type: session.TypeChat, Agent: "claude", Name: "Investigate tests", ParentSessionKey: parent.Key,
+		ParentToolCallID: "chatcmpl-tool-livecall",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpsertAgentBinding(ctx, session.AgentBinding{
+		SessionKey: liveChild.Key, Agent: "claude", AgentSessionID: "chatcmpl-tool-livecall", AgentCtxSeq: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	importer := &syncDeltaTestImporter{
+		exchanges: []agenttypes.ImportedExchange{{Role: "user", Content: "delegate"}},
+		subagents: []agenttypes.ImportedSubagentSession{{
+			AgentSessionID:   "claude-subagent:deadbeef",
+			ParentToolCallID: "chatcmpl-tool-livecall",
+			Title:            "Investigate tests",
+		}},
+	}
+	svc := &Service{Registry: &syncDeltaTestRegistry{root: root, manager: manager, importer: importer}}
+	if _, err := svc.SyncExternalSessionDelta(ctx, SyncExternalSessionDeltaInput{
+		RootID: root.ID,
+		Key:    parent.Key,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sync must reuse the live bare-key binding, not create a second child.
+	children, err := manager.List(ctx, session.ListOptions{ParentSessionKey: parent.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("children count = %d, want 1 (no duplicate)", len(children))
+	}
+	if children[0].Key != liveChild.Key {
+		t.Fatalf("reused child key = %q, want live %q", children[0].Key, liveChild.Key)
+	}
+}
+
 func TestImportExternalSessionPersistsPlanAux(t *testing.T) {
 	ctx := context.Background()
 	root := fs.NewRootInfo("root", "Root", t.TempDir())

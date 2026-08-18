@@ -689,6 +689,61 @@ func TestClaudeSubagentRouterDoesNotCreateChildFromTaskIDOnly(t *testing.T) {
 	}
 }
 
+// TestClaudeSubagentRouterDoesNotCreateChildFromBashTool locks the fix for a
+// plain top-level tool invocation (e.g. Bash): it carries a nesting
+// parent_tool_use_id but no TaskID / SubagentType / TaskDescription, so it must
+// NOT spawn a child session (previously every Bash call created a "Bash" child).
+func TestClaudeSubagentRouterDoesNotCreateChildFromBashTool(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	parent, err := manager.Create(ctx, session.CreateInput{Type: session.TypeChat, Agent: "claude", Name: "parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	var createdCount int
+	router := newClaudeSubagentRouter(subagentSessionInput{
+		RootID:  root.ID,
+		Parent:  parent,
+		Agent:   "claude",
+		Model:   "sonnet",
+		Manager: manager,
+		OnCreated: func(*session.Session) {
+			createdCount++
+		},
+	})
+
+	// A Bash tool execution: only ParentToolUseID (nesting marker), no real
+	// subagent identity. Must not create a child session.
+	bashCall := agenttypes.ToolCall{
+		CallID:  "toolu_01BashEcho",
+		Title:   "Bash",
+		Status:  "running",
+		Kind:    agenttypes.ToolKindExecute,
+		RawType: "bash",
+		Meta:    map[string]any{"parentToolUseId": "toolu_01BashEcho"},
+	}
+	if consumed := router.Handle(ctx, agenttypes.Event{Type: agenttypes.EventTypeToolCall, Data: bashCall}); consumed {
+		t.Fatalf("bash tool call should not be consumed as subagent")
+	}
+	if createdCount != 0 {
+		t.Fatalf("bash tool call created child, count = %d, want 0", createdCount)
+	}
+
+	// A bash-typed streaming chunk carrying only ParentToolUseID also must not build one.
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageChunk,
+		Data: agenttypes.MessageChunk{Content: "pwd", ParentToolUseID: "toolu_01BashEcho"},
+	}); consumed {
+		t.Fatalf("bash-only chunk should not be consumed as subagent")
+	}
+	if createdCount != 0 {
+		t.Fatalf("bash-only chunk created child, count = %d, want 0", createdCount)
+	}
+}
+
 func TestClaudeSubagentRouterRoutesTaskNotificationSummaryAndKeepsParentUpdate(t *testing.T) {
 	ctx := context.Background()
 	rootDir := t.TempDir()

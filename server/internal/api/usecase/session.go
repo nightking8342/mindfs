@@ -2559,7 +2559,14 @@ func (r *claudeSubagentRouter) Handle(ctx context.Context, update agenttypes.Eve
 	if isClaudeParentTaskLifecycle(update) {
 		return false
 	}
-	if strings.TrimSpace(ref.ParentToolUseID) == "" && r.find(ref) == nil {
+	// 以 ParentToolUseID 作为子会话锚点，但只有当它带有真实的子代理确认标志
+	// （TaskID / SubagentType / TaskDescription）或已存在匹配的子会话（后续
+	// 流式块路由）时才进入 ensure。普通工具调用（如 Bash）只携带 ParentToolUseID
+	// 这一嵌套标记，缺少数子代理确认标志，不应建子会话。
+	if strings.TrimSpace(ref.ParentToolUseID) == "" {
+		return false
+	}
+	if !isRealClaudeSubagent(ref) && r.find(ref) == nil {
 		return false
 	}
 	child, err := r.ensure(ctx, ref, toolCallFromUpdate(update))
@@ -2734,6 +2741,17 @@ type claudeSubagentRef struct {
 
 func (r claudeSubagentRef) hasRef() bool {
 	return strings.TrimSpace(r.ParentToolUseID) != "" || strings.TrimSpace(r.TaskID) != ""
+}
+
+// isRealClaudeSubagent reports whether an event genuinely belongs to a Task
+// subagent rather than a top-level tool invocation. The SDK only fills
+// SubagentType / TaskDescription / TaskID for real Task subagents; a bare
+// ParentToolUseID is an ambiguous nesting marker also carried by ordinary
+// tools (e.g. Bash), which must not create a child session.
+func isRealClaudeSubagent(ref claudeSubagentRef) bool {
+	return strings.TrimSpace(ref.TaskID) != "" ||
+		strings.TrimSpace(ref.SubagentType) != "" ||
+		strings.TrimSpace(ref.TaskDescription) != ""
 }
 
 func (r claudeSubagentRef) key() string {
