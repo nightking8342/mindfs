@@ -635,6 +635,7 @@ export function ForkShell(props: ForkShellProps) {
 
   const shellStyle: React.CSSProperties & {
     "--mindfs-actionbar-bottom-padding"?: string;
+    "--mindfs-file-menu-width"?: string;
   } = {
     display: isMobile ? "flex" : "grid",
     flexDirection: isMobile ? "column" : undefined,
@@ -662,6 +663,7 @@ export function ForkShell(props: ForkShellProps) {
     isolation: "isolate",
     boxSizing: "border-box",
     "--mindfs-actionbar-bottom-padding": "calc(var(--mindfs-safe-area-bottom) + var(--fork-actionbar-gap, 12px))",
+    "--mindfs-file-menu-width": isMobile ? "52.5vw" : (isTablet ? "140px" : "182px"),
   };
 
   // 桌面端 main：用 margin-left/right 推挤整个玻璃板。侧栏 absolute 盖在左侧
