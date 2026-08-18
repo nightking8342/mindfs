@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -37,6 +38,25 @@ func TestPoolGetOrCreateRequiresSessionKey(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "session key required") {
 		t.Fatalf("expected session key required error, got: %v", err)
+	}
+}
+
+func TestPoolSupportsDeveloperInstructionsByConfiguredProtocol(t *testing.T) {
+	pool := NewPool(Config{Agents: []Definition{
+		{Name: "codex-custom", Protocol: ProtocolCodexSDK},
+		{Name: "claude-custom", Protocol: ProtocolClaudeSDK},
+		{Name: "acp-custom", Protocol: ProtocolACP},
+	}})
+	defer pool.CloseAll()
+
+	if !pool.SupportsDeveloperInstructions("codex-custom") {
+		t.Fatal("codex-sdk should support developer instructions")
+	}
+	if !pool.SupportsDeveloperInstructions("claude-custom") {
+		t.Fatal("claude-sdk should support developer instructions")
+	}
+	if pool.SupportsDeveloperInstructions("acp-custom") {
+		t.Fatal("ACP should use the user-message compatibility path")
 	}
 }
 
@@ -95,6 +115,66 @@ func TestPoolCloseAndCloseAll(t *testing.T) {
 	pool.CloseAll()
 	if len(pool.sessions) != 0 {
 		t.Fatalf("expected sessions cleared by CloseAll")
+	}
+}
+
+type idleReleaseTestSession struct {
+	agenttypes.Session
+	closeCount int
+	closeErr   error
+}
+
+func (s *idleReleaseTestSession) Close() error {
+	s.closeCount++
+	return s.closeErr
+}
+
+func TestPoolReleaseIdleSessionsSkipsActiveUse(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	sess := &idleReleaseTestSession{}
+	pool.sessions["idle"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "idle",
+		protocol:   ProtocolClaudeSDK,
+		session:    sess,
+		lastUsedAt: now.Add(-3 * time.Hour),
+	}
+	finishUse := pool.BeginSessionUse("idle")
+	if got := pool.ReleaseIdleSessions(time.Hour, now); got != 0 {
+		t.Fatalf("released active sessions = %d, want 0", got)
+	}
+	finishUse()
+	if got := pool.ReleaseIdleSessions(time.Hour, now.Add(2*time.Hour)); got != 1 {
+		t.Fatalf("released idle sessions = %d, want 1", got)
+	}
+	if sess.closeCount != 1 {
+		t.Fatalf("Close calls = %d, want 1", sess.closeCount)
+	}
+	if _, ok := pool.sessions["idle"]; ok {
+		t.Fatal("released session remains in pool")
+	}
+}
+
+func TestPoolReleaseIdleSessionsKeepsEntryWhenCloseFails(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	sess := &idleReleaseTestSession{closeErr: errors.New("close failed")}
+	pool.sessions["idle"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "idle",
+		protocol:   ProtocolClaudeSDK,
+		session:    sess,
+		lastUsedAt: now.Add(-3 * time.Hour),
+	}
+	if got := pool.ReleaseIdleSessions(time.Hour, now); got != 0 {
+		t.Fatalf("released failed sessions = %d, want 0", got)
+	}
+	entry := pool.sessions["idle"]
+	if entry == nil || entry.closing {
+		t.Fatalf("failed session entry not restored: %#v", entry)
 	}
 }
 

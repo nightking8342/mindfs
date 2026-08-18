@@ -81,6 +81,10 @@ const LS_MAX_RECORDS = 50;
 
 const memoryCache = new Map<string, FilePayload>();
 const gitDiffMemoryCache = new Map<string, CachedGitDiffPayload>();
+// Avoid repeatedly requesting missing raw assets. File-change invalidation clears
+// this cache immediately; the TTL only covers missed or disconnected WS events.
+const rawFileFailures = new Map<string, number>();
+const RAW_FILE_FAILURE_TTL_MS = 60_000;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function buildCacheKey(rootId: string, path: string, readMode: ReadMode, cursor: number): string {
@@ -97,6 +101,10 @@ function buildGitDiffCacheKeyPrefix(rootId: string, path: string): string {
 
 function buildCacheKeyPrefix(rootId: string, path: string): string {
   return `${rootId}::${path}::`;
+}
+
+function buildRawFileFailureKey(rootId: string, path: string): string {
+  return `${rootId}::${path}`;
 }
 
 function normalizeCursor(cursor?: number): number {
@@ -458,6 +466,7 @@ export async function getCachedFile(params: Omit<FetchFileParams, "timeoutMs">):
 export function invalidateFileCache(rootId: string, path: string): void {
   const prefix = buildCacheKeyPrefix(rootId, path);
   const diffPrefix = buildGitDiffCacheKeyPrefix(rootId, path);
+  rawFileFailures.delete(buildRawFileFailureKey(rootId, path));
   for (const key of memoryCache.keys()) {
     if (key.startsWith(prefix)) {
       memoryCache.delete(key);
@@ -475,6 +484,11 @@ export function invalidateFileCache(rootId: string, path: string): void {
 export function clearFileCacheForRoot(rootId: string): void {
   const prefix = `${rootId}::`;
   const diffPrefix = `git-diff::${GIT_DIFF_CACHE_VERSION}::${rootId}::`;
+  for (const key of rawFileFailures.keys()) {
+    if (key.startsWith(prefix)) {
+      rawFileFailures.delete(key);
+    }
+  }
   for (const key of memoryCache.keys()) {
     if (key.startsWith(prefix)) {
       memoryCache.delete(key);
@@ -621,6 +635,14 @@ export async function fetchProofProtectedBlob(params: {
 }): Promise<Blob> {
   const request = createFetchOptions(params.timeoutMs);
   try {
+    const cacheKey = buildRawFileFailureKey(params.rootId, params.path);
+    const failedAt = rawFileFailures.get(cacheKey);
+    if (failedAt !== undefined) {
+      if (Date.now() - failedAt < RAW_FILE_FAILURE_TTL_MS) {
+        throw new Error("open raw file failed: status=404 (cached)");
+      }
+      rawFileFailures.delete(cacheKey);
+    }
     const baseURL = buildFileURL(params.rootId, params.path, "full", 0);
     const rawURL = withRawFlag(
       baseURL,
@@ -630,6 +652,9 @@ export async function fetchProofProtectedBlob(params: {
       : undefined;
     const response = await fetchResponse(rawURL, { ...request.init, headers });
     if (!response.ok) {
+      if (response.status === 404) {
+        rawFileFailures.set(cacheKey, Date.now());
+      }
       if (response.status === 401 && e2eeService.isRequired()) {
         const payload = (await response.json().catch(() => ({}))) as { error?: string };
         if (e2eeService.handleServerError(String(payload.error || ""))) {
@@ -638,6 +663,7 @@ export async function fetchProofProtectedBlob(params: {
       }
       throw new Error(`open raw file failed: status=${response.status}`);
     }
+    rawFileFailures.delete(cacheKey);
     return response.blob();
   } finally {
     if (request.timer !== null) {

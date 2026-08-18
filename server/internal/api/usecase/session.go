@@ -1043,23 +1043,28 @@ func (s *Service) PinSession(ctx context.Context, in PinSessionInput) (*session.
 }
 
 type BuildPromptInput struct {
-	Session        *session.Session
-	Manager        *session.Manager
-	Agent          string
-	Message        string
-	ClientContext  ClientContext
-	AgentCtxSeq    *int
-	RuntimeRootAbs string
-	IsInitial      bool
+	Session                       *session.Session
+	Manager                       *session.Manager
+	Agent                         string
+	Message                       string
+	ClientContext                 ClientContext
+	AgentCtxSeq                   *int
+	RuntimeRootAbs                string
+	IsInitial                     bool
+	IncludeReplyTipsInUserMessage bool
 }
 
 func (s *Service) BuildPrompt(in BuildPromptInput) string {
 	clientCtx := in.ClientContext
 	prompt := buildUserPrompt(in.Message, clientCtx)
 	if strings.TrimSpace(clientCtx.PluginCatalog) != "" {
-		prompt = buildPluginPrompt(clientCtx.PluginCatalog, in.Message, in.IsInitial)
-	} else if in.IsInitial {
-		prompt = prependReplyTips(prompt)
+		pluginDir := ".mindfs/plugins"
+		if in.Manager != nil && in.Manager.Root().EffectiveMetaLocation() == fs.MetaLocationHome {
+			pluginDir = filepath.Join(in.Manager.Root().MetaDir(), "plugins")
+		}
+		prompt = buildPluginPrompt(clientCtx.PluginCatalog, in.Message, in.IsInitial, pluginDir)
+	} else if in.IsInitial && in.IncludeReplyTipsInUserMessage {
+		prompt = appendReplyTips(prompt)
 	}
 	return prependSwitchHint(in, prompt)
 }
@@ -1312,11 +1317,13 @@ func switchReadHintPath(manager *session.Manager, sessionKey, runtimeRootAbs str
 	if logPath == "" || runtimeRootAbs == "" {
 		return logPath
 	}
-	rootAbs, err := manager.Root().RootDir()
-	if err != nil || strings.TrimSpace(rootAbs) == "" {
+	absLogPath := manager.ExchangeLogAbsolutePath(sessionKey)
+	if strings.TrimSpace(absLogPath) == "" {
 		return logPath
 	}
-	absLogPath := filepath.Join(rootAbs, filepath.FromSlash(logPath))
+	if manager.Root().EffectiveMetaLocation() == fs.MetaLocationHome {
+		return filepath.ToSlash(absLogPath)
+	}
 	rel, err := filepath.Rel(runtimeRootAbs, absLogPath)
 	if err != nil || strings.TrimSpace(rel) == "" {
 		return logPath
@@ -1601,12 +1608,12 @@ func contextLineCount(exchanges []session.Exchange) int {
 }
 
 const replyTips = "[REPLY_TIPS]\n\n" +
-	"- MindFS supports GitHub-flavored Markdown, fenced `mermaid` diagrams, mathematical formulas, and Markdown images.\n" +
+	"- Prefer GitHub-flavored Markdown. Fenced `mermaid` diagrams, mathematical formulas, and Markdown images are supported.\n" +
 	"- When a useful workspace image exists, embed it with `![alt](path)` and prefer a workspace-root-relative path.\n" +
 	"- Never invent file paths or URLs. Use images or diagrams only when they materially improve the reply."
 
-func prependReplyTips(prompt string) string {
-	return replyTips + "\n\n[USER_PROMPT]\n" + strings.TrimSpace(prompt)
+func appendReplyTips(prompt string) string {
+	return strings.TrimSpace(prompt) + "\n\n" + replyTips
 }
 
 func buildUserPrompt(message string, clientCtx ClientContext) string {
@@ -1626,17 +1633,17 @@ func buildUserPrompt(message string, clientCtx ClientContext) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildPluginPrompt(catalogPrompt, userMessage string, isInitial bool) string {
+func buildPluginPrompt(catalogPrompt, userMessage string, isInitial bool, pluginDir string) string {
 	if isInitial {
-		return buildPluginPromptInitial(catalogPrompt, userMessage)
+		return buildPluginPromptInitial(catalogPrompt, userMessage, pluginDir)
 	}
-	return buildPluginPromptFollowup(userMessage)
+	return buildPluginPromptFollowup(userMessage, pluginDir)
 }
 
-func buildPluginPromptFollowup(userMessage string) string {
+func buildPluginPromptFollowup(userMessage, pluginDir string) string {
 	systemPrompt := strings.TrimSpace(strings.Join([]string{
 		"You are still in view-plugin development mode.",
-		"Continue editing/refining the plugin under .mindfs/plugins/.",
+		"Continue editing/refining the plugin under " + filepath.ToSlash(pluginDir) + "/.",
 		"",
 		"Follow these strict constraints:",
 		"- If the user explicitly asks to generate/update plugin code, output JS code only (no markdown fences, no explanation text).",
@@ -1660,10 +1667,10 @@ func buildPluginPromptFollowup(userMessage string) string {
 	}, "\n")
 }
 
-func buildPluginPromptInitial(catalogPrompt, userMessage string) string {
+func buildPluginPromptInitial(catalogPrompt, userMessage, pluginDir string) string {
 	systemPrompt := strings.TrimSpace(strings.Join([]string{
 		"You are in view-plugin development mode.",
-		"The user will describe requirements. Generate a view plugin and write it under .mindfs/plugins/.",
+		"The user will describe requirements. Generate a view plugin and write it under " + filepath.ToSlash(pluginDir) + "/.",
 		"",
 		"## Plugin Spec",
 		"- Use CommonJS: module.exports = { name, match, fileLoadMode, theme, process(file) { return { data?, tree } }, viewContext?(file) { return string | object } }",
@@ -1697,7 +1704,7 @@ func buildPluginPromptInitial(catalogPrompt, userMessage string) string {
 		"- any/all for OR/AND composition",
 		"",
 		"## Output Requirement",
-		"- Use available file-write tool(s) to write plugin file to .mindfs/plugins/<name>.js",
+		"- Use available file-write tool(s) to write plugin file to " + filepath.ToSlash(pluginDir) + "/<name>.js",
 		"- tree must be valid UITree: root points to an existing element id",
 		"- For dynamic interactions (pagination/sort/filter), use action: \"navigate\"",
 		"- navigate params: { path?, cursor?, query? }",
@@ -1812,6 +1819,7 @@ func (s *Service) ensureAgentSession(
 	effort string,
 	fastService string,
 	rootAbs string,
+	developerInstructions string,
 ) (agenttypes.Session, *int, error) {
 	poolSessionKey := agentPoolSessionKey(current.Key, agentName)
 	nextModel := resolveRuntimeModel(current, nil, model)
@@ -1819,6 +1827,14 @@ func (s *Service) ensureAgentSession(
 	nextEffort := resolveRuntimeEffort(agentName, current, effort)
 	nextFastService := resolveRuntimeFastService(agentName, current, fastService)
 	nextPlanMode := current != nil && current.PlanMode
+	var binding *session.AgentBinding
+	if manager != nil {
+		var err error
+		binding, err = manager.FindAgentBinding(ctx, current.Key, agentName)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	currentModel := ""
 	currentMode := ""
 	currentEffort := ""
@@ -1886,24 +1902,16 @@ func (s *Service) ensureAgentSession(
 		openCtx = ctx
 	}
 
-	var binding *session.AgentBinding
-	if manager != nil {
-		var err error
-		binding, err = manager.FindAgentBinding(ctx, current.Key, agentName)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
 	openInput := agenttypes.OpenSessionInput{
-		SessionKey:  poolSessionKey,
-		AgentName:   agentName,
-		Model:       nextModel,
-		Mode:        nextMode,
-		Effort:      nextEffort,
-		FastService: nextFastService,
-		PlanMode:    nextPlanMode,
-		RootPath:    rootAbs,
+		SessionKey:            poolSessionKey,
+		AgentName:             agentName,
+		Model:                 nextModel,
+		Mode:                  nextMode,
+		Effort:                nextEffort,
+		FastService:           nextFastService,
+		PlanMode:              nextPlanMode,
+		RootPath:              rootAbs,
+		DeveloperInstructions: developerInstructions,
 		AgentSessionID: strings.TrimSpace(func() string {
 			if binding == nil {
 				return ""
@@ -2131,21 +2139,29 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		rootAbs = filepath.Clean(runtimeRootPath)
 	}
 	planMode := current != nil && current.PlanMode
-	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
+
+	developerInstructions := ""
+	includeReplyTipsInUserMessage := isInitial
+	if isInitial && agentPool.SupportsDeveloperInstructions(in.Agent) {
+		developerInstructions = replyTips
+		includeReplyTipsInUserMessage = false
+	}
+	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs, developerInstructions)
 	if err != nil {
 		return err
 	}
 	setActiveTurnSession(in.RootID, current.Key, sess)
 
 	prompt := s.BuildPrompt(BuildPromptInput{
-		Session:        current,
-		Manager:        manager,
-		Agent:          in.Agent,
-		Message:        in.Content,
-		ClientContext:  in.ClientCtx,
-		AgentCtxSeq:    agentCtxSeq,
-		RuntimeRootAbs: rootAbs,
-		IsInitial:      isInitial,
+		Session:                       current,
+		Manager:                       manager,
+		Agent:                         in.Agent,
+		Message:                       in.Content,
+		ClientContext:                 in.ClientCtx,
+		AgentCtxSeq:                   agentCtxSeq,
+		RuntimeRootAbs:                rootAbs,
+		IsInitial:                     isInitial,
+		IncludeReplyTipsInUserMessage: includeReplyTipsInUserMessage,
 	})
 	var responseText string
 	sawAssistantChunk := false
@@ -2306,6 +2322,8 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	sendWithAttachedUpdates := func(runtime agenttypes.Session, content string) error {
 		attachSessionUpdates(runtime)
+		finishUse := agentPool.BeginSessionUse(agentPoolSessionKey(current.Key, in.Agent))
+		defer finishUse()
 		return runtime.SendMessage(turnCtx, content)
 	}
 	sendErr := sendWithAttachedUpdates(sess, prompt)
@@ -2456,7 +2474,7 @@ func (s *Service) RunTransientSlashCommand(ctx context.Context, in RunTransientS
 	}
 	root := manager.Root()
 	rootAbs, _ := root.RootDir()
-	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
+	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, in.Mode, in.Effort, in.FastService, rootAbs, "")
 	if err != nil {
 		return err
 	}
@@ -2477,6 +2495,8 @@ func (s *Service) RunTransientSlashCommand(ctx context.Context, in RunTransientS
 		}
 		err = loginSess.LoginChatGPTDeviceCode(turnCtx)
 	} else {
+		finishUse := agentPool.BeginSessionUse(agentPoolSessionKey(current.Key, agentName))
+		defer finishUse()
 		err = sess.SendMessage(turnCtx, "/"+command)
 	}
 	if err != nil && !isCanceledTurnError(err) {
@@ -2928,6 +2948,8 @@ func (s *Service) startSubagentSubscription(in subagentSessionInput, child *sess
 			log.Printf("[subagent] subscription.open.error root=%s session=%s receiver=%s err=%v", in.RootID, child.Key, receiverThreadID, err)
 			return
 		}
+		finishUse := in.Pool.BeginSessionUse(agentPoolSessionKey(child.Key, in.Agent))
+		defer finishUse()
 		setActiveTurnSession(in.RootID, child.Key, runtime)
 		subscriber, ok := runtime.(agenttypes.ThreadEventSubscriber)
 		if !ok {

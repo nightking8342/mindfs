@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"mindfs/server/internal/agent/logs"
 	types "mindfs/server/internal/agent/types"
@@ -17,20 +18,21 @@ import (
 )
 
 type OpenOptions struct {
-	AgentName        string
-	SessionKey       string
-	Model            string
-	Effort           string
-	FastService      string
-	PlanMode         bool
-	Probe            bool
-	RootPath         string
-	Command          string
-	Args             []string
-	Env              map[string]string
-	ResumeSessionID  string
-	ForkSessionID    string
-	CodexUserOrdinal *int
+	AgentName             string
+	SessionKey            string
+	Model                 string
+	Effort                string
+	FastService           string
+	PlanMode              bool
+	Probe                 bool
+	RootPath              string
+	Command               string
+	Args                  []string
+	Env                   map[string]string
+	DeveloperInstructions string
+	ResumeSessionID       string
+	ForkSessionID         string
+	CodexUserOrdinal      *int
 }
 
 type Runtime struct {
@@ -49,12 +51,13 @@ func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Sessio
 	client := r.getOrCreateClient(opts)
 	var sess *session
 	threadOptions := codexsdk.ThreadOptions{
-		Model:                strings.TrimSpace(opts.Model),
-		ModelReasoningEffort: codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
-		FastService:          strings.TrimSpace(opts.FastService),
-		SandboxMode:          codexsdk.SandboxModeFullAccess,
-		WorkingDirectory:     opts.RootPath,
-		ApprovalPolicy:       codexsdk.ApprovalModeNever,
+		Model:                 strings.TrimSpace(opts.Model),
+		ModelReasoningEffort:  codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
+		FastService:           strings.TrimSpace(opts.FastService),
+		SandboxMode:           codexsdk.SandboxModeFullAccess,
+		WorkingDirectory:      opts.RootPath,
+		DeveloperInstructions: strings.TrimSpace(opts.DeveloperInstructions),
+		ApprovalPolicy:        codexsdk.ApprovalModeNever,
 		ApprovalHandler: func(_ codexsdk.ApprovalRequest) (codexsdk.ApprovalDecision, error) {
 			return codexsdk.ApprovalDecisionApproved, nil
 		},
@@ -868,7 +871,14 @@ func (s *session) ContextWindow(_ context.Context) (types.ContextWindow, error) 
 	return s.contextWindow, nil
 }
 
-func (s *session) Close() error { return nil }
+func (s *session) Close() error {
+	if s == nil || s.thread == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.thread.Close(ctx)
+}
 
 func (s *session) updateThreadIDFromThread() {
 	if s == nil || s.thread == nil {

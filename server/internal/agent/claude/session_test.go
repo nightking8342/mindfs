@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +10,34 @@ import (
 
 	"mindfs/server/internal/agent/types"
 )
+
+func TestClaudeModelInfoSupportsEffortWithoutModelNameWhitelist(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	got := claudeModelInfo(claudeagent.ModelInfo{
+		Value:       "custom-provider-model",
+		DisplayName: "Custom Model",
+	})
+	if !got.SupportEffort {
+		t.Fatal("custom model should support CLI effort selection")
+	}
+	if !reflect.DeepEqual(got.Efforts, want) {
+		t.Fatalf("custom model efforts = %v, want %v", got.Efforts, want)
+	}
+}
+
+func TestAppendClaudeDeveloperInstructionsUsesCLIAppendSystemPrompt(t *testing.T) {
+	options := claudeagent.DefaultOptions()
+	for _, apply := range appendClaudeDeveloperInstructions(nil, "render markdown") {
+		apply(&options)
+	}
+	if options.SystemPrompt != "" {
+		t.Fatalf("custom system prompt = %q, want empty", options.SystemPrompt)
+	}
+	value, ok := options.ExtraArgs["append-system-prompt"]
+	if !ok || value == nil || *value != "render markdown" {
+		t.Fatalf("append-system-prompt extra arg = %#v", value)
+	}
+}
 
 func TestClaudeCompactBoundaryEmitsCompactNotice(t *testing.T) {
 	var got types.Event

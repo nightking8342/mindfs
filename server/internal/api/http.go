@@ -32,6 +32,7 @@ import (
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
 	"mindfs/server/internal/gitview"
+	"mindfs/server/internal/preferences"
 	"mindfs/server/internal/relay"
 	"mindfs/server/internal/session"
 
@@ -304,6 +305,10 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/sessions", h.protectedEndpoint(h.handleSessions))
 	r.Get("/api/preferences/session-naming", h.protectedEndpoint(h.handleSessionNamingPreferenceGet))
 	r.Put("/api/preferences/session-naming", h.protectedEndpoint(h.handleSessionNamingPreferencePut))
+	r.Get("/api/preferences/idle-session-resource-release", h.protectedEndpoint(h.handleIdleSessionResourceReleasePreferenceGet))
+	r.Put("/api/preferences/idle-session-resource-release", h.protectedEndpoint(h.handleIdleSessionResourceReleasePreferencePut))
+	r.Get("/api/preferences/new-project-meta-location", h.protectedEndpoint(h.handleNewProjectMetaLocationPreferenceGet))
+	r.Put("/api/preferences/new-project-meta-location", h.protectedEndpoint(h.handleNewProjectMetaLocationPreferencePut))
 	r.Get("/api/replying-sessions", h.protectedEndpoint(h.handleReplyingSessions))
 	r.Get("/api/sessions/search", h.protectedEndpoint(h.handleSessionSearch))
 	r.Get("/api/sessions/children", h.protectedEndpoint(h.handleSessionChildren))
@@ -1242,6 +1247,70 @@ type sessionNamingPreferenceRequest struct {
 	Model string `json:"model"`
 }
 
+type idleSessionResourceReleasePreferenceRequest struct {
+	Hours int `json:"hours"`
+}
+
+type newProjectMetaLocationPreferenceRequest struct {
+	Location string `json:"location"`
+}
+
+func (h *HTTPHandler) handleNewProjectMetaLocationPreferenceGet(w http.ResponseWriter, _ *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"location": h.AppContext.GetPreferences().NewProjectMetaLocation()})
+}
+
+func (h *HTTPHandler) handleNewProjectMetaLocationPreferencePut(w http.ResponseWriter, r *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	var req newProjectMetaLocationPreferenceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
+		return
+	}
+	if err := h.AppContext.GetPreferences().UpdateNewProjectMetaLocation(req.Location); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"location": h.AppContext.GetPreferences().NewProjectMetaLocation()})
+}
+
+func (h *HTTPHandler) handleIdleSessionResourceReleasePreferenceGet(w http.ResponseWriter, _ *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"hours": h.AppContext.GetPreferences().IdleSessionResourceReleaseHours(),
+	})
+}
+
+func (h *HTTPHandler) handleIdleSessionResourceReleasePreferencePut(w http.ResponseWriter, r *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
+		return
+	}
+	var req idleSessionResourceReleasePreferenceRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
+		return
+	}
+	if req.Hours <= 0 || req.Hours > preferences.MaxIdleSessionResourceReleaseHours {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("hours are out of range"))
+		return
+	}
+	if err := h.AppContext.GetPreferences().UpdateIdleSessionResourceReleaseHours(req.Hours); err != nil {
+		respondError(w, http.StatusInternalServerError, errInvalidRequest(err.Error()))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"hours": req.Hours})
+}
+
 func (h *HTTPHandler) handleSessionNamingPreferenceGet(w http.ResponseWriter, _ *http.Request) {
 	if h.AppContext == nil || h.AppContext.GetPreferences() == nil {
 		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("preferences not configured"))
@@ -1606,6 +1675,11 @@ func (h *HTTPHandler) handleTree(w http.ResponseWriter, r *http.Request) {
 		Dir:    r.URL.Query().Get("dir"),
 	})
 	if err != nil {
+		// 目录不存在时返回空树，而非 400：前端会轮询 .mindfs/plugins 等可选目录
+		if errors.Is(err, os.ErrNotExist) {
+			respondJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+			return
+		}
 		respondError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -1652,7 +1726,12 @@ func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 			Path:   path,
 		})
 		if err != nil {
-			respondError(w, http.StatusBadRequest, err)
+			// 文件不存在 → 404（资源不存在语义），而非 400
+			status := http.StatusBadRequest
+			if errors.Is(err, os.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+			respondError(w, status, err)
 			return
 		}
 		defer rawOut.File.Close()
@@ -1676,7 +1755,11 @@ func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 			Path:   path,
 		})
 		if err != nil {
-			respondError(w, http.StatusBadRequest, err)
+			status := http.StatusBadRequest
+			if errors.Is(err, os.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+			respondError(w, status, err)
 			return
 		}
 		if info.MTime.Equal(cachedMTime) {
@@ -1692,7 +1775,11 @@ func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 		ReadMode: readMode,
 	})
 	if err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		respondError(w, status, err)
 		return
 	}
 	payload := map[string]any{
@@ -2493,11 +2580,12 @@ func (h *HTTPHandler) handleE2EEOpen(w http.ResponseWriter, r *http.Request) {
 
 func managedDirResponse(dir fs.RootInfo) map[string]any {
 	resp := map[string]any{
-		"id":           dir.ID,
-		"display_name": dir.Name,
-		"root_path":    dir.RootPath,
-		"created_at":   dir.CreatedAt,
-		"updated_at":   dir.UpdatedAt,
+		"id":            dir.ID,
+		"display_name":  dir.Name,
+		"root_path":     dir.RootPath,
+		"meta_location": dir.EffectiveMetaLocation(),
+		"created_at":    dir.CreatedAt,
+		"updated_at":    dir.UpdatedAt,
 	}
 	if info, err := dir.StatRoot(); err == nil {
 		resp["size"] = info.Size()

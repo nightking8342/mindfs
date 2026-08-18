@@ -97,8 +97,8 @@ func TestCancelCurrentTurnReleasesPendingElicitation(t *testing.T) {
 	}
 }
 
-// TestCloseSessionReleasesPendingElicitation covers closing the session while
-// a card is open.
+// TestCloseSessionReleasesPendingElicitation covers forgetting the session
+// (local release path) while a card is open.
 func TestCloseSessionReleasesPendingElicitation(t *testing.T) {
 	proc, _, _ := newTestProcess(t, "key-1", "sess-1")
 
@@ -109,7 +109,7 @@ func TestCloseSessionReleasesPendingElicitation(t *testing.T) {
 	}()
 	waitForPendingElicitation(t, proc)
 
-	proc.CloseSession("key-1")
+	proc.ForgetSession("key-1")
 
 	select {
 	case err := <-done:

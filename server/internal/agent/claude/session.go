@@ -42,18 +42,19 @@ type claudeTaskInfo struct {
 }
 
 type OpenOptions struct {
-	AgentName       string
-	SessionKey      string
-	Model           string
-	Effort          string
-	PlanMode        bool
-	RootPath        string
-	Command         string
-	Args            []string
-	Env             map[string]string
-	ResumeSessionID string
-	ForkSessionID   string
-	ResumeMessageID string
+	AgentName             string
+	SessionKey            string
+	Model                 string
+	Effort                string
+	PlanMode              bool
+	RootPath              string
+	Command               string
+	Args                  []string
+	Env                   map[string]string
+	DeveloperInstructions string
+	ResumeSessionID       string
+	ForkSessionID         string
+	ResumeMessageID       string
 	// SettingsPath, when set, is passed to the Claude Agent SDK as an explicit
 	// settings.json (isolated from the user ~/.claude/settings.json).
 	SettingsPath string
@@ -87,6 +88,7 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 		claudeagent.WithForwardSubagentText(true),
 		claudeagent.WithCanUseTool(s.handleCanUseTool),
 	}
+	optionList = appendClaudeDeveloperInstructions(optionList, opts.DeveloperInstructions)
 	if settingsPath := strings.TrimSpace(opts.SettingsPath); settingsPath != "" {
 		optionList = append(optionList, claudeagent.WithSettingsPath(settingsPath))
 	}
@@ -164,6 +166,15 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	s.model = selectedModel
 	go s.consumeMessages()
 	return s, nil
+}
+
+func appendClaudeDeveloperInstructions(options []claudeagent.Option, developerInstructions string) []claudeagent.Option {
+	if instructions := strings.TrimSpace(developerInstructions); instructions != "" {
+		return append(options, claudeagent.WithExtraArgs(map[string]*string{
+			"append-system-prompt": &instructions,
+		}))
+	}
+	return options
 }
 
 func (r *Runtime) CloseAll() {}
@@ -409,17 +420,8 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	}
 	supported := s.client.SupportedModelsFromInit()
 	models := make([]types.ModelInfo, 0, len(supported))
-	for index, model := range supported {
-		name := strings.TrimSpace(model.DisplayName)
-		if name == "" {
-			name = strings.TrimSpace(model.Value)
-		}
-		models = append(models, types.ModelInfo{
-			ID:            model.Value,
-			Name:          name,
-			Description:   model.Description,
-			SupportEffort: claudeModelSupportsEffortAt(supported, index),
-		})
+	for _, model := range supported {
+		models = append(models, claudeModelInfo(model))
 	}
 	log.Printf("[agent/claude] models.cached session=%s count=%d", s.sessionKey, len(models))
 	currentModelID := ""
@@ -437,29 +439,22 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	}, nil
 }
 
-func claudeModelSupportsEffortAt(models []claudeagent.ModelInfo, index int) bool {
-	if index < 0 || index >= len(models) {
-		return false
+func claudeModelInfo(model claudeagent.ModelInfo) types.ModelInfo {
+	name := strings.TrimSpace(model.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(model.Value)
 	}
-	model := models[index]
-	if claudeModelSupportsEffort(model.Value, model.DisplayName, model.Description) {
-		return true
+	return types.ModelInfo{
+		ID:            model.Value,
+		Name:          name,
+		Description:   model.Description,
+		SupportEffort: true,
+		Efforts:       claudeEffortLevels(),
 	}
-	if !strings.EqualFold(strings.TrimSpace(model.Value), "default") {
-		return false
-	}
-	for _, candidate := range models {
-		if strings.EqualFold(strings.TrimSpace(candidate.Value), "default") {
-			continue
-		}
-		return claudeModelSupportsEffort(candidate.Value, candidate.DisplayName, candidate.Description)
-	}
-	return false
 }
 
-func claudeModelSupportsEffort(id, name, description string) bool {
-	joined := strings.ToLower(strings.TrimSpace(id) + " " + strings.TrimSpace(name) + " " + strings.TrimSpace(description))
-	return strings.Contains(joined, "sonnet") || strings.Contains(joined, "opus")
+func claudeEffortLevels() []string {
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 func (s *session) SetMode(_ context.Context, _ string) error {

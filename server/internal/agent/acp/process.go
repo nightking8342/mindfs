@@ -56,6 +56,8 @@ type CapabilitySnapshot struct {
 	PromptSupportsAudio   bool
 	PromptSupportsImage   bool
 	PromptSupportsContext bool
+	SupportsSessionClose  bool
+	SupportsSessionResume bool
 }
 
 type stderrHintState struct {
@@ -577,6 +579,8 @@ func (p *Process) Initialize(ctx context.Context) error {
 		PromptSupportsAudio:   resp.AgentCapabilities.PromptCapabilities.Audio,
 		PromptSupportsImage:   resp.AgentCapabilities.PromptCapabilities.Image,
 		PromptSupportsContext: resp.AgentCapabilities.PromptCapabilities.EmbeddedContext,
+		SupportsSessionClose:  resp.AgentCapabilities.SessionCapabilities.Close != nil,
+		SupportsSessionResume: resp.AgentCapabilities.LoadSession,
 	}
 	return nil
 }
@@ -748,9 +752,9 @@ func (p *Process) releasePendingElicitations(sessionKey string) {
 	p.elicitation.abandonSession(string(sess.ID))
 }
 
-// CloseSession removes a session from the process and kills any terminals it
-// spawned (ACP terminals belong to a session).
-func (p *Process) CloseSession(sessionKey string) {
+// ForgetSession removes MindFS' local bookkeeping for a session. ACP
+// terminals/elicitation belong to a session, so they are released too.
+func (p *Process) ForgetSession(sessionKey string) {
 	p.mu.Lock()
 	sess, ok := p.sessions[sessionKey]
 	if !ok {
@@ -762,11 +766,34 @@ func (p *Process) CloseSession(sessionKey string) {
 	delete(p.sessions, sessionKey)
 	p.mu.Unlock()
 
-	p.elicitation.abandonSession(sessionID)
+	if p.elicitation != nil {
+		p.elicitation.abandonSession(sessionID)
+	}
 	p.clearActiveSession(sessionID)
 	if p.terminals != nil {
 		p.terminals.closeSession(sessionID)
 	}
+}
+
+// CloseSession asks an ACP agent to cancel outstanding work and release the
+// session resources it owns. Local bookkeeping is removed only after the agent
+// confirms the close.
+func (p *Process) CloseSession(ctx context.Context, sessionKey string) error {
+	if !p.capability.SupportsSessionClose {
+		return errors.New("ACP agent does not support session/close")
+	}
+	if !p.capability.SupportsSessionResume {
+		return errors.New("ACP agent cannot safely release a resumable session")
+	}
+	sess := p.getSessionByKey(sessionKey)
+	if sess == nil {
+		return nil
+	}
+	if _, err := p.conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: sess.ID}); err != nil {
+		return err
+	}
+	p.ForgetSession(sessionKey)
+	return nil
 }
 
 // Close terminates the process and all of its terminals.
