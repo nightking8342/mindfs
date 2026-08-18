@@ -210,10 +210,17 @@ final class FocusIslandSupport {
 
         views.setTextViewText(R.id.island_chip, chipText(replying, askUserWaiting));
         if (replying) {
-            views.setInt(R.id.island_chip, "setBackgroundResource",
-                dark ? R.drawable.island_expand_chip_replying
-                     : R.drawable.island_expand_chip_replying_light);
-            views.setTextColor(R.id.island_chip, dark ? 0xFFD7DADE : 0xFF4A4F55);
+            if (askUserWaiting) {
+                views.setInt(R.id.island_chip, "setBackgroundResource",
+                    dark ? R.drawable.island_expand_chip_ask_user
+                         : R.drawable.island_expand_chip_ask_user_light);
+                views.setTextColor(R.id.island_chip, dark ? 0xFF7FE3C5 : 0xFF087F66);
+            } else {
+                views.setInt(R.id.island_chip, "setBackgroundResource",
+                    dark ? R.drawable.island_expand_chip_replying
+                         : R.drawable.island_expand_chip_replying_light);
+                views.setTextColor(R.id.island_chip, dark ? 0xFFD7DADE : 0xFF4A4F55);
+            }
         } else {
             views.setInt(R.id.island_chip, "setBackgroundResource",
                 dark ? R.drawable.island_expand_chip_done

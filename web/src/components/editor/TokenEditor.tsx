@@ -385,11 +385,16 @@ function pasteEventHasFiles(event: ClipboardEvent | InputEvent | KeyboardEvent):
 
 function isKeyboardPasteInput(event: InputEvent): boolean {
   const data = event.data || "";
+  const hasInlineBreak = data.includes("\n") || data.includes("\r");
+  // IME 组合态（含语音输入法的 AI 整理）产出的多行输入不是粘贴：
+  // 放行给原生路径，避免 preventDefault 拦掉输入法自己的替换/整理动作。
+  if (event.isComposing) {
+    return false;
+  }
   return event.inputType === "insertFromPaste"
     || event.inputType === "insertFromPasteAsQuotation"
     || !!event.dataTransfer
-    || data.includes("\n")
-    || data.includes("\r");
+    || hasInlineBreak;
 }
 
 function isAndroidWebViewLikeRuntime(): boolean {
@@ -616,6 +621,13 @@ function EditorBridge({
         });
         rootElement.focus({ preventScroll: true });
       };
+      if (inputText !== "") {
+        // InputEvent 的 data 就是这次真正插入的文本（如语音输入法 AI 整理后的
+        // 结构化内容），优先用它，避免 dataTransfer/异步读剪贴板把用户之前
+        // 复制的旧内容插进来。
+        insert(inputText);
+        return;
+      }
       if (text !== "") {
         insert(text);
         return;
