@@ -23,7 +23,7 @@
 
 ### Agent 会话
 
-- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · Copilot · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · DeepSeek Harness（DSH）· Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
+- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · Copilot · CodeBuddy · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · DeepSeek Harness（DSH）· Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
 - **实时流式输出**：逐 token 推送，工具调用、思考过程、权限请求均以结构化卡片实时渲染，上下文窗口实时余量。
 - **灵活切换**：会话中随时切换 Agent 或模型，多 Agent 共享同一上下文，无需重新描述背景。
 - **会话搜索**：支持按会话标题或对话内容搜索，并可直接跳转到命中的会话和片段。
@@ -107,6 +107,7 @@ MindFS 本身不包含 AI 模型，需要在本机安装至少一个 Agent CLI�
 | **Gemini CLI** | https://geminicli.com/ |
 | **Cursor** | https://cursor.com/cn/cli |
 | **GitHub Copilot** | https://github.com/features/copilot/cli |
+| **CodeBuddy** | https://www.codebuddy.ai/docs/cli/installation（`codebuddy --acp`） |
 | **Cline** | https://cline.bot/kanban |
 | **Augment** | https://www.augmentcode.com/product/CLI |
 | **Kiro** | https://kiro.dev/cli/ |
@@ -245,7 +246,9 @@ mindfs [flags] [root]
 
 `root` 是要托管的目录。未指定时，MindFS 只打开服务，不新增托管目录。
 
-默认情况下，`mindfs` 会启动或复用后台服务并自动打开浏览器。传入 `root` 时才会注册目录；如果所选监听地址上已经有 MindFS 服务在运行，命令会复用该服务并新增该目录。
+默认情况下，`mindfs` 会启动或复用后台服务并自动打开浏览器，但不会注册开机自启。执行一次 `mindfs -autostart` 可为当前用户启用；启用后，从终端正常执行 MindFS 会刷新已有启动项和仅当前用户可读的环境变量快照。开机自启时先恢复快照，再加载记录的 shell rc/profile，以 rc 中的最新值为准。使用 `-autostart=false` 可移除启动项和环境快照。
+
+macOS 使用 LaunchAgent，Linux 使用 systemd user service，Windows 使用当前用户启动注册表项。环境快照可能包含 API Key 等凭据，因此保存在平台用户配置目录（`os.UserConfigDir()/mindfs`）中并限制为当前用户访问。
 
 #### 常用命令
 
@@ -270,6 +273,7 @@ mindfs -agent-config /path/to/agents.json
 |------|--------|------|
 | `-addr string` | `127.0.0.1:7331` | 监听地址。使用 `:7331` 或 `0.0.0.0:7331` 可允许局域网访问。 |
 | `-foreground` | `false` | 前台运行服务，不启动后台进程。适合开发、调试或配合进程管理器使用。 |
+| `-autostart` | `false` | 注册或刷新开机自启及环境变量快照；使用 `-autostart=false` 禁用已有启动项。 |
 | `-status` | `false` | 查看后台服务状态、PID、访问地址和日志文件路径。 |
 | `-version` | `false` | 查看当前 MindFS 版本。 |
 | `-update` | `false` | 检查并安装最新 MindFS 版本。更新后需要手动重启 MindFS。 |

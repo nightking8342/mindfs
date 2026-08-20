@@ -23,7 +23,7 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 
 ### Agent Sessions
 
-- **Multi-Agent support**: Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · GitHub Copilot · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · DeepSeek Harness (DSH) · Reasonix · OpenCode · OpenClaw — installed agents are detected automatically.
+- **Multi-Agent support**: Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · GitHub Copilot · CodeBuddy · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · DeepSeek Harness (DSH) · Reasonix · OpenCode · OpenClaw — installed agents are detected automatically.
 - **Real-time streaming**: Token-by-token output pushed to the browser; tool calls, thought traces, permission prompts, and remaining context-window capacity are rendered live as structured, collapsible cards.
 - **Flexible switching**: Switch agents or models mid-session; all agents share the same context — no need to re-explain the background.
 - **Session search**: Search by session title or conversation content, then jump straight to the matched session and snippet.
@@ -107,6 +107,7 @@ MindFS does not include any AI model — you need at least one Agent CLI install
 | **Gemini CLI** | https://geminicli.com/ |
 | **Cursor** | https://cursor.com/cn/cli |
 | **GitHub Copilot** | https://github.com/features/copilot/cli |
+| **CodeBuddy** | https://www.codebuddy.ai/docs/cli/installation (`codebuddy --acp`) |
 | **Cline** | https://cline.bot/kanban |
 | **Augment** | https://www.augmentcode.com/product/CLI |
 | **Kiro** | https://kiro.dev/cli/ |
@@ -244,7 +245,9 @@ mindfs [flags] [root]
 
 `root` is the directory to manage. If omitted, MindFS opens without adding a directory.
 
-By default, `mindfs` starts or reuses a background service and opens the browser. Pass `root` to register a directory; if a service is already running on the selected address, the command reuses it and adds that directory.
+By default, `mindfs` starts or reuses a background service and opens the browser without registering automatic startup. Run `mindfs -autostart` once to enable it for the current user. Once enabled, normal terminal launches refresh a private snapshot of the visible environment and the existing startup entry. At automatic startup, MindFS restores that snapshot and then loads the recorded shell's rc/profile so newer shell values take precedence. Pass `-autostart=false` to remove the startup entry and environment snapshot.
+
+MindFS uses a launch agent on macOS, a systemd user service on Linux, and the current user's startup registry entry on Windows. The environment snapshot can contain credentials and is stored under the platform user config directory (`os.UserConfigDir()/mindfs`) with user-only permissions.
 
 #### Common Commands
 
@@ -269,6 +272,7 @@ mindfs -agent-config /path/to/agents.json
 |------|---------|-------------|
 | `-addr string` | `127.0.0.1:7331` | Listen address. Use `:7331` or `0.0.0.0:7331` to allow LAN access. |
 | `-foreground` | `false` | Run the server in the foreground instead of starting a background service. |
+| `-autostart` | `false` | Register or refresh automatic startup and the environment snapshot. Pass `-autostart=false` to disable an existing entry. |
 | `-status` | `false` | Show background service status, PID, URL, and log file path. |
 | `-version` | `false` | Show the current MindFS version. |
 | `-update` | `false` | Check for and install the latest MindFS release. Restart MindFS manually after updating. |

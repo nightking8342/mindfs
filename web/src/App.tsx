@@ -11,7 +11,11 @@ import { Renderer } from "./renderer/Renderer";
 import {
   clearCachedSessionsForRoot,
   deleteCachedSession,
+  getCachedMultiRootSessionList,
   getCachedSession,
+  getCachedSessionList,
+  saveCachedMultiRootSessionList,
+  saveCachedSessionList,
   sessionService,
   setCachedSessionRelatedFiles,
   syncSession,
@@ -83,6 +87,10 @@ import {
   type GitStatusPayload,
   type GitWorktreeItem,
 } from "./services/git";
+import {
+  relatedFileStatKey,
+  useRelatedFileStats,
+} from "./hooks/useRelatedFileStats";
 import {
   DEFAULT_DIRECTORY_SORT_MODE,
   type DirectorySortMode,
@@ -1929,14 +1937,19 @@ export function App({ onGoHome }: AppProps) {
       const cached = await getCachedTaskDetails(targetRoot);
       if (cached.length > 0) {
         applyTaskDetails(targetRoot, cached, false);
+        setKanbanTasksLoading(false);
       }
       const meta = await getCachedTaskMeta(targetRoot);
-      const details = await fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" });
+      const [details, recent] = await Promise.all([
+        fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" }),
+        !force && meta?.newestUpdatedAt
+          ? fetchTaskDetails(targetRoot, { limit: 20 })
+          : Promise.resolve([]),
+      ]);
       if (details.length > 0) {
         applyTaskDetails(targetRoot, details);
       }
-      if (!force && meta?.newestUpdatedAt) {
-        const recent = await fetchTaskDetails(targetRoot, { limit: 20 });
+      if (recent.length > 0) {
         applyTaskDetails(targetRoot, recent);
       }
     } catch (err) {
@@ -3516,6 +3529,11 @@ export function App({ onGoHome }: AppProps) {
         return null;
       }
       const cacheKey = rootSessionKey(resolvedRoot, resolvedKey);
+      const cachedBeforeSync = sessionCacheRef.current[cacheKey];
+      const resumeCursor = sessionService.getEventCursor(
+        resolvedRoot,
+        resolvedKey,
+      );
       const inflight = loadingSessionRef.current[cacheKey];
       const request =
         inflight ||
@@ -3526,9 +3544,35 @@ export function App({ onGoHome }: AppProps) {
         loadingSessionRef.current[cacheKey] = request;
       }
       const syncResult = await request;
-      const fullSession = syncResult?.session;
+      let fullSession = syncResult?.session;
       if (!fullSession) {
         return null;
+      }
+      if (resumeCursor) {
+        const incomingExchanges = Array.isArray((fullSession as any).exchanges)
+          ? ((fullSession as any).exchanges as Exchange[])
+          : [];
+        const hasPendingTurn = incomingExchanges.some(
+          (exchange) => Number((exchange as any)?.seq || 0) === 0,
+        );
+        const localTransient = Array.isArray((cachedBeforeSync as any)?.exchanges)
+          ? (((cachedBeforeSync as any).exchanges as Exchange[]).filter(
+              (exchange) => Number((exchange as any)?.seq || 0) === 0,
+            ))
+          : [];
+        if (hasPendingTurn && localTransient.length > 0) {
+          fullSession = {
+            ...(fullSession as any),
+            exchanges: [
+              ...incomingExchanges.filter(
+                (exchange) => Number((exchange as any)?.seq || 0) > 0,
+              ),
+              ...localTransient,
+            ],
+          } as Session;
+        } else {
+          sessionService.clearEventCursor(resolvedRoot, resolvedKey);
+        }
       }
       const serverPending =
         typeof (fullSession as any)?.pending === "boolean"
@@ -4183,10 +4227,12 @@ export function App({ onGoHome }: AppProps) {
         const isUserShellStream =
           incomingMeta.source === "userShell" && incomingMeta.phase === "stream";
         if (isUserShellStream) {
-          const mergedContent = [
-            ...((existing?.content || []) as any[]),
-            ...((incoming?.content || []) as any[]),
-          ];
+          const mergedContent = incomingMeta.replaySnapshot === true
+            ? [...((incoming?.content || []) as any[])]
+            : [
+                ...((existing?.content || []) as any[]),
+                ...((incoming?.content || []) as any[]),
+              ];
           const totalText = mergedContent.map((item) => item?.text || "").join("");
           if (totalText.length > 256 * 1024) {
             merged.content = [{ type: "text", text: totalText.slice(-256 * 1024) }];
@@ -4797,6 +4843,23 @@ export function App({ onGoHome }: AppProps) {
       },
     ) => {
       try {
+        const shouldReplace = options?.replace || (!options?.beforeTime && !options?.afterTime);
+        if (shouldReplace) {
+          const cached = await getCachedSessionList(rootID);
+          if (cached && (options?.force || currentRootIdRef.current === rootID)) {
+            const cachedItems = [...cached.items, ...cached.pinnedItems]
+              .map((item) => toSessionItem(rootID, item))
+              .filter((item): item is SessionItem => !!item);
+            setHasMoreSessions(cached.totalCount > cached.items.length);
+            setSessions(
+              applyPinnedSnapshotToSessions(
+                mergeSessionItems([], cachedItems),
+                rootID,
+                cached.pinnedKeys,
+              ),
+            );
+          }
+        }
         const payload = await sessionService.fetchSessions(rootID, {
           beforeTime: options?.beforeTime,
           afterTime: options?.afterTime,
@@ -4807,8 +4870,9 @@ export function App({ onGoHome }: AppProps) {
         ].map((item) => toSessionItem(rootID, item)).filter((item): item is SessionItem => !!item);
         if (!options?.force && currentRootIdRef.current !== rootID) return;
         setHasMoreSessions(payload.totalCount > payload.items.length);
-        if (options?.replace || (!options?.beforeTime && !options?.afterTime)) {
+        if (shouldReplace) {
           setSessions(applyPinnedSnapshotToSessions(mergeSessionItems([], next), rootID, payload.pinnedKeys));
+          void saveCachedSessionList(rootID, payload);
           return;
         }
         setSessions((prev) =>
@@ -4863,6 +4927,30 @@ export function App({ onGoHome }: AppProps) {
     }
     setMultiProjectSessionsLoading(true);
     try {
+      const cachedGroups = await getCachedMultiRootSessionList();
+      if (cachedGroups?.length) {
+        setMultiProjectSessionGroups(
+          applyPendingToMultiProjectGroups(
+            cachedGroups.map((group): MultiProjectSessionGroup => ({
+              rootId: group.rootId,
+              rootName: group.rootName || managedRootByIdRef.current[group.rootId]?.display_name || group.rootId,
+              latestSessionTime: group.latestSessionTime,
+              sessions: applyPinnedSnapshotToSessions(
+                mergeSessionItems(
+                  [],
+                  [...group.items, ...group.pinnedItems]
+                    .map((item) => toSessionItem(group.rootId, { ...(item as any), root_id: group.rootId }))
+                    .filter((item): item is SessionItem => !!item),
+                ),
+                group.rootId,
+                group.pinnedKeys,
+              ),
+              totalCount: group.totalCount,
+            })),
+            multiProjectPendingRef.current,
+          ),
+        );
+      }
       const groups = await sessionService.fetchMultiRootSessions(MULTI_PROJECT_SESSION_LIMIT);
       const nextGroups = groups.map((group: MultiRootSessionGroup): MultiProjectSessionGroup => ({
         rootId: group.rootId,
@@ -4884,6 +4972,7 @@ export function App({ onGoHome }: AppProps) {
       setMultiProjectSessionGroups(
         applyPendingToMultiProjectGroups(nextGroups, multiProjectPendingRef.current),
       );
+      void saveCachedMultiRootSessionList(groups);
     } finally {
       setMultiProjectSessionsLoading(false);
     }
@@ -11434,6 +11523,12 @@ export function App({ onGoHome }: AppProps) {
     );
   };
   const currentRootSlashCommandResult = slashCommandResultForSession(currentRootId, null);
+  const sessionViewerComposerOverlayInset =
+    String((actionBarSession as any)?.agent || "").toLowerCase() === "codex" ||
+    (actionBarSession as any)?.plan_mode ||
+    pendingPlanMode
+      ? 20
+      : 0;
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
@@ -11444,6 +11539,7 @@ export function App({ onGoHome }: AppProps) {
       )}
       targetSeq={selectedSession?.search_seq}
       targetSeqRequestKey={selectedSession?.search_target_id}
+      composerOverlayInset={sessionViewerComposerOverlayInset}
       loading={selectedSessionLoading}
       rootId={selectedSession?.root_id || currentRootId}
       rootPath={
@@ -12067,6 +12163,19 @@ export function App({ onGoHome }: AppProps) {
     },
     [currentRootId, relatedSessionRootId, selectedSessionRelatedFiles],
   );
+  const gitStatsRefreshKey = useMemo(
+    () =>
+      Object.entries(gitFileStatsByPath)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([path, stats]) => `${path}:${stats.status}:${stats.additions}:${stats.deletions}`)
+        .join("|"),
+    [gitFileStatsByPath],
+  );
+  const selectedRelatedFileStatsByKey = useRelatedFileStats(
+    relatedSessionRootId || currentRootId,
+    selectedSessionRelatedFiles,
+    gitStatsRefreshKey,
+  );
   const renderRootRelatedContent = (root: string): React.ReactNode => {
     if (!root || root !== currentRootId || root !== relatedSessionRootId) {
       return null;
@@ -12115,12 +12224,14 @@ export function App({ onGoHome }: AppProps) {
                 </div>
               ) : null}
               {group.files.map((file) => {
-          const stats = gitFileStatsByPath[file.path];
-          const fileSelectionKey = relatedFileSelectionKey(file);
-          const isSelected = relatedSelectedFileKey
-            ? fileSelectionKey === relatedSelectedFileKey
-            : file.path === relatedSelectedPath;
-          return (
+                const stats =
+                  selectedRelatedFileStatsByKey[relatedFileStatKey(file)] ||
+                  gitFileStatsByPath[file.path];
+                const fileSelectionKey = relatedFileSelectionKey(file);
+                const isSelected = relatedSelectedFileKey
+                  ? fileSelectionKey === relatedSelectedFileKey
+                  : file.path === relatedSelectedPath;
+                return (
             <div key={`${file.head || "legacy"}:${file.path}`} style={{ display: "flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
               <button
                 type="button"
@@ -14557,6 +14668,7 @@ export function App({ onGoHome }: AppProps) {
                 )}
                 targetSeq={currentSession?.search_seq}
                 targetSeqRequestKey={currentSession?.search_target_id}
+                composerOverlayInset={sessionViewerComposerOverlayInset}
                 loading={
                   drawerLoadingSessionByRoot[currentRootId || ""] ===
                   (drawerSessionSnapshot.key || drawerSessionSnapshot.session_key)
