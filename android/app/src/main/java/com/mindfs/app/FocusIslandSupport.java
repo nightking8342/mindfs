@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
@@ -54,6 +55,13 @@ final class FocusIslandSupport {
     static void refresh(Context context) {
         int protocol = 0;
         boolean permission = false;
+        Log.i(TAG, "refresh device manufacturer=" + Build.MANUFACTURER
+            + " brand=" + Build.BRAND
+            + " model=" + Build.MODEL
+            + " sdk=" + Build.VERSION.SDK_INT
+            + " release=" + Build.VERSION.RELEASE
+            + " display=" + Build.DISPLAY
+            + " incremental=" + Build.VERSION.INCREMENTAL);
         try {
             protocol = Settings.System.getInt(
                 context.getContentResolver(), "notification_focus_protocol", 0);
@@ -65,7 +73,9 @@ final class FocusIslandSupport {
         }
         protocolVersion = protocol;
         focusPermission = permission;
-        Log.i(TAG, "focus protocol=" + protocol + " permission=" + permission);
+        Log.i(TAG, "focus support result protocol=" + protocol
+            + " permission=" + permission
+            + " enabled=" + isEnabled());
     }
 
     static boolean isEnabled() {
@@ -78,8 +88,13 @@ final class FocusIslandSupport {
             Bundle extras = new Bundle();
             extras.putString("package", context.getPackageName());
             Bundle result = context.getContentResolver().call(uri, "canShowFocus", null, extras);
-            return result != null && result.getBoolean("canShowFocus", false);
+            boolean allowed = result != null && result.getBoolean("canShowFocus", false);
+            Log.i(TAG, "canShowFocus resultPresent=" + (result != null)
+                + " allowed=" + allowed
+                + " resultKeys=" + (result == null ? "[]" : result.keySet()));
+            return allowed;
         } catch (Exception ex) {
+            Log.w(TAG, "canShowFocus call failed", ex);
             return false;
         }
     }
@@ -145,9 +160,22 @@ final class FocusIslandSupport {
                        long chronometerBase, String elapsedText, PendingIntent openIntent,
                        String agentName) {
         if (!isEnabled() || notification == null) {
+            Log.w(TAG, "attach skipped enabled=" + isEnabled()
+                + " notificationPresent=" + (notification != null)
+                + " protocol=" + protocolVersion
+                + " permission=" + focusPermission);
             return;
         }
         try {
+            Log.i(TAG, "attach start replying=" + replying
+                + " askUserWaiting=" + askUserWaiting
+                + " agent=" + safeLog(agentName)
+                + " agentIconRes=" + agentDrawableId(agentName)
+                + " sessionTitleLength=" + lengthOf(sessionTitle)
+                + " projectTitleLength=" + lengthOf(projectTitle)
+                + " chatTitleLength=" + lengthOf(chatTitle)
+                + " chatContentLength=" + lengthOf(chatContent)
+                + " questionLength=" + lengthOf(askUserQuestion));
             Bundle pics = new Bundle();
             pics.putParcelable(PIC_APP, roundAppIcon(context));
             // 当前 agent 的图标：走模板 picInfo 通道（非 RemoteViews），让摘要态大岛/小岛
@@ -186,9 +214,95 @@ final class FocusIslandSupport {
             notification.extras.putParcelable("miui.focus.rv.island.expand",
                 buildCard(context, replying, askUserWaiting, askUserQuestion, sessionTitle, projectTitle, chatContent,
                     chronometerBase, elapsedText, openIntent, true, agentName));
+            logNotificationDiagnostics("attach complete", notification);
         } catch (Exception ex) {
             Log.w(TAG, "attach island params failed", ex);
+            logNotificationDiagnostics("attach failed", notification);
         }
+    }
+
+    /**
+     * 记录交给 NotificationManager 前的超级岛数据形态。这里故意不记录 JSON 值，
+     * 避免把项目名、会话名或回复摘要写入 logcat；仅记录键名、长度和 Parcelable 类型。
+     */
+    static void logNotificationDiagnostics(String stage, Notification notification) {
+        if (notification == null) {
+            Log.w(TAG, stage + " notification=null");
+            return;
+        }
+        Bundle extras = notification.extras;
+        if (extras == null) {
+            Log.w(TAG, stage + " extras=null");
+            return;
+        }
+        String custom = extras.getString("miui.focus.param.custom");
+        Object rv = extras.get("miui.focus.rv");
+        Object rvNight = extras.get("miui.focus.rvNight");
+        Object rvExpand = extras.get("miui.focus.rv.island.expand");
+        Object pics = extras.get("miui.focus.pics");
+        Log.i(TAG, stage
+            + " sdk=" + Build.VERSION.SDK_INT
+            + " notificationChannel=" + notificationChannel(notification)
+            + " extrasKeys=" + extras.keySet()
+            + " customPresent=" + (custom != null)
+            + " customLength=" + lengthOf(custom)
+            + " customKeys=" + jsonKeys(custom)
+            + " picsType=" + valueType(pics)
+            + " rvType=" + valueType(rv)
+            + " rvNightType=" + valueType(rvNight)
+            + " rvExpandType=" + valueType(rvExpand));
+        if (pics instanceof Bundle) {
+            Log.i(TAG, stage + " picsKeys=" + ((Bundle) pics).keySet());
+        }
+        Log.i(TAG, stage + " focusMode="
+            + (custom != null || rv != null ? "remote_views" : "template_or_none")
+            + " focusParamPresent=" + (extras.getString("miui.focus.param") != null)
+            + " effectSrcPresent=" + (extras.getString("miui.effect.src") != null)
+            + " effectColorPresent=" + (extras.getString("miui.effect.color") != null));
+    }
+
+    private static String notificationChannel(Notification notification) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return "<pre-o>";
+        }
+        return safeLog(notification.getChannelId());
+    }
+
+    private static String valueType(Object value) {
+        return value == null ? "null" : value.getClass().getName();
+    }
+
+    private static String jsonKeys(String value) {
+        if (value == null || value.isEmpty()) {
+            return "[]";
+        }
+        try {
+            JSONObject json = new JSONObject(value);
+            StringBuilder keys = new StringBuilder("[");
+            java.util.Iterator<String> iterator = json.keys();
+            boolean first = true;
+            while (iterator.hasNext()) {
+                if (!first) {
+                    keys.append(", ");
+                }
+                keys.append(iterator.next());
+                first = false;
+            }
+            return keys.append(']').toString();
+        } catch (Exception ex) {
+            return "<invalid-json>";
+        }
+    }
+
+    private static int lengthOf(String value) {
+        return value == null ? 0 : value.length();
+    }
+
+    private static String safeLog(String value) {
+        if (value == null || value.isEmpty()) {
+            return "<empty>";
+        }
+        return value.replace('\n', ' ').replace('\r', ' ');
     }
 
     /**

@@ -8,6 +8,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
 import android.net.Uri;
@@ -118,11 +119,13 @@ public class ReplyPollerService extends Service {
         executor = Executors.newSingleThreadScheduledExecutor();
         createChannels();
         loadConfig();
+        logNotificationEnvironment("onCreate");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
+        Log.i(TAG, "onStartCommand action=" + action + " flags=" + flags + " startId=" + startId);
         if (ACTION_CONFIGURE.equals(action)) {
             configure(intent);
             return START_NOT_STICKY;
@@ -227,7 +230,10 @@ public class ReplyPollerService extends Service {
             stopSelf();
             return;
         }
-        Log.i(TAG, "resume polling apiBaseUrl=" + apiBaseUrl);
+        Log.i(TAG, "resume polling apiBaseUrl=" + apiBaseUrl
+            + " e2eeRequired=" + e2eeRequired
+            + " e2eeReady=" + hasE2EESession());
+        logNotificationEnvironment("resume");
         running = true;
         startForegroundCompat(FOREGROUND_ID, buildReplyPlaceholderNotification());
         executor.execute(() -> FocusIslandSupport.refresh(this));
@@ -325,6 +331,10 @@ public class ReplyPollerService extends Service {
         InputStream stream = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
         String body = readAll(stream);
         boolean protectedResponse = "1".equals(safe(conn.getHeaderField(E2EE_HEADER)));
+        Log.i(TAG, "replying-sessions response host=" + url.getHost()
+            + " status=" + status
+            + " bodyLength=" + body.length()
+            + " protected=" + protectedResponse);
         conn.disconnect();
         if (status < 200 || status >= 300) {
             if (status == 401 && e2eeRequired) {
@@ -361,7 +371,11 @@ public class ReplyPollerService extends Service {
             state.askUserWaiting = item.optBoolean("askUserWaiting", false);
             state.askUserQuestion = safe(item.optString("askUserQuestion", ""));
             state.status = ReplyStatus.REPLYING;
-            Log.i(TAG, "fetched session=" + sessionKey + " summaryLength=" + state.summary.length());
+            Log.i(TAG, "fetched session=" + sessionKey
+                + " agent=" + safeLog(state.agent)
+                + " summaryLength=" + state.summary.length()
+                + " askUserWaiting=" + state.askUserWaiting
+                + " questionLength=" + state.askUserQuestion.length());
             next.put(sessionKey, state);
         }
         return next;
@@ -573,16 +587,28 @@ public class ReplyPollerService extends Service {
         if (signature.equals(notificationSignatures.get(notificationId))) {
             return;
         }
+        Log.i(TAG, "notify begin id=" + notificationId
+            + " mode=" + notificationMode
+            + " focusEnabled=" + FocusIslandSupport.isEnabled()
+            + " signatureHash=" + signature.hashCode());
+        FocusIslandSupport.logNotificationDiagnostics("before notify id=" + notificationId, notification);
         notificationManager.notify(notificationId, notification);
         notificationSignatures.put(notificationId, signature);
+        Log.i(TAG, "notify complete id=" + notificationId);
     }
 
     private void startForegroundIfChanged(int notificationId, Notification notification, String signature) {
         if (signature.equals(notificationSignatures.get(notificationId))) {
             return;
         }
+        Log.i(TAG, "startForeground begin id=" + notificationId
+            + " mode=" + notificationMode
+            + " focusEnabled=" + FocusIslandSupport.isEnabled()
+            + " signatureHash=" + signature.hashCode());
+        FocusIslandSupport.logNotificationDiagnostics("before startForeground id=" + notificationId, notification);
         startForegroundCompat(notificationId, notification);
         notificationSignatures.put(notificationId, signature);
+        Log.i(TAG, "startForeground complete id=" + notificationId);
     }
 
     private String buildGroupSummarySignature(List<ReplyState> states) {
@@ -953,6 +979,9 @@ public class ReplyPollerService extends Service {
         );
         alert.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         notificationManager.createNotificationChannel(alert);
+        Log.i(TAG, "notification channels created progress=" + PROGRESS_CHANNEL_ID
+            + " visible=" + VISIBLE_PROGRESS_CHANNEL_ID
+            + " alert=" + ALERT_CHANNEL_ID);
     }
 
     private Uri replyAlertSoundUri() {
@@ -960,11 +989,45 @@ public class ReplyPollerService extends Service {
     }
 
     private void startForegroundCompat(int notificationId, Notification notification) {
+        Log.i(TAG, "startForegroundCompat id=" + notificationId
+            + " sdk=" + Build.VERSION.SDK_INT
+            + " channel=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? notification.getChannelId() : "<pre-o>"));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(notificationId, notification);
         }
+    }
+
+    private void logNotificationEnvironment(String stage) {
+        boolean postNotifications = Build.VERSION.SDK_INT < 33
+            || checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                == PackageManager.PERMISSION_GRANTED;
+        Log.i(TAG, stage
+            + " device manufacturer=" + Build.MANUFACTURER
+            + " brand=" + Build.BRAND
+            + " model=" + Build.MODEL
+            + " sdk=" + Build.VERSION.SDK_INT
+            + " release=" + Build.VERSION.RELEASE
+            + " display=" + Build.DISPLAY
+            + " notificationsEnabled=" + (notificationManager != null
+                && notificationManager.areNotificationsEnabled())
+            + " postNotifications=" + postNotifications);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
+            logChannel(PROGRESS_CHANNEL_ID);
+            logChannel(VISIBLE_PROGRESS_CHANNEL_ID);
+            logChannel(ALERT_CHANNEL_ID);
+        }
+    }
+
+    private void logChannel(String channelId) {
+        NotificationChannel channel = notificationManager.getNotificationChannel(channelId);
+        Log.i(TAG, "channel id=" + channelId
+            + " present=" + (channel != null)
+            + " importance=" + (channel == null ? -1 : channel.getImportance())
+            + " blocked=" + (channel != null
+                && channel.getImportance() == NotificationManager.IMPORTANCE_NONE));
     }
 
     private void stopForegroundCompat() {
@@ -1021,6 +1084,13 @@ public class ReplyPollerService extends Service {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String safeLog(String value) {
+        if (value == null || value.isEmpty()) {
+            return "<empty>";
+        }
+        return value.replace('\n', ' ').replace('\r', ' ');
     }
 
     private static int notificationIdFor(String sessionKey) {
