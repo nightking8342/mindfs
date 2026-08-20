@@ -46,6 +46,12 @@ make verify-release TAG=v1.2.3                # 验证已签名的 manifest 与�
 
 Windows 环境额外要点：`make` 目标里大量使用 `install(1)`、`bash scripts/*.sh`，需要 Git Bash / MSYS 环境；纯 PowerShell 下应直接调用底层的 `go build ./cli/cmd` 和 `cd web && npm run build`。
 
+### 改动验证 / 部署的职责区分
+
+- **前端改动（`web/`）**：走常驻的 Vite dev server 验证，改完只需 `cd web && npm run typecheck`。**不要**为前端改动触发部署——dev server 即时热更，部署反而打断流程。
+- **Go 后端改动（`server/`）**：先 `go test ./server/internal/... -run TestXxx -v` 跑相关单测（注意 Windows 本地存在已知环境性失败，以 CI 为权威门槛，见上文），**真机验证再走部署**。后端改动才需要构建二进制并触发部署（本机部署规范见 @docs/windows-redeploy.md；只改 Go 时不必重跑 `web/build`）。
+- 跨层排查（后端到前端通知等）可同时用 dev server 看前端 + 部署跑后端，但改动落地推送到仓库或部署要以对应层各自的验证门禁为准。
+
 ## 部署到本机（Windows）
 
 用户常通过 MindFS 自身托管的会话来指挥 Agent，此时进程树是 `mindfs.exe → claude.exe / codex.exe → bash.exe`。停服务走 `taskkill /T`（树杀），**在会话里直接停 mindfs 会把 Agent 自己一起杀死**，部署卡在半路、服务起不来。
