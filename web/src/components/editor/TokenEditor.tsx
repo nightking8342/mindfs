@@ -1,4 +1,5 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
@@ -17,6 +18,7 @@ import {
   KEY_BACKSPACE_COMMAND,
   KEY_DELETE_COMMAND,
   EditorConfig,
+  EditorState,
   KEY_ENTER_COMMAND,
   LexicalEditor,
   NodeKey,
@@ -384,17 +386,21 @@ function pasteEventHasFiles(event: ClipboardEvent | InputEvent | KeyboardEvent):
 }
 
 function isKeyboardPasteInput(event: InputEvent): boolean {
-  const data = event.data || "";
-  const hasInlineBreak = data.includes("\n") || data.includes("\r");
-  // IME 组合态（含语音输入法的 AI 整理）产出的多行输入不是粘贴：
-  // 放行给原生路径，避免 preventDefault 拦掉输入法自己的替换/整理动作。
+  // IME 组合态（含语音输入法 AI 整理的刷新式提交）不是粘贴：
+  // 只凭 data 里的换行无法区分「真·多行粘贴」与「语音/IME 的分片替换」，
+  // 一旦误判成粘贴接管并 preventDefault，输入法的替换/整理动作被砍掉、
+  // 只剩最后一个分片 —— 这是语音输入「丢段」的根源。
+  // 因此只认硬信号（inputType/dataTransfer），组合类输入一律放行给 Lexical/浏览器原生。
   if (event.isComposing) {
+    return false;
+  }
+  // 组合类 inputType（语音/IME 专属）同样不是粘贴，放行给原生。
+  if (isAndroidImeInput(event)) {
     return false;
   }
   return event.inputType === "insertFromPaste"
     || event.inputType === "insertFromPasteAsQuotation"
-    || !!event.dataTransfer
-    || hasInlineBreak;
+    || !!event.dataTransfer;
 }
 
 function isAndroidWebViewLikeRuntime(): boolean {
@@ -525,6 +531,75 @@ function EditorBridge({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [rootElement, setRootElement] = useState<HTMLDivElement | null>(null);
   const androidImeRepairTimerRef = useRef<number | null>(null);
+  // [IME-FIX] 见下方 useEffect 里 scheduleMultilineCompositionFix 的注释。
+  // 组合开始前的完整 editor state 快照（含 token 节点与选区），用于事后重建。
+  const compositionSnapshotRef = useRef<EditorState | null>(null);
+  // 组合过程中最后一次 beforeinput 给出的 data —— compositionend 自带的 data 已被证实残缺，
+  // 只有这个才是输入法的完整意图。
+  const lastCompositionDataRef = useRef("");
+  // Lexical 在「组合文本以换行结尾」时会合成一个 event === null 的 KEY_ENTER_COMMAND，
+  // 它不是用户按键，不该触发发送。这里记一个短时间窗把它吞掉。
+  const suppressSyntheticEnterUntilRef = useRef(0);
+  // [IME-DIAG] 页面内诊断浮窗（?imediag=1 开启）：记录最近输入事件与编辑器文本量，用于定位语音输入丢段
+  const [diagLines, setDiagLines] = useState<string[]>([]);
+  const diagOn = useMemo(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("imediag"), []);
+  const pushDiag = useCallback((line: string) => {
+    if (!diagOn) return;
+    setDiagLines((prev) => [...prev.slice(-19), line]);
+  }, [diagOn]);
+  // [IME-DIAG] 真机上没法看控制台，日志靠这个按钮导出。
+  // 注意：dev server 走 http://<局域网IP>:5173，是**非安全上下文**，`navigator.clipboard`
+  // 根本不存在；而 `await import(...)` 会先丢掉用户手势（transient activation），
+  // 之后再调剪贴板 API 也会被拒。所以同步的 execCommand 路径必须排在最前面。
+  const [copyState, setCopyState] = useState<"" | "ok" | "fail">("");
+  const [rawOpen, setRawOpen] = useState(false);
+  const copyDiag = useCallback(() => {
+    const text = diagLines.join("\n");
+    if (text === "") return;
+    let ok = false;
+    try {
+      const holder = document.createElement("textarea");
+      holder.value = text;
+      holder.setAttribute("readonly", "");
+      holder.style.position = "fixed";
+      holder.style.top = "0";
+      holder.style.left = "0";
+      holder.style.opacity = "0";
+      document.body.appendChild(holder);
+      holder.focus({ preventScroll: true });
+      holder.setSelectionRange(0, text.length);
+      ok = document.execCommand("copy");
+      document.body.removeChild(holder);
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      setCopyState("ok");
+      return;
+    }
+    // 原生壳内 Capacitor 插件可用；浏览器安全上下文下退回 navigator.clipboard。
+    void (async () => {
+      try {
+        const mod = await import("@capacitor/clipboard");
+        await mod.Clipboard.write({ string: text });
+        setCopyState("ok");
+        return;
+      } catch { /* Fall through to the browser clipboard API. */ }
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopyState("ok");
+      } catch {
+        // 都不行就展开原文，让用户长按全选。
+        setCopyState("fail");
+        setRawOpen(true);
+      }
+    })();
+  }, [diagLines]);
+  useEffect(() => {
+    if (copyState === "") return;
+    const timer = window.setTimeout(() => setCopyState(""), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
 
   useEffect(() => {
     return editor.registerRootListener((rootElement) => {
@@ -637,21 +712,223 @@ function EditorBridge({
       });
     };
     const handlePaste = (event: ClipboardEvent) => insertFromNativePaste(event);
+    // [IME-DIAG] 不可见字符可视化：⟨Z⟩=U+200B(Lexical 组合占位) ⟨N⟩=NBSP ⏎=换行
+    const vis = (value: string, max: number) =>
+      value
+        .replace(/​/g, "⟨Z⟩")
+        .replace(/ /g, "⟨N⟩")
+        .replace(/\n/g, "⏎")
+        .slice(0, max);
+    // [IME-DIAG] 抓浏览器插入组合文本时的**原始** DOM 变更。
+    // `shape` 是在 input 的捕获阶段读的，但那时 Lexical 的 MutationObserver（microtask）
+    // 往往已跑完并按 editor state 重排过 DOM，看不到中间态。MutationRecord 是快照、
+    // 不受后续修改影响，所以改用「beforeinput 清队列 → input 里取出」的方式。
+    // 注意：回调被触发时队列会被交给回调并清空，所以必须在回调里累积，
+    // 只靠 takeRecords() 会漏掉 microtask checkpoint 之前的全部记录。
+    let pendingMutations: MutationRecord[] = [];
+    const mutationLog = new MutationObserver((records) => {
+      pendingMutations = pendingMutations.concat(records);
+    });
+    if (diagOn) {
+      mutationLog.observe(rootElement, {
+        characterData: true,
+        characterDataOldValue: true,
+        childList: true,
+        subtree: true,
+      });
+    }
+    const resetMutations = () => {
+      mutationLog.takeRecords();
+      pendingMutations = [];
+    };
+    const describeMutations = () => {
+      const records = pendingMutations.concat(mutationLog.takeRecords());
+      pendingMutations = [];
+      if (records.length === 0) return "(none)";
+      const shown = records.slice(0, 6).map((record) => {
+        if (record.type === "characterData") {
+          const target = record.target as CharacterData;
+          return `~"${vis(record.oldValue || "", 18)}"→"${vis(target.nodeValue || "", 18)}"`;
+        }
+        const added = Array.from(record.addedNodes).map((node) => `+${node.nodeName}"${vis(node.textContent || "", 14)}"`);
+        const removed = Array.from(record.removedNodes).map((node) => `-${node.nodeName}"${vis(node.textContent || "", 14)}"`);
+        return [...added, ...removed].join(" ") || "(childList)";
+      });
+      return shown.join(" ") + (records.length > 6 ? ` …+${records.length - 6}` : "");
+    };
+    // [IME-DIAG] beforeinput 的 targetRanges = 浏览器打算替换掉的区间。
+    // 丢段时它是否只覆盖了其中一段，直接说明 WebView 的意图。
+    const targetRangeInfo = (event: InputEvent) => {
+      const ranges = typeof event.getTargetRanges === "function" ? event.getTargetRanges() : [];
+      if (ranges.length === 0) return "none";
+      const range = ranges[0];
+      const start = range.startContainer;
+      const startText = start.nodeType === Node.TEXT_NODE ? start.nodeValue || "" : `<${start.nodeName}>`;
+      const sameContainer = range.startContainer === range.endContainer;
+      return `${vis(startText, 20)}[${range.startOffset},${range.endOffset}]${sameContainer ? "" : "*跨节点*"}`;
+    };
+    const currentText = () => {
+      let t = "";
+      try { editor.getEditorState().read(() => { t = $getRoot().getTextContent(); }); } catch { /* ignore */ }
+      return `${t.length}:${vis(t, 60)}`;
+    };
+    const currentDom = () => (rootElement ? vis(rootElement.innerText, 60) : "");
+    // [IME-DIAG] DOM 结构摘要：验证浏览器是否把含换行的组合文本拆成了多个块/文本节点。
+    // 形如 `P[SPAN12,BR0,SPAN8]` 表示段落里被插了 <br> 且文本分成两个节点。
+    const domShape = () => {
+      if (!rootElement) return "";
+      const describe = (node: ChildNode): string => {
+        if (node.nodeType === Node.TEXT_NODE) return `#t${(node.nodeValue || "").length}`;
+        return `${node.nodeName}${(node.textContent || "").length}`;
+      };
+      return Array.from(rootElement.childNodes)
+        .map((block) => {
+          if (block.nodeType === Node.TEXT_NODE) return describe(block);
+          const kids = Array.from(block.childNodes).map(describe).join(",");
+          return `${block.nodeName}[${kids}]`;
+        })
+        .join("|")
+        .slice(0, 90);
+    };
+    // [IME-DIAG] Lexical 的 $updateSelectedTextFromDOM 只读 domSelection.anchorNode 这一个
+    // 文本节点，并用它整体覆盖组合 TextNode。这里打印它，确认丢段时它是否只剩一段。
+    const anchorInfo = () => {
+      const selection = window.getSelection();
+      const node = selection?.anchorNode;
+      if (!selection || !node) return "none";
+      const value = node.nodeType === Node.TEXT_NODE ? node.nodeValue || "" : `<${node.nodeName}>`;
+      return `${vis(value, 40)}@${selection.anchorOffset}`;
+    };
+    // [IME-DIAG] 祖先捕获阶段先于 rootElement 上的任何监听器（含 Lexical 自身），
+    // 用于验证「组合开始前的干净快照」是否拿得到——后续修复方案依赖它。
+    // [IME-FIX] 语音输入「说一段话、输入法 AI 整理成多段」时丢段的修复。
+    //
+    // 根因在 Lexical 侧，且拦不住：
+    //   1. `insertCompositionText` 的 beforeinput 被 Lexical 直接放行（Lexical.dev.mjs
+    //      的 onBeforeInput），且按 Input Events 规范该事件不可取消，preventDefault 无效。
+    //   2. 浏览器把 data 里的 `\n` 落成 DOM 时会新建节点（<br> / 第二个文本节点）。
+    //   3. Lexical 的 MutationObserver → flushMutations 把「editor state 里没有的 DOM」
+    //      一律 removeChild 掉（源码注释：Lexical 的 editor state 是 source of truth），
+    //      同时用残留的那一个文本节点覆盖 TextNode —— 换行后的那一段就此消失。
+    //      这一步在 microtask 里跑，早于 input 事件派发，事件层面无从拦截。
+    //   4. compositionend 时输入法自己给的 data 也已残缺，且以 `\n` 结尾会命中
+    //      $onCompositionEndImpl 的分支：合成一个 KEY_ENTER_COMMAND 后直接 return，
+    //      跳过最后的文本落库。
+    //
+    // 所以只能事后重建：组合开始前存一份 editor state 快照，组合结束后若发现内容被吞，
+    // 就恢复快照并用「最后一次 beforeinput 的完整 data」重新插入。用 setEditorState 而不是
+    // 拼字符串，是为了原样保住 token 节点与选区。只在 data 含 `\n` 时激活，普通输入不走这条路。
+    const scheduleMultilineCompositionFix = (data: string) => {
+      const snapshot = compositionSnapshotRef.current;
+      compositionSnapshotRef.current = null;
+      // setEditorState 不接受空状态（会 invariant 抛错）。
+      if (!snapshot || snapshot.isEmpty() || data === "") {
+        return;
+      }
+      // 等到 Lexical 的 compositionend 处理与 React 的 onCompositionEnd 都跑完再动手：
+      // 我们挂在 capture 阶段，比它们都早，同步改会被随后覆盖。
+      window.setTimeout(() => {
+        let current = "";
+        editor.getEditorState().read(() => { current = $getRoot().getTextContent(); });
+        // 内容已完整就不动——避免在没出问题的机型上白白重建一次状态。
+        if (current.includes(data)) {
+          if (diagOn) pushDiag(`FIX skipped (intact) txt="${currentText()}"`);
+          return;
+        }
+        editor.setEditorState(snapshot);
+        editor.update(() => {
+          // 组合已经结束，但 Lexical 可能还留着 compositionKey（Android 分支会提前清、
+          // 其它路径不一定），带着它插入会让 reconciler 再加一次组合占位符。
+          $setCompositionKey(null);
+          $insertPlainTextAtSelection(data);
+        });
+        rootElement.focus({ preventScroll: true });
+        if (diagOn) pushDiag(`FIX applied data="${vis(data, 40)}" txt="${currentText()}"`);
+      }, 0);
+    };
+    const handleCompositionStartAhead = () => {
+      lastCompositionDataRef.current = "";
+      // 在祖先的捕获阶段取快照，早于 Lexical 自己的 compositionstart（它会插入
+      // 组合占位符并设 compositionKey），拿到的才是干净的组合前状态。
+      compositionSnapshotRef.current = editor.getEditorState();
+      if (!diagOn) return;
+      resetMutations();
+      pushDiag(`CS(ahead) txt="${currentText()}" shape=${domShape()}`);
+    };
+    const handleCompositionStart = () => {
+      if (!diagOn) return;
+      pushDiag(`CS(after) txt="${currentText()}" shape=${domShape()}`);
+    };
+    // [IME-DIAG] 记录最后一次 beforeinput 的 data：compositionend 自带的 data 已被证实
+    // 不可靠（只剩第一段），真要补全内容只能靠这个。
     const handleBeforeInput = (event: InputEvent) => {
+      if (event.isComposing && event.data) {
+        lastCompositionDataRef.current = event.data;
+      }
+      if (diagOn) {
+        // 清空队列，让随后 input 里取到的只是这次插入产生的变更
+        resetMutations();
+        pushDiag(
+          `BI:${event.inputType} comp=${event.isComposing} cancelable=${event.cancelable}` +
+          ` data="${vis(event.data || "", 60)}" txt="${currentText()}" tr=${targetRangeInfo(event)}`
+        );
+      }
       if (isKeyboardPasteInput(event)) {
         insertFromNativePaste(event);
         return;
       }
-      if (isAndroidImeInput(event)) {
-        scheduleAndroidImeRepair();
-      }
+      // [IME-FIX-TEST] 组合过程中不再跑 scheduleAndroidImeRepair（它清 _compositionKey + 移 selection，
+      // 会破坏 Lexical 组合文本跟踪、导致多段语音输入丢段）。验证是否解决丢段。
     };
     const handleInput = (event: Event) => {
+      if (!diagOn) return;
       if (typeof InputEvent !== "undefined" && event instanceof InputEvent && isAndroidImeInput(event)) {
-        scheduleAndroidImeRepair();
+        pushDiag(
+          `IN:${event.inputType} data="${vis(event.data || "", 60)}" txt="${currentText()}"` +
+          ` anchor="${anchorInfo()}" shape=${domShape()} mut=${describeMutations()}`
+        );
       }
     };
-    const handleCompositionEnd = () => scheduleAndroidImeRepair();
+    const handleCompositionEnd = (event: Event) => {
+      const endData = typeof CompositionEvent !== "undefined" && event instanceof CompositionEvent
+        ? event.data || ""
+        : "";
+      // compositionend 自带的 data 会残缺（实测只剩第一段），优先用组合过程中
+      // 最后一次 beforeinput 的 data —— 那才是输入法给出的完整文本。
+      const fullData = lastCompositionDataRef.current || endData;
+      lastCompositionDataRef.current = "";
+      const needsMultilineFix = fullData.includes("\n");
+      if (diagOn) {
+        pushDiag(
+          `CE data="${vis(endData, 60)}" full="${vis(fullData, 60)}" fix=${needsMultilineFix}` +
+          ` txt="${currentText()}" shape=${domShape()}`
+        );
+      }
+      if (needsMultilineFix) {
+        // Lexical 随后会因 data 以 `\n` 结尾合成一个 KEY_ENTER_COMMAND，吞掉它。
+        suppressSyntheticEnterUntilRef.current = performance.now() + 600;
+        // 重建会自己把选区放到正确位置，不需要（也不能让）selection 修补插一脚。
+        if (androidImeRepairTimerRef.current !== null) {
+          window.clearTimeout(androidImeRepairTimerRef.current);
+          androidImeRepairTimerRef.current = null;
+        }
+        scheduleMultilineCompositionFix(fullData);
+      } else {
+        compositionSnapshotRef.current = null;
+        scheduleAndroidImeRepair();
+      }
+      if (diagOn) {
+        // Lexical 的 $onCompositionEndImpl 与后续修复都会再改一次，这里复查最终落定的内容。
+        window.requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            pushDiag(`CE+1 txt="${currentText()}" dom="${currentDom()}" shape=${domShape()}`);
+          }, 0);
+        });
+      }
+    };
+    const compositionStartHost: EventTarget = rootElement.parentElement ?? document;
+    compositionStartHost.addEventListener("compositionstart", handleCompositionStartAhead, { capture: true });
+    rootElement.addEventListener("compositionstart", handleCompositionStart, { capture: true });
     rootElement.addEventListener("paste", handlePaste, { capture: true });
     rootElement.addEventListener("beforeinput", handleBeforeInput, { capture: true });
     rootElement.addEventListener("input", handleInput, { capture: true });
@@ -661,24 +938,33 @@ function EditorBridge({
         window.clearTimeout(androidImeRepairTimerRef.current);
         androidImeRepairTimerRef.current = null;
       }
+      mutationLog.disconnect();
+      compositionStartHost.removeEventListener("compositionstart", handleCompositionStartAhead, { capture: true });
+      rootElement.removeEventListener("compositionstart", handleCompositionStart, { capture: true });
       rootElement.removeEventListener("paste", handlePaste, { capture: true });
       rootElement.removeEventListener("beforeinput", handleBeforeInput, { capture: true });
       rootElement.removeEventListener("input", handleInput, { capture: true });
       rootElement.removeEventListener("compositionend", handleCompositionEnd, { capture: true });
     };
-  }, [editor, rootElement]);
+  }, [editor, rootElement, pushDiag, diagOn]);
 
   useEffect(() => {
+    let lastLen = -1;
     return editor.registerUpdateListener(({ editorState }) => {
       editorState.read(() => {
+        const displayText = getDisplayText();
+        if (diagOn && displayText.length !== lastLen && lastLen !== -1) {
+          pushDiag(`TXT ${lastLen}->${displayText.length} "${displayText.slice(0, 30)}"`);
+        }
+        lastLen = displayText.length;
         onChange({
           serializedText: serializeEditor(),
-          displayText: getDisplayText(),
+          displayText,
           activeToken: getActiveTokenFromSelection(),
         });
       });
     });
-  }, [editor, onChange]);
+  }, [editor, onChange, diagOn, pushDiag]);
 
   useEffect(() => {
     return editor.registerCommand(
@@ -704,10 +990,22 @@ function EditorBridge({
   useEffect(() => {
     return editor.registerCommand(
       KEY_ENTER_COMMAND,
-      (event) => onEnter?.(event) ?? false,
+      (event) => {
+        // [IME-FIX] event === null 不是用户按键，而是 Lexical 的 $onCompositionEndImpl
+        // 在「组合文本以换行结尾」时合成 dispatch 的。它会打到发送逻辑上（目前只是靠
+        // ActionBar 里 isComposingRef 的事件顺序侥幸挡住），而换行已由多段修复自己插入，
+        // 所以这里直接吞掉。
+        if (event === null && performance.now() < suppressSyntheticEnterUntilRef.current) {
+          if (diagOn) {
+            pushDiag("ENTER(synthetic) suppressed");
+          }
+          return true;
+        }
+        return onEnter?.(event) ?? false;
+      },
       COMMAND_PRIORITY_HIGH
     );
-  }, [editor, onEnter]);
+  }, [editor, onEnter, diagOn, pushDiag]);
 
   useEffect(() => {
     return editor.registerCommand(
@@ -725,7 +1023,76 @@ function EditorBridge({
     );
   }, [editor, onDeleteToken]);
 
-  return null;
+  if (!diagOn) {
+    return null;
+  }
+  // [IME-DIAG] 定位语音输入丢段的可视诊断浮窗（URL ?imediag=1 开启）
+  return createPortal(
+    <div style={{
+      position: "fixed",
+      right: 8,
+      bottom: 8,
+      zIndex: 2147483647,
+      maxWidth: 360,
+      maxHeight: "56vh",
+      overflowY: "auto",
+      background: "rgba(0,0,0,0.85)",
+      color: "#7cfc00",
+      fontFamily: "monospace",
+      fontSize: 11,
+      lineHeight: 1.4,
+      padding: 6,
+      borderRadius: 4,
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-all",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        <span style={{ color: "#fff", fontWeight: 700 }}>[IME-DIAG]</span>
+        <button
+          type="button"
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={copyDiag}
+          style={{ font: "inherit", color: "#fff", background: "#333", border: "1px solid #666", borderRadius: 3, padding: "0 6px" }}
+        >
+          {copyState === "ok" ? "已复制" : copyState === "fail" ? "失败" : "复制"}
+        </button>
+        <button
+          type="button"
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => setRawOpen((prev) => !prev)}
+          style={{ font: "inherit", color: "#fff", background: "#333", border: "1px solid #666", borderRadius: 3, padding: "0 6px" }}
+        >
+          {rawOpen ? "收起" : "原文"}
+        </button>
+        <button
+          type="button"
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => { setDiagLines([]); setRawOpen(false); }}
+          style={{ font: "inherit", color: "#fff", background: "#333", border: "1px solid #666", borderRadius: 3, padding: "0 6px" }}
+        >
+          清空
+        </button>
+      </div>
+      {rawOpen ? (
+        // 剪贴板全被拒时的兜底：可长按全选的原文框
+        <textarea
+          readOnly
+          value={diagLines.join("\n")}
+          onFocus={(event) => event.currentTarget.select()}
+          style={{
+            width: "100%",
+            height: 200,
+            font: "inherit",
+            color: "#7cfc00",
+            background: "#000",
+            border: "1px solid #666",
+            borderRadius: 3,
+          }}
+        />
+      ) : diagLines.length === 0 ? "(等待输入事件…)" : diagLines.join("\n")}
+    </div>,
+    document.body
+  );
 }
 
 const TokenEditor = forwardRef<TokenEditorHandle, TokenEditorProps>(function TokenEditor(
