@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -428,5 +429,60 @@ func TestToolResultUpdateFallsBackToOnlyPendingTool(t *testing.T) {
 	}
 	if len(update.Content) != 1 || !strings.Contains(update.Content[0].Text, "command output") {
 		t.Fatalf("content = %#v, want command output", update.Content)
+	}
+}
+
+// TestAwaitAskUserQuestionEmitsCompleteAfterAnswer 锁定「用户回答后」claude 会补发
+// 一条 complete 的 ask_user tool_update。缺这条事件时事件流永远以 pending 的
+// ask_user 结尾，stream_hub 的 askUserWaiting 恒为 true，Android 通知会一直显示
+// 「需要你输入」直到本轮结束。
+func TestAwaitAskUserQuestionEmitsCompleteAfterAnswer(t *testing.T) {
+	s := &session{
+		sessionID:    "claude-session",
+		questionWaits: make(map[string]chan askUserAnswerResult),
+	}
+	var updates []types.Event
+	s.OnUpdate(func(event types.Event) {
+		updates = append(updates, event)
+	})
+
+	ctx := context.Background()
+	result := make(chan struct{})
+	go func() {
+		_, _ = s.awaitAskUserQuestion(ctx, claudeagent.QuestionSet{
+			ToolUseID: "ask-1",
+			Questions: []claudeagent.QuestionItem{{
+				Question: "继续？",
+				Options:  []claudeagent.QuestionOption{{Label: "Yes"}},
+			}},
+		})
+		close(result)
+	}()
+
+	// 等待 pending tool_call 发出后再回答。
+	for len(updates) == 0 {
+	}
+	tc, ok := updates[0].Data.(types.ToolCall)
+	if updates[0].Type != types.EventTypeToolCall || !ok || tc.Kind != types.ToolKindAskUser || tc.Status != "running" {
+		t.Fatalf("first event = %#v (want ask_user tool_call)", updates[0])
+	}
+
+	if err := s.AnswerQuestion(ctx, types.AskUserAnswer{
+		ToolUseID: "ask-1",
+		Answers:   map[string]string{"q_0": "Yes"},
+	}); err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	<-result
+
+	if len(updates) != 2 {
+		t.Fatalf("updates = %d, want 2 (tool_call + tool_update)", len(updates))
+	}
+	if updates[1].Type != types.EventTypeToolUpdate {
+		t.Fatalf("second event type = %q, want tool_update", updates[1].Type)
+	}
+	done, ok := updates[1].Data.(types.ToolCall)
+	if !ok || done.Kind != types.ToolKindAskUser || done.Status != "complete" {
+		t.Fatalf("completion tool call = %#v (want ask_user/complete)", updates[1].Data)
 	}
 }

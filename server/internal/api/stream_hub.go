@@ -743,6 +743,17 @@ func agentOf(state *SessionPendingState) string {
 	return ""
 }
 
+// isAskUserEventType 判断 StreamEvent.Type 是否为 tool 调用事件（tool_call 或
+// tool_update）。注意 `updateToEvent`（ws.go）把 EventTypeToolUpdate 落库成
+// "tool_call_update"，而 agenttypes.EventTypeToolUpdate 的常量值是 "tool_update"，
+// 两者不一致；这里必须同时接受两个值，否则 askUserWaiting / askUserQuestionText
+// 会永远跳过 complete 的 tool_update 事件（只见 pending，判成一直在等人回答）。
+func isAskUserEventType(t string) bool {
+	return t == string(agenttypes.EventTypeToolCall) ||
+		t == string(agenttypes.EventTypeToolUpdate) ||
+		t == "tool_call_update"
+}
+
 // askUserWaiting 报告该 pending session 是否正停在 agent 提问（ask_user）等待用户回答。
 // 取事件流中最后一次出现的 ask_user 工具调用：若仍是 running/pending 说明提问还在等
 // 回答；若已 complete/failed 或之后有别的活动，说明已离开提问态。空事件流不算等待。
@@ -752,7 +763,7 @@ func askUserWaiting(state *SessionPendingState) bool {
 	}
 	for i := len(state.ReplyingList) - 1; i >= 0; i-- {
 		ev := state.ReplyingList[i]
-		if ev.Type != string(agenttypes.EventTypeToolCall) && ev.Type != string(agenttypes.EventTypeToolUpdate) {
+		if !isAskUserEventType(ev.Type) {
 			continue
 		}
 		tc, ok := ev.Data.(agenttypes.ToolCall)
@@ -777,7 +788,7 @@ func askUserQuestionText(state *SessionPendingState) string {
 	}
 	for i := len(state.ReplyingList) - 1; i >= 0; i-- {
 		ev := state.ReplyingList[i]
-		if ev.Type != string(agenttypes.EventTypeToolCall) && ev.Type != string(agenttypes.EventTypeToolUpdate) {
+		if !isAskUserEventType(ev.Type) {
 			continue
 		}
 		tc, ok := ev.Data.(agenttypes.ToolCall)

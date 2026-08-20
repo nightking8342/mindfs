@@ -219,6 +219,45 @@ func TestAskUserQuestionTextEmptyWhenAnswered(t *testing.T) {
 	}
 }
 
+// TestAskUserWaitingClearsAfterCompleteRealType 锁定真实链路的 complete 事件类型
+// 也能让 askUserWaiting 归位：updateToEvent（ws.go）把 EventTypeToolUpdate 落库成
+// "tool_call_update"，而 agenttypes.EventTypeToolUpdate 常量值是 "tool_update"。
+// 若 askUserWaiting 只认常量，会跳过这条 complete、永远停在 pending。历史回归：
+// claude/codex 回答后补发 complete，但 Android 通知一直显示「需要你输入」。
+func TestAskUserWaitingClearsAfterCompleteRealType(t *testing.T) {
+	hub := NewStreamHub(nil)
+	hub.SetPendingReply("root-1", "sess-1", "会话一")
+
+	hub.AppendReplyEvent("sess-1", StreamEvent{
+		Type: "tool_call",
+		Data: agenttypes.ToolCall{
+			CallID: "elic_abc_1",
+			Kind:   agenttypes.ToolKindAskUser,
+			Status: "pending",
+		},
+	})
+	// 模拟真实链路：complete 的 tool_update 事件类型是 "tool_call_update"。
+	hub.AppendReplyEvent("sess-1", StreamEvent{
+		Type: "tool_call_update",
+		Data: agenttypes.ToolCall{
+			CallID: "elic_abc_1",
+			Kind:   agenttypes.ToolKindAskUser,
+			Status: "complete",
+		},
+	})
+
+	items := hub.ListReplyingSessions()
+	if len(items) != 1 {
+		t.Fatalf("replying sessions = %d, want 1", len(items))
+	}
+	if items[0].AskUserWaiting {
+		t.Fatalf("AskUserWaiting = true after %q complete, want false", "tool_call_update")
+	}
+	if items[0].AskUserQuestion != "" {
+		t.Fatalf("AskUserQuestion = %q after answered, want empty", items[0].AskUserQuestion)
+	}
+}
+
 // TestAskUserQuestionTextFromAnyJSON 锁定 JSON 化的 questions（[]map[string]any）
 // 也能被宽松解析兜底，防止 WS 重放/历史恢复丢字段。
 func TestAskUserQuestionTextFromAnyJSON(t *testing.T) {

@@ -210,3 +210,57 @@ func TestHandleUnknownPlanAndContextCompactionItems(t *testing.T) {
 		t.Fatalf("compact notice = %#v", updates[1].Data)
 	}
 }
+
+// TestHandleAskUserRequestEmitsCompleteAfterAnswer 锁定「用户回答后」codex 会补发
+// 一条 complete 的 ask_user tool_update。缺这条事件时事件流永远以 pending 的
+// ask_user 结尾，stream_hub 的 askUserWaiting 恒为 true，Android 通知会一直显示
+// 「需要你输入」直到本轮结束。
+func TestHandleAskUserRequestEmitsCompleteAfterAnswer(t *testing.T) {
+	s := &session{questionWaits: make(map[string]chan codexAskUserAnswerResult)}
+	var updates []agenttypes.Event
+	s.OnUpdate(func(event agenttypes.Event) {
+		updates = append(updates, event)
+	})
+
+	req := codextypes.AskUserRequest{
+		ItemID: "ask-1",
+		Questions: []codextypes.AskUserQuestion{
+			{ID: "q0", Question: "继续？", Options: []codextypes.AskUserQuestionOption{{Label: "Yes"}}},
+		},
+	}
+	result := make(chan struct{})
+	go func() {
+		_, _ = s.handleAskUserRequest(req)
+		close(result)
+	}()
+
+	// 等待 pending 事件发出后再回答。
+	for len(updates) == 0 {
+	}
+	if updates[0].Type != agenttypes.EventTypeToolCall {
+		t.Fatalf("first event type = %q, want tool_call", updates[0].Type)
+	}
+	tc, ok := updates[0].Data.(agenttypes.ToolCall)
+	if !ok || tc.Kind != agenttypes.ToolKindAskUser || tc.Status != "running" {
+		t.Fatalf("first tool call = %#v", updates[0].Data)
+	}
+
+	if err := s.AnswerQuestion(context.Background(), agenttypes.AskUserAnswer{
+		ToolUseID: "ask-1",
+		Answers:   map[string]string{"q_0": "Yes"},
+	}); err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	<-result
+
+	if len(updates) != 2 {
+		t.Fatalf("updates = %d, want 2 (tool_call + tool_update)", len(updates))
+	}
+	if updates[1].Type != agenttypes.EventTypeToolUpdate {
+		t.Fatalf("second event type = %q, want tool_update", updates[1].Type)
+	}
+	done, ok := updates[1].Data.(agenttypes.ToolCall)
+	if !ok || done.Kind != agenttypes.ToolKindAskUser || done.Status != "complete" {
+		t.Fatalf("completion tool call = %#v (want ask_user/complete)", updates[1].Data)
+	}
+}

@@ -546,6 +546,16 @@ func (s *session) handleAskUserRequest(req codexsdk.AskUserRequest) (codexsdk.As
 	if len(response.Answers) == 0 {
 		return codexsdk.AskUserResponse{}, errors.New("empty ask user answers")
 	}
+	// 用户已作答：发 complete 的 tool_update 让 askUserWaiting 归位。
+	// 否则事件流永远以这条 pending 的 ask_user 结尾，通知/角标会一直
+	// 显示「需要你输入」直到本轮结束。与 ACP 的 toolCallCompleteUpdate 对齐。
+	done := toolCall
+	done.Status = "complete"
+	s.emit(types.Event{
+		Type:      types.EventTypeToolUpdate,
+		SessionID: s.SessionID(),
+		Data:      done,
+	})
 	return response, nil
 }
 
