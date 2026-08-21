@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -257,11 +256,12 @@ func (s *probeSessionStore) saveLocked() error {
 // Start 启动定期探测
 func (p *Prober) Start(ctx context.Context) {
 	// 首次全量探测放到后台，避免阻塞服务启动和请求处理。
-	// Windows 下深度探测会启动外部 Agent CLI；部分 SDK/CLI 无法由 MindFS
-	// 注入 CREATE_NO_WINDOW，后台启动时会出现空白控制台窗口。
-	if shouldRunBackgroundRuntimeProbe(runtime.GOOS) {
-		go p.safeProbeAll(ctx)
-	}
+	// v0.4.4 曾因弹窗问题在 Windows 下禁用背景运行时探测（导入 8a64c6a）：
+	// 当时 claude/codex SDK 无法注入 CREATE_NO_WINDOW，后台启动会闪现空白
+	// 控制台窗口。现在三类协议（claude/codex/acp）均已带 HideWindow +
+	// CREATE_NO_WINDOW，副作用的源头已消除，故恢复 Windows 下的背景探测。
+	// 否则每个 agent 的状态会固化为 "probe pending"，前端感叹号无法清除。
+	go p.safeProbeAll(ctx)
 
 	// 启动定期探测：只重试未安装命令。运行时失败不做主动恢复探测，
 	// 避免周期性打开 agent probe session。
@@ -315,13 +315,24 @@ func (p *Prober) UpdateConfig(ctx context.Context, cfg *Config) {
 		}
 	}
 	p.mu.Unlock()
-	if len(installed) > 0 && shouldRunBackgroundRuntimeProbe(runtime.GOOS) {
+	if len(installed) > 0 {
 		go p.probeInstalledAgents(ctx, installed)
 	}
 }
 
+// shouldRunBackgroundRuntimeProbe reports whether background runtime probing is
+// enabled. It was introduced in v0.4.4 to disable probing on Windows, where the
+// claude/codex SDKs at the time could not inject CREATE_NO_WINDOW and so every
+// background probe would flash a blank console window.
+//
+// Those SDKs now attach HideWindow + CREATE_NO_WINDOW (see the yandc forks'
+// subprocess_windows.go / process_windows.go), so the original reason for the
+// platform gate is gone and probing is enabled on every OS. Keeping a runtime
+// probe running on Windows is what moves an agent out of the "probe pending"
+// occupancy state; without it the status never refreshes and the front-end
+// badge stays stuck at unavailable.
 func shouldRunBackgroundRuntimeProbe(goos string) bool {
-	return goos != "windows"
+	return true
 }
 
 // ProbeAll 探测所有配置的 Agent
