@@ -515,6 +515,7 @@ export const enUS = {
   "agent.restartAgent": "Restart Agent",
   "agent.model": "Model",
   "agent.mode": "Mode",
+  "agent.preset": "Agent preset",
   "agent.effort": "Reasoning effort",
   "agent.fastMode": "Fast mode",
   "agent.enabled": "On",

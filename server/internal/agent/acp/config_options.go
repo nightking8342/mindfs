@@ -15,6 +15,11 @@ func cloneConfigOptions(options []acpsdk.SessionConfigOption) []acpsdk.SessionCo
 	return append([]acpsdk.SessionConfigOption(nil), options...)
 }
 
+// presetSessionConfigID is the ACP session config option id the DeepSeek
+// Harness adapter uses to expose its agent presets. It carries no category
+// (unlike model/mode/thought_level), so lookup matches by id.
+const presetSessionConfigID = acpsdk.SessionConfigId("agent")
+
 func findSelectConfigOption(options []acpsdk.SessionConfigOption, category acpsdk.SessionConfigOptionCategory) (acpsdk.SessionConfigOptionSelect, bool) {
 	for _, option := range options {
 		if option.Select == nil || option.Select.Category == nil {
@@ -23,6 +28,16 @@ func findSelectConfigOption(options []acpsdk.SessionConfigOption, category acpsd
 		if *option.Select.Category == category {
 			return *option.Select, true
 		}
+	}
+	return acpsdk.SessionConfigOptionSelect{}, false
+}
+
+func findSelectConfigOptionByID(options []acpsdk.SessionConfigOption, id acpsdk.SessionConfigId) (acpsdk.SessionConfigOptionSelect, bool) {
+	for _, option := range options {
+		if option.Select == nil || option.Select.Id != id {
+			continue
+		}
+		return *option.Select, true
 	}
 	return acpsdk.SessionConfigOptionSelect{}, false
 }
@@ -85,6 +100,29 @@ func mapModeConfigOptions(options []acpsdk.SessionConfigOption) types.ModeList {
 	return types.ModeList{
 		CurrentModeID: strings.TrimSpace(string(option.CurrentValue)),
 		Modes:         modes,
+	}
+}
+
+func mapPresetConfigOptions(options []acpsdk.SessionConfigOption) types.PresetList {
+	option, ok := findSelectConfigOptionByID(options, presetSessionConfigID)
+	if !ok {
+		return types.PresetList{}
+	}
+	presets := make([]types.PresetInfo, 0)
+	for _, value := range flattenSelectOptions(option.Options) {
+		id := strings.TrimSpace(string(value.Value))
+		if id == "" {
+			continue
+		}
+		presets = append(presets, types.PresetInfo{
+			ID:          id,
+			Name:        firstNonEmpty(strings.TrimSpace(value.Name), id),
+			Description: stringPtrValue(value.Description),
+		})
+	}
+	return types.PresetList{
+		CurrentPresetID: strings.TrimSpace(string(option.CurrentValue)),
+		Presets:         presets,
 	}
 }
 

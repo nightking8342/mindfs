@@ -15,11 +15,13 @@ type AgentSelectorProps = {
   agent: string;
   model?: string;
   mode?: string;
+  preset?: string;
   effort?: string;
   fastService?: "" | "on" | "off";
   agents: AgentStatus[];
   onAgentChange: (agent: string, model?: string) => void;
   onModeChange?: (mode?: string) => void;
+  onPresetChange?: (preset?: string) => void;
   onEffortChange?: (effort?: string) => void;
   onFastServiceChange?: (fastService?: "" | "on" | "off") => void;
   onAgentRestart?: (agent: string) => void | Promise<void>;
@@ -61,6 +63,7 @@ function hasAgentOptions(agent?: AgentStatus): boolean {
     agent &&
     ((agent.models?.length ?? 0) > 0 ||
       (agent.modes?.length ?? 0) > 0 ||
+      (agent.presets?.length ?? 0) > 0 ||
       (agent.efforts?.length ?? 0) > 0 ||
       agent.supports_fast_service)
   );
@@ -144,11 +147,13 @@ export function AgentSelector({
   agent,
   model = "",
   mode = "",
+  preset = "",
   effort = "",
   fastService = "",
   agents,
   onAgentChange,
   onModeChange,
+  onPresetChange,
   onEffortChange,
   onFastServiceChange,
   onAgentRestart,
@@ -168,6 +173,7 @@ export function AgentSelector({
   const [errorAgent, setErrorAgent] = useState<string | null>(null);
   const [modelSectionExpanded, setModelSectionExpanded] = useState(true);
   const [modeSectionExpanded, setModeSectionExpanded] = useState(false);
+  const [presetSectionExpanded, setPresetSectionExpanded] = useState(false);
   const [effortSectionExpanded, setEffortSectionExpanded] = useState(false);
   const [serviceTierSectionExpanded, setServiceTierSectionExpanded] =
     useState(false);
@@ -217,6 +223,10 @@ export function AgentSelector({
     () => submenuAgentStatus?.modes ?? [],
     [submenuAgentStatus],
   );
+  const submenuPresets = useMemo(
+    () => submenuAgentStatus?.presets ?? [],
+    [submenuAgentStatus],
+  );
   const displayedMode = useMemo(() => {
     if (!submenuAgentStatus) return "";
     const fallbackMode = submenuAgentStatus.current_mode_id || "";
@@ -224,6 +234,13 @@ export function AgentSelector({
       ? mode || fallbackMode
       : fallbackMode;
   }, [submenuAgentStatus, agent, mode]);
+  const displayedPreset = useMemo(() => {
+    if (!submenuAgentStatus) return "";
+    const fallbackPreset = submenuAgentStatus.current_preset_id || "";
+    return submenuAgentStatus.name === agent
+      ? preset || fallbackPreset
+      : fallbackPreset;
+  }, [submenuAgentStatus, agent, preset]);
   const submenuIsCodex = submenuAgentStatus?.name === "codex";
   const submenuSupportsEffort = useMemo(
     () => submenuEfforts.length > 0 && !!submenuSelectedModel?.supportEffort,
@@ -261,6 +278,7 @@ export function AgentSelector({
         setErrorAgent(null);
         setModelSectionExpanded(true);
         setModeSectionExpanded(false);
+        setPresetSectionExpanded(false);
         setEffortSectionExpanded(false);
         setServiceTierSectionExpanded(false);
         setMenuBodyHeight(null);
@@ -357,6 +375,7 @@ export function AgentSelector({
       setErrorAgent(null);
       setModelSectionExpanded(true);
       setModeSectionExpanded(false);
+      setPresetSectionExpanded(false);
       setEffortSectionExpanded(false);
       setServiceTierSectionExpanded(false);
     },
@@ -387,6 +406,7 @@ export function AgentSelector({
     setErrorAgent(null);
     setModelSectionExpanded(true);
     setModeSectionExpanded(false);
+    setPresetSectionExpanded(false);
     setEffortSectionExpanded(false);
     setServiceTierSectionExpanded(false);
     const node = agentColumnRef.current;
@@ -409,6 +429,7 @@ export function AgentSelector({
       setErrorAgent(null);
       setModelSectionExpanded(true);
       setModeSectionExpanded(false);
+      setPresetSectionExpanded(false);
       setEffortSectionExpanded(false);
       setServiceTierSectionExpanded(false);
       setMenuBodyHeight(null);
@@ -424,6 +445,7 @@ export function AgentSelector({
       setErrorAgent(null);
       setModelSectionExpanded(true);
       setModeSectionExpanded(false);
+      setPresetSectionExpanded(false);
       setEffortSectionExpanded(false);
       setServiceTierSectionExpanded(false);
       setMenuBodyHeight(null);
@@ -439,11 +461,28 @@ export function AgentSelector({
       setErrorAgent(null);
       setModelSectionExpanded(true);
       setModeSectionExpanded(false);
+      setPresetSectionExpanded(false);
       setEffortSectionExpanded(false);
       setServiceTierSectionExpanded(false);
       setMenuBodyHeight(null);
     },
     [onModeChange],
+  );
+
+  const handlePresetSelect = useCallback(
+    (nextPreset: string) => {
+      onPresetChange?.(nextPreset);
+      setIsOpen(false);
+      setSubmenuAgent(null);
+      setErrorAgent(null);
+      setModelSectionExpanded(true);
+      setModeSectionExpanded(false);
+      setPresetSectionExpanded(false);
+      setEffortSectionExpanded(false);
+      setServiceTierSectionExpanded(false);
+      setMenuBodyHeight(null);
+    },
+    [onPresetChange],
   );
 
   const handleAgentRestart = useCallback(
@@ -487,6 +526,7 @@ export function AgentSelector({
               setErrorAgent(null);
               setModelSectionExpanded(true);
               setModeSectionExpanded(false);
+              setPresetSectionExpanded(false);
               setEffortSectionExpanded(false);
               setServiceTierSectionExpanded(false);
               setMenuBodyHeight(null);
@@ -496,6 +536,7 @@ export function AgentSelector({
               setErrorAgent(null);
               setModelSectionExpanded(true);
               setModeSectionExpanded(false);
+              setPresetSectionExpanded(false);
               setEffortSectionExpanded(false);
               setServiceTierSectionExpanded(false);
               setMenuBodyHeight(null);
@@ -701,6 +742,7 @@ export function AgentSelector({
                           setSubmenuAgent(null);
                           setModelSectionExpanded(true);
                           setModeSectionExpanded(false);
+                          setPresetSectionExpanded(false);
                           setEffortSectionExpanded(false);
                           setServiceTierSectionExpanded(false);
                           setErrorAgent((prev) =>
@@ -1021,6 +1063,55 @@ export function AgentSelector({
                             onClick={() => handleModeSelect(item.id)}
                             style={sectionItemStyle(
                               item.id === displayedMode,
+                              index > 0,
+                            )}
+                            title={item.description || item.id}
+                          >
+                            <span style={{ fontSize: "13px", fontWeight: 500 }}>
+                              {item.name || item.id}
+                            </span>
+                            {item.description ? (
+                              <span
+                                style={{
+                                  fontSize: "11px",
+                                  color: "var(--text-secondary)",
+                                  whiteSpace: "normal",
+                                  overflowWrap: "anywhere",
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                {item.description}
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+                {submenuPresets.length > 1 ? (
+                  <>
+                    <SectionHeader
+                      title={t("agent.preset")}
+                      expanded={presetSectionExpanded}
+                      onToggle={() => setPresetSectionExpanded((prev) => !prev)}
+                      topBorder={
+                        modelSectionExpanded ||
+                        submenuModels.length > 0 ||
+                        !!submenuSelectedModel?.id ||
+                        submenuModes.length > 0
+                      }
+                      value={displayedPreset || undefined}
+                    />
+                    {presetSectionExpanded ? (
+                      <>
+                        {submenuPresets.map((item, index) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => handlePresetSelect(item.id)}
+                            style={sectionItemStyle(
+                              item.id === displayedPreset,
                               index > 0,
                             )}
                             title={item.description || item.id}

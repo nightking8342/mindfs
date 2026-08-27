@@ -563,6 +563,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	agentMode := getString(req.Payload, "agent_mode")
 	effort := getString(req.Payload, "effort")
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
+	preset := getString(req.Payload, "agent_preset")
 	shell := getString(req.Payload, "shell")
 	terminalCols := getInt(req.Payload, "terminal_cols")
 	createWorktree := getBool(req.Payload, "create_worktree")
@@ -696,6 +697,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		Mode:        agentMode,
 		Effort:      effort,
 		FastService: fastService,
+		Preset:      preset,
 		PlanMode:    planMode,
 		Content:     content,
 		Timestamp:   userTimestamp,
@@ -900,6 +902,7 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 		Mode:            job.User.Mode,
 		Effort:          job.User.Effort,
 		FastService:     job.User.FastService,
+		Preset:          job.User.Preset,
 		PlanMode:        &job.User.PlanMode,
 		Shell:           job.Shell,
 		TerminalCols:    job.TerminalCols,

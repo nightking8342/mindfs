@@ -293,6 +293,7 @@ func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definitio
 			Model:           in.Model,
 			Mode:            in.Mode,
 			Effort:          in.Effort,
+			Preset:          in.Preset,
 			RootPath:        in.RootPath,
 			Command:         def.Command,
 			Args:            def.BuildArgs(in.RootPath),

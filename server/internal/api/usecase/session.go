@@ -1102,6 +1102,7 @@ type SendMessageInput struct {
 	Mode                   string
 	Effort                 string
 	FastService            string
+	Preset                 string
 	PlanMode               *bool
 	Shell                  string
 	TerminalCols           int
@@ -1819,6 +1820,7 @@ func (s *Service) ensureAgentSession(
 	mode string,
 	effort string,
 	fastService string,
+	preset string,
 	rootAbs string,
 	developerInstructions string,
 ) (agenttypes.Session, *int, error) {
@@ -1927,6 +1929,12 @@ func (s *Service) ensureAgentSession(
 		}(),
 		SettingsPath: claudeSettingsPathFor(s.Registry, agentName),
 	}
+	// Agent preset applies only to a freshly created runtime session: the
+	// server refuses to switch a session that already produced output, so a
+	// resume keeps the preset recorded in the agent session log.
+	if openInput.AgentSessionID == "" && strings.TrimSpace(preset) != "" {
+		openInput.Preset = strings.TrimSpace(preset)
+	}
 	if openInput.AgentSessionID != "" {
 		log.Printf("[session/model] open session=%s agent=%s model=%q mode=%q effort=%q fast_service=%q pool_session=%s action=resume_runtime_session agent_session_id=%s agent_ctx_seq=%d", current.Key, agentName, nextModel, nextMode, nextEffort, nextFastService, poolSessionKey, openInput.AgentSessionID, openInput.AgentCtxSeq)
 	} else {
@@ -1939,6 +1947,9 @@ func (s *Service) ensureAgentSession(
 			log.Printf("[session/model] resume.error session=%s agent=%s model=%q mode=%q effort=%q fast_service=%q pool_session=%s agent_session_id=%s err=%v fallback=open_new_runtime_session", current.Key, agentName, nextModel, nextMode, nextEffort, nextFastService, poolSessionKey, openInput.AgentSessionID, err)
 			openInput.AgentSessionID = ""
 			openInput.AgentCtxSeq = 0
+			if strings.TrimSpace(preset) != "" {
+				openInput.Preset = strings.TrimSpace(preset)
+			}
 			sess, err = pool.GetOrCreate(openCtx, openInput)
 			if err == nil {
 				zero := 0
@@ -2148,7 +2159,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		developerInstructions = replyTips
 		includeReplyTipsInUserMessage = false
 	}
-	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs, developerInstructions)
+	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, in.Preset, rootAbs, developerInstructions)
 	if err != nil {
 		return err
 	}
@@ -2476,7 +2487,7 @@ func (s *Service) RunTransientSlashCommand(ctx context.Context, in RunTransientS
 	}
 	root := manager.Root()
 	rootAbs, _ := root.RootDir()
-	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, in.Mode, in.Effort, in.FastService, rootAbs, "")
+	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, in.Mode, in.Effort, in.FastService, "", rootAbs, "")
 	if err != nil {
 		return err
 	}

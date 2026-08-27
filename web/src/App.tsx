@@ -6220,6 +6220,7 @@ export function App({ onGoHome }: AppProps) {
       agent: string,
       model?: string,
       agentMode?: string,
+      agentPreset?: string,
       effort?: string,
       fastService?: "" | "on" | "off",
       shell?: string,
@@ -6275,6 +6276,7 @@ export function App({ onGoHome }: AppProps) {
         effectiveAgent = agent,
         effectiveModel = model || "",
         effectiveAgentMode = agentMode || "",
+        effectiveAgentPreset = agentPreset || "",
         effectiveEffort = effort || "",
         effectiveFastService = (fastService || "") as "" | "on" | "off",
         effectiveShell = shell || "";
@@ -6311,6 +6313,9 @@ export function App({ onGoHome }: AppProps) {
         effectiveAgentMode =
           (useTargetSessionDefaults ? (session as any).mode || "" : agentMode) ||
           (effectiveAgent === previousAgent ? (session as any).mode || "" : "");
+        effectiveAgentPreset =
+          (useTargetSessionDefaults ? (session as any).preset || "" : agentPreset) ||
+          (effectiveAgent === previousAgent ? (session as any).preset || "" : "");
         effectiveEffort =
           (useTargetSessionDefaults ? (session as any).effort || "" : effort) ||
           (effectiveAgent === previousAgent ? (session as any).effort || "" : "");
@@ -6682,6 +6687,7 @@ export function App({ onGoHome }: AppProps) {
         effectiveAgent,
         effectiveModel || undefined,
         effectiveAgentMode || undefined,
+        effectiveAgentPreset || undefined,
         effectiveEffort || undefined,
         effectiveFastService,
         context,

@@ -95,6 +95,7 @@ type ActionBarProps = {
     agent: string,
     model?: string,
     agentMode?: string,
+    agentPreset?: string,
     effort?: string,
     fastService?: "" | "on" | "off",
     shell?: string,
@@ -432,6 +433,7 @@ export function ActionBar({
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
   const [agentMode, setAgentMode] = useState("");
+  const [agentPreset, setAgentPreset] = useState("");
   const [effort, setEffort] = useState("");
   const [fastService, setFastService] = useState<"" | "on" | "off">("");
   const [agents, setAgents] = useState<AgentStatus[]>([]);
@@ -1005,6 +1007,7 @@ export function ActionBar({
         mode === "command" ? "" : agent,
         model || undefined,
         agentMode || undefined,
+        agentPreset || undefined,
         supportsEffort ? effort || undefined : undefined,
         supportsServiceTier ? fastService : undefined,
         mode === "command" ? shell || undefined : undefined,
@@ -1050,7 +1053,7 @@ export function ActionBar({
         requestAnimationFrame(() => editorRef.current?.focus());
       }
     }
-  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell, t, currentSession, currentRootIsGitRepo, createWorktree, worktreeBranchMode, worktreeBranch]);
+  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, agentPreset, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell, t, currentSession, currentRootIsGitRepo, createWorktree, worktreeBranchMode, worktreeBranch]);
 
   const handleCancel = useCallback(async () => {
     const sessionKey = currentSession?.key;
@@ -1906,6 +1909,7 @@ export function ActionBar({
                     agent={agent}
                     model={model}
                     mode={agentMode}
+                    preset={agentPreset}
                     effort={effort}
                     agents={agents}
                     onAgentChange={(nextAgent, nextModel) => {
@@ -1914,10 +1918,12 @@ export function ActionBar({
                       setAgent(nextAgent);
                       setModel(nextModel || defaults.model);
                       setAgentMode("");
+                      setAgentPreset("");
                       setEffort(defaults.effort);
                       setFastService(defaults.fastService);
                     }}
                     onModeChange={(nextAgentMode) => setAgentMode(nextAgentMode || "")}
+                    onPresetChange={(nextPreset) => setAgentPreset(nextPreset || "")}
                     onEffortChange={(nextEffort) => setEffort(nextEffort || "")}
                     fastService={fastService}
                     onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}

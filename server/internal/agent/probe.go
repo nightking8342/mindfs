@@ -39,6 +39,9 @@ type Status struct {
 	SupportsFastService           bool                     `json:"supports_fast_service"`
 	Models                        []agenttypes.ModelInfo   `json:"models,omitempty"`
 	Modes                         []agenttypes.ModeInfo    `json:"modes"`
+	CurrentPresetID               string                   `json:"current_preset_id,omitempty"`
+	Presets                       []agenttypes.PresetInfo  `json:"presets,omitempty"`
+	PresetsError                  string                   `json:"presets_error,omitempty"`
 	Efforts                       []string                 `json:"efforts,omitempty"`
 	ModelsError                   string                   `json:"models_error,omitempty"`
 	ModesError                    string                   `json:"modes_error,omitempty"`
@@ -889,6 +892,22 @@ func populateProbeModels(ctx context.Context, sess agenttypes.Session, status *S
 		status.CurrentModeID = modes.CurrentModeID
 		status.Modes = modes.Modes
 	}
+	// Agent presets are an ACP-only capability (the DeepSeek Harness adapter
+	// exposes them through the "agent" session config option). Backends that do
+	// not advertise presets simply leave the status fields empty.
+	if presetLister, ok := sess.(interface {
+		ListPresets(context.Context) (agenttypes.PresetList, error)
+	}); ok {
+		presets, presetsErr := presetLister.ListPresets(modelsCtx)
+		if presetsErr != nil {
+			status.PresetsError = presetsErr.Error()
+		} else {
+			status.CurrentPresetID = presets.CurrentPresetID
+			if len(presets.Presets) > 0 {
+				status.Presets = presets.Presets
+			}
+		}
+	}
 	if defaultsReader, ok := sess.(agenttypes.DefaultsReader); ok {
 		defaults, defaultsErr := defaultsReader.RuntimeDefaults(modelsCtx)
 		if defaultsErr != nil {
@@ -961,6 +980,12 @@ func preserveKnownCapabilities(prev Status, next Status) Status {
 	}
 	if len(next.Modes) == 0 {
 		next.Modes = prev.Modes
+	}
+	if next.CurrentPresetID == "" {
+		next.CurrentPresetID = prev.CurrentPresetID
+	}
+	if len(next.Presets) == 0 {
+		next.Presets = prev.Presets
 	}
 	if len(next.Commands) == 0 {
 		next.Commands = prev.Commands

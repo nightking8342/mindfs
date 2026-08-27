@@ -36,9 +36,13 @@ type PendingUserMessage struct {
 	Mode        string    `json:"mode,omitempty"`
 	Effort      string    `json:"effort,omitempty"`
 	FastService string    `json:"fast_service,omitempty"`
-	PlanMode    bool      `json:"plan_mode,omitempty"`
-	Content     string    `json:"content"`
-	Timestamp   time.Time `json:"timestamp"`
+	// Preset carries the requested agent preset for a fresh session. It is
+	// applied only when the runtime session is first created (blank); resuming
+	// or switching a session that already produced output keeps its preset.
+	Preset    string    `json:"preset,omitempty"`
+	PlanMode  bool      `json:"plan_mode,omitempty"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 type QueuedUserMessage struct {

@@ -14,6 +14,7 @@ export type AgentStatus = {
   last_probe?: string;
   current_model_id?: string;
   current_mode_id?: string;
+  current_preset_id?: string;
   default_model_id?: string;
   default_effort?: string;
   default_fast_service?: string;
@@ -24,8 +25,10 @@ export type AgentStatus = {
   efforts?: string[];
   models?: AgentModelInfo[];
   modes?: AgentModeInfo[];
+  presets?: AgentPresetInfo[];
   models_error?: string;
   modes_error?: string;
+  presets_error?: string;
   commands?: AgentCommandInfo[];
   commands_error?: string;
   install_commands?: string[];
@@ -48,6 +51,12 @@ export type AgentModelInfo = {
 };
 
 export type AgentModeInfo = {
+  id: string;
+  name: string;
+  description?: string;
+};
+
+export type AgentPresetInfo = {
   id: string;
   name: string;
   description?: string;

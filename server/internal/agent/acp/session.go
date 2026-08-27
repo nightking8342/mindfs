@@ -22,6 +22,7 @@ type OpenOptions struct {
 	Model           string
 	Mode            string
 	Effort          string
+	Preset          string
 	RootPath        string
 	Command         string
 	Args            []string
@@ -79,6 +80,14 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	}
 	if strings.TrimSpace(opts.Effort) != "" {
 		if err := proc.SetThoughtLevel(ctx, opts.SessionKey, opts.Effort); err != nil {
+			proc.ForgetSession(opts.SessionKey)
+			return nil, err
+		}
+	}
+	// Preset applies only to a freshly created runtime session (ResumeSessionID
+	// empty): the server only allows switching while the session is blank.
+	if strings.TrimSpace(opts.Preset) != "" && strings.TrimSpace(opts.ResumeSessionID) == "" {
+		if err := proc.SetPreset(ctx, opts.SessionKey, opts.Preset); err != nil {
 			proc.ForgetSession(opts.SessionKey)
 			return nil, err
 		}
@@ -333,6 +342,25 @@ func (s *session) ListModes(_ context.Context) (types.ModeList, error) {
 		return modes, nil
 	}
 	return mapModeState(s.proc.SessionModeState(s.sessionKey)), nil
+}
+
+// SetPreset switches the runtime session's agent preset via the server's
+// session config option. The server (DeepSeek Harness adapter) rejects a
+// switch once the session has produced output, so callers gate on blank.
+func (s *session) SetPreset(ctx context.Context, preset string) error {
+	if s == nil || s.proc == nil {
+		return errors.New("acp session not initialized")
+	}
+	return s.proc.SetPreset(ctx, s.sessionKey, preset)
+}
+
+// ListPresets returns the agent presets the server advertises for this
+// session and the currently selected preset id.
+func (s *session) ListPresets(_ context.Context) (types.PresetList, error) {
+	if s == nil || s.proc == nil {
+		return types.PresetList{}, errors.New("acp session not initialized")
+	}
+	return s.proc.SessionPresetList(s.sessionKey), nil
 }
 
 func (s *session) ListCommands(_ context.Context) (types.CommandList, error) {

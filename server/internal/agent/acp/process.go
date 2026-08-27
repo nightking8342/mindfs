@@ -981,6 +981,46 @@ func (p *Process) SetThoughtLevel(ctx context.Context, sessionKey, effort string
 	return nil
 }
 
+// SetPreset names the agent preset the runtime session runs under. The preset
+// config option (the DeepSeek Harness adapter's "agent" option) is only
+// switchable while the session has produced no output, so callers apply this
+// at creation time on a fresh session and never on resume.
+func (p *Process) SetPreset(ctx context.Context, sessionKey, preset string) error {
+	sess := p.getSessionByKey(sessionKey)
+	if sess == nil || strings.TrimSpace(preset) == "" {
+		return nil
+	}
+	option, ok := findSelectConfigOptionByID(sess.getConfigOptions(), presetSessionConfigID)
+	if !ok {
+		return nil
+	}
+	resp, err := p.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			ConfigId:  option.Id,
+			SessionId: sess.ID,
+			Value:     acp.SessionConfigValueId(strings.TrimSpace(preset)),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	sess.setConfigOptions(resp.ConfigOptions)
+	p.mu.Lock()
+	p.configOptions = cloneConfigOptions(resp.ConfigOptions)
+	p.mu.Unlock()
+	return nil
+}
+
+// SessionPresetList maps the current config options onto the agent-preset list
+// advertised by the server, with the session's current preset id.
+func (p *Process) SessionPresetList(sessionKey string) types.PresetList {
+	sess := p.getSessionByKey(sessionKey)
+	if sess == nil {
+		return types.PresetList{}
+	}
+	return mapPresetConfigOptions(sess.getConfigOptions())
+}
+
 func (p *Process) SessionModelState(sessionKey string) *acp.SessionModelState {
 	sess := p.getSessionByKey(sessionKey)
 	if sess == nil {

@@ -513,6 +513,7 @@ export const zhCN = {
   "agent.restartAgent": "重启 Agent",
   "agent.model": "模型",
   "agent.mode": "模式",
+  "agent.preset": "Agent 预设",
   "agent.effort": "思考等级",
   "agent.fastMode": "Fast 模式",
   "agent.enabled": "开启",

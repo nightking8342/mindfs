@@ -109,6 +109,12 @@ type OpenSessionInput struct {
 	Mode                  string
 	Effort                string
 	FastService           string
+	// Preset names an agent preset (per-session agent composition) to apply on
+	// a FRESH runtime session only (AgentSessionID empty). ACP backends such as
+	// the DeepSeek Harness adapter expose presets via the "agent" session config
+	// option and reject switching a session that has produced output, so the
+	// choice is applied at creation time and never on resume/fork.
+	Preset                string
 	PlanMode              bool
 	Probe                 bool
 	RootPath              string
@@ -245,6 +251,21 @@ type ModeInfo struct {
 type ModeList struct {
 	CurrentModeID string     `json:"current_mode_id,omitempty"`
 	Modes         []ModeInfo `json:"modes,omitempty"`
+}
+
+// PresetInfo describes one agent preset (a per-session agent composition).
+// The DeepSeek Harness ACP adapter exposes presets as a session config option
+// named "agent"; other ACP servers may expose a similar concept under a
+// different option id.
+type PresetInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type PresetList struct {
+	CurrentPresetID string       `json:"current_preset_id,omitempty"`
+	Presets         []PresetInfo `json:"presets,omitempty"`
 }
 
 type CommandInfo struct {
