@@ -1388,6 +1388,9 @@ function hasExplicitFileContext(message: string): boolean {
   return FILE_TOKEN_PATTERN.test(message);
 }
 
+// 与 ForkShell / AppShell 保持一致的移动端断点
+const MOBILE_BREAKPOINT = 768;
+
 // Hook for responsive detection
 function useResponsive() {
   const [isMobile, setIsMobile] = useState(false);
@@ -1395,8 +1398,8 @@ function useResponsive() {
   useEffect(() => {
     const checkSize = () => {
       const width = window.innerWidth;
-      setIsMobile(width < 768);
-      setIsTablet(width >= 768 && width < 1024);
+      setIsMobile(width < MOBILE_BREAKPOINT);
+      setIsTablet(width >= MOBILE_BREAKPOINT && width < 1024);
     };
     checkSize();
     window.addEventListener("resize", checkSize);
@@ -1688,10 +1691,22 @@ export function App({ onGoHome }: AppProps) {
   const [mobileEnterKeySends, setMobileEnterKeySends] = useState(loadMobileEnterKeySends);
   const [sidebarsSwapped, setSidebarsSwapped] = useState(loadSidebarsSwapped);
   const [gitDiffSideBySide, setGitDiffSideBySide] = useState(loadGitDiffSideBySide);
-  const [isLeftOpen, setIsLeftOpen] = useState(() => window.innerWidth >= 768);
+  const [isLeftOpen, setIsLeftOpen] = useState(() => window.innerWidth >= MOBILE_BREAKPOINT);
   const [isRightOpen, setIsRightOpen] = useState(
-    () => window.innerWidth >= 768,
+    () => window.innerWidth >= MOBILE_BREAKPOINT,
   );
+  // 宽窄屏切换时重置侧边栏默认状态：宽屏两侧展开（网格布局，不遮挡 main），
+  // 窄屏两侧收起（移动端侧边栏是覆盖层，保持展开会挡住 main）。
+  // 只在跨越断点的那一刻生效，同一形态内用户的手动开合不受影响。
+  const prevIsMobileRef = useRef(window.innerWidth < MOBILE_BREAKPOINT);
+  useEffect(() => {
+    if (prevIsMobileRef.current === isMobile) {
+      return;
+    }
+    prevIsMobileRef.current = isMobile;
+    setIsLeftOpen(!isMobile);
+    setIsRightOpen(!isMobile);
+  }, [isMobile]);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const onboardingAutoStartRef = useRef(false);
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
