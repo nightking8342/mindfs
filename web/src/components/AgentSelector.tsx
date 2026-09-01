@@ -513,6 +513,7 @@ export function AgentSelector({
       <button
         type="button"
         onClick={() => {
+          setViewportMenuPosition(null);
           setIsOpen((prev) => {
             const next = !prev;
             if (next) {
@@ -629,7 +630,7 @@ export function AgentSelector({
             border: "1px solid var(--menu-border)",
             borderRadius: "12px",
             boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
-            zIndex: 1000,
+            zIndex: viewportMenu ? 10100 : 1000,
             width: "max-content",
             minWidth: "0",
             maxWidth: "calc(100vw - 16px)",

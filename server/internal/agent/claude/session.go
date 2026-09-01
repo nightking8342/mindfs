@@ -228,6 +228,13 @@ type session struct {
 	questionWaits map[string]chan askUserAnswerResult
 }
 
+func (s *session) ProcessID() int {
+	if s == nil || s.client == nil {
+		return 0
+	}
+	return s.client.ProcessID()
+}
+
 type askUserAnswerResult struct {
 	answers claudeagent.Answers
 	err     error
@@ -647,10 +654,11 @@ func (s *session) consumeMessages() {
 			s.updateContextWindow(m)
 			s.logRawMessage(raw)
 			contextWindow, _ := s.ContextWindow(context.Background())
+			tokenUsage := claudeTokenUsage(m)
 			s.emit(types.Event{
 				Type:      types.EventTypeMessageDone,
 				SessionID: s.SessionID(),
-				Data:      types.MessageDone{ContextWindow: contextWindow},
+				Data:      types.MessageDone{ContextWindow: contextWindow, TokenUsage: tokenUsage},
 			})
 			s.completeTurn(resultErr(m))
 			s.sawDelta = false
@@ -2386,6 +2394,36 @@ func (s *session) updateContextWindow(msg claudeagent.ResultMessage) {
 	s.mu.Lock()
 	s.context.ModelContextWindow = modelContextWindow
 	s.mu.Unlock()
+}
+
+func claudeTokenUsage(msg claudeagent.ResultMessage) *types.TokenUsage {
+	inputTokens := 0
+	outputTokens := 0
+	cacheReadTokens := 0
+	cacheWriteTokens := 0
+	if msg.Usage != nil {
+		inputTokens = max(0, msg.Usage.InputTokens)
+		outputTokens = max(0, msg.Usage.OutputTokens)
+		cacheReadTokens = max(0, msg.Usage.CacheReadInputTokens)
+		cacheWriteTokens = max(0, msg.Usage.CacheCreationInputTokens)
+	} else {
+		for _, usage := range msg.ModelUsage {
+			inputTokens += max(0, usage.InputTokens)
+			outputTokens += max(0, usage.OutputTokens)
+			cacheReadTokens += max(0, usage.CacheReadInputTokens)
+			cacheWriteTokens += max(0, usage.CacheCreationInputTokens)
+		}
+	}
+	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 && cacheWriteTokens == 0 {
+		return nil
+	}
+	logicalInputTokens := inputTokens + cacheReadTokens + cacheWriteTokens
+	return &types.TokenUsage{
+		InputTokens:      logicalInputTokens,
+		OutputTokens:     outputTokens,
+		CacheReadTokens:  &cacheReadTokens,
+		CacheWriteTokens: &cacheWriteTokens,
+	}
 }
 
 func (s *session) enqueueTurn(waiter chan error) {

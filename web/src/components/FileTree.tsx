@@ -2105,6 +2105,7 @@ export function FileTree({
   const [sessionNamingAgents, setSessionNamingAgents] = React.useState<AgentStatus[]>([]);
   const [sessionNamingAgent, setSessionNamingAgent] = React.useState("");
   const [sessionNamingModel, setSessionNamingModel] = React.useState("");
+  const [sessionNamingDisabled, setSessionNamingDisabled] = React.useState(false);
   const [sessionNamingBusy, setSessionNamingBusy] = React.useState(false);
   const [sessionNamingError, setSessionNamingError] = React.useState("");
   const [idleReleaseOpen, setIdleReleaseOpen] = React.useState(false);
@@ -2672,6 +2673,7 @@ export function FileTree({
         const selectedModel = selected?.models?.find((item) => item.id === preference.model)?.id || "";
         setSessionNamingAgent(selected?.name || "");
         setSessionNamingModel(selectedModel);
+        setSessionNamingDisabled(preference.disabled);
       })
       .catch((error) => {
         setSessionNamingError(error instanceof Error ? error.message : t("sessionNaming.loadFailed"));
@@ -2680,13 +2682,14 @@ export function FileTree({
   }, [t]);
 
   const saveSessionNaming = React.useCallback(async () => {
-    if (!sessionNamingAgent || sessionNamingBusy) return;
+    if ((!sessionNamingAgent && !sessionNamingDisabled) || sessionNamingBusy) return;
     setSessionNamingBusy(true);
     setSessionNamingError("");
     try {
       await updateSessionNamingPreference({
         agent: sessionNamingAgent,
         model: sessionNamingModel,
+        disabled: sessionNamingDisabled,
       });
       setSessionNamingOpen(false);
     } catch (error) {
@@ -2694,7 +2697,7 @@ export function FileTree({
     } finally {
       setSessionNamingBusy(false);
     }
-  }, [sessionNamingAgent, sessionNamingBusy, sessionNamingModel, t]);
+  }, [sessionNamingAgent, sessionNamingBusy, sessionNamingDisabled, sessionNamingModel, t]);
 
   const openIdleSessionResourceRelease = React.useCallback(() => {
     setAgentConfigFlow(null);
@@ -3635,8 +3638,8 @@ export function FileTree({
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 6, overflow: "visible" }}>
-        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 34px)" }}>
+      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 0, overflow: "visible" }}>
+        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 56px)", marginRight: "6px" }}>
           <ForkGlassTabs
             ariaLabel={t("fileTree.projectTabs")}
             dataOnboarding="project-tabs"
@@ -4463,6 +4466,7 @@ export function FileTree({
               {t("sessionNaming.title")}
             </div>
             <div
+              aria-disabled={sessionNamingDisabled || sessionNamingBusy}
               style={{
                 marginTop: "12px",
                 minHeight: "42px",
@@ -4473,6 +4477,9 @@ export function FileTree({
                 alignItems: "center",
                 justifyContent: "flex-start",
                 gap: "8px",
+                opacity: sessionNamingDisabled ? 0.5 : 1,
+                pointerEvents: sessionNamingDisabled || sessionNamingBusy ? "none" : "auto",
+                transition: "opacity 0.15s ease",
               }}
             >
               {sessionNamingAgent ? (
@@ -4496,6 +4503,25 @@ export function FileTree({
                 {sessionNamingBusy ? t("common.loading") : sessionNamingModel || t("agent.defaultModel")}
               </span>
             </div>
+            <label
+              style={{
+                marginTop: "12px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                color: "var(--text-primary)",
+                fontSize: "13px",
+                cursor: sessionNamingBusy ? "default" : "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={sessionNamingDisabled}
+                disabled={sessionNamingBusy}
+                onChange={(event) => setSessionNamingDisabled(event.target.checked)}
+              />
+              <span>{t("sessionNaming.disableAutoRename")}</span>
+            </label>
             {sessionNamingError ? (
               <div style={{ marginTop: "8px", color: "#dc2626", fontSize: "11px", lineHeight: 1.4 }}>
                 {sessionNamingError}
@@ -4512,9 +4538,9 @@ export function FileTree({
               </button>
               <button
                 type="button"
-                disabled={sessionNamingBusy || !sessionNamingAgent}
+                disabled={sessionNamingBusy || (!sessionNamingAgent && !sessionNamingDisabled)}
                 onClick={() => void saveSessionNaming()}
-                style={agentConfigPrimaryButtonStyle(sessionNamingBusy || !sessionNamingAgent)}
+                style={agentConfigPrimaryButtonStyle(sessionNamingBusy || (!sessionNamingAgent && !sessionNamingDisabled))}
               >
                 {sessionNamingBusy ? t("common.saving") : t("common.save")}
               </button>

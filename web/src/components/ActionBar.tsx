@@ -24,6 +24,7 @@ import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
 import { WorktreeRepoSelector, type WorktreeRepoOption } from "./WorktreeRepoSelector";
 import { NoWorktreeIcon } from "./NoWorktreeIcon";
 import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
+import { AgentMemoryIndicator } from "./AgentMemoryIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
 
 type SessionInfo = {
@@ -1395,8 +1396,8 @@ export function ActionBar({
           <div
             style={{
               position: "absolute",
-              left: isMobile ? "36px" : "2px",
-              right: isMobile ? "36px" : "8px",
+              left: "2px",
+              right: isMobile ? "2px" : "8px",
               bottom: "100%",
               zIndex: 7,
               minWidth: 0,
@@ -1449,7 +1450,8 @@ export function ActionBar({
                 </>
               ) : null}
             </div>
-            <div style={{ pointerEvents: "auto" }}>
+            <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <AgentMemoryIndicator refreshToken={agentsVersion + codexRateLimitsRefreshToken} />
               <CodexRateLimitIndicator agent={agent} refreshToken={codexRateLimitsRefreshToken} />
             </div>
           </div>
@@ -2006,7 +2008,7 @@ export function ActionBar({
               </div>
 
               <>
-                <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" />
+                <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" viewportMenu />
                 {mode !== "command" ? (
                   <div>
                     <AgentSelector

@@ -96,8 +96,8 @@ assert.match(
 );
 assert.match(
   selector,
-  /menuPlacement === "top"[\s\S]*?bottom: "calc\(100% \+ 7px\)"/,
-  "the picker should support upward placement like the branch selector",
+  /useViewportMenu\(\{[\s\S]*?menuPlacement,/,
+  "the picker should delegate placement to useViewportMenu like the branch selector",
 );
 assert.match(
   selector,
