@@ -841,6 +841,8 @@ class SessionService {
       create: boolean;
       branchMode: "new" | "existing";
       branch?: string;
+      /** Repository under the root to add the worktree to; empty means the root. */
+      repoPath?: string;
     },
   ): Promise<boolean> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -876,6 +878,7 @@ class SessionService {
         create_worktree: !sessionKey && newSessionWorktree?.create === true,
         worktree_branch_mode: newSessionWorktree?.branchMode,
         worktree_branch: newSessionWorktree?.branch || "",
+        worktree_repo_path: newSessionWorktree?.repoPath || "",
         context: this.compactContext(sessionKey, context),
       },
     };

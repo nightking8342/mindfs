@@ -1,32 +1,52 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { GitBranchItem } from "../services/git";
 import { useI18n } from "../i18n";
 import { useViewportMenu } from "../hooks/useViewportMenu";
 
-type WorktreeBranchSelectorProps = {
-  branchMode: "new" | "existing";
-  branch: string;
-  branches: GitBranchItem[];
+/**
+ * One selectable repository. An empty path means the managed root itself.
+ */
+export type WorktreeRepoOption = {
+  path: string;
+  label: string;
+  branch?: string;
+};
+
+type WorktreeRepoSelectorProps = {
+  options: WorktreeRepoOption[];
+  /** Currently selected repository path; empty selects the managed root. */
+  value: string;
+  /** Renders the placeholder label until the user picks a repository. */
+  unselected?: boolean;
   disabled?: boolean;
+  /** Opens the menu on mount, used when no repository is preselected. */
+  autoOpen?: boolean;
   height?: number;
   maxWidth?: number;
   menuAlign?: "left" | "right";
   menuPlacement?: "top" | "bottom";
-  onChange: (branchMode: "new" | "existing", branch: string) => void;
+  onChange: (repoPath: string) => void;
 };
 
-export function WorktreeBranchSelector({
-  branchMode,
-  branch,
-  branches,
+/**
+ * Repository picker shown next to the worktree toggle when a managed root holds
+ * more than one repository. Deliberately mirrors WorktreeBranchSelector's shape
+ * (same sizing, menu placement and dismissal behaviour) so the two read as one
+ * control strip; kept as a separate component to avoid touching the upstream
+ * branch selector.
+ */
+export function WorktreeRepoSelector({
+  options,
+  value,
+  unselected = false,
   disabled = false,
+  autoOpen = false,
   height = 24,
-  maxWidth = 240,
+  maxWidth = 200,
   menuAlign = "right",
   menuPlacement = "bottom",
   onChange,
-}: WorktreeBranchSelectorProps) {
+}: WorktreeRepoSelectorProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -38,11 +58,23 @@ export function WorktreeBranchSelector({
     menuPlacement,
     align: menuAlign,
   });
-  const selectedBranch = branches.find((item) => item.name === branch);
-  const label =
-    branchMode === "new"
-      ? t("worktree.createBranch")
-      : selectedBranch?.name || branch;
+  const autoOpenedRef = useRef(false);
+  const selected = options.find((item) => item.path === value);
+  const label = unselected || !selected
+    ? t("worktree.selectRepository")
+    : selected.label;
+
+  // Opening on mount is how "no repository preselected" is surfaced: picking the
+  // wrong repository sends the agent to work in the wrong place, so the choice is
+  // put in front of the user instead of blocking the send button. Only ever fires
+  // once, so a manual close is not undone.
+  useEffect(() => {
+    if (!autoOpen || autoOpenedRef.current || disabled) {
+      return;
+    }
+    autoOpenedRef.current = true;
+    setOpen(true);
+  }, [autoOpen, disabled]);
 
   useEffect(() => {
     if (disabled) {
@@ -72,12 +104,12 @@ export function WorktreeBranchSelector({
     };
   }, [open]);
 
-  const selectBranch = (nextMode: "new" | "existing", nextBranch: string) => {
-    onChange(nextMode, nextBranch);
+  const selectRepo = (repoPath: string) => {
+    onChange(repoPath);
     setOpen(false);
   };
 
-  const renderCheck = (selected: boolean) => (
+  const renderCheck = (isSelected: boolean) => (
     <span
       aria-hidden="true"
       style={{
@@ -87,7 +119,7 @@ export function WorktreeBranchSelector({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        color: selected ? "var(--accent-color)" : "transparent",
+        color: isSelected ? "var(--accent-color)" : "transparent",
       }}
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
@@ -103,7 +135,9 @@ export function WorktreeBranchSelector({
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        aria-label={t("worktree.selectRepository")}
+        title={unselected || !selected ? t("worktree.selectRepository") : selected.path || selected.label}
+        onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
@@ -112,13 +146,17 @@ export function WorktreeBranchSelector({
         }}
         style={{
           width: "100%",
-          minWidth: "92px",
+          minWidth: "84px",
           maxWidth: `${maxWidth}px`,
           height: `${height}px`,
           borderRadius: "6px",
-          border: open ? "1px solid var(--accent-color)" : "1px solid var(--border-color)",
+          border: open
+            ? "1px solid var(--accent-color)"
+            : unselected
+              ? "1px solid rgba(180, 83, 9, 0.42)"
+              : "1px solid var(--border-color)",
           background: "var(--mobile-overlay-bg)",
-          color: "var(--text-primary)",
+          color: unselected ? "#b45309" : "var(--text-primary)",
           display: "flex",
           alignItems: "center",
           gap: "5px",
@@ -129,6 +167,14 @@ export function WorktreeBranchSelector({
           boxShadow: open ? "0 0 0 2px color-mix(in srgb, var(--accent-color) 14%, transparent)" : "none",
         }}
       >
+        <span
+          aria-hidden="true"
+          style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", color: "var(--text-secondary)" }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+            <path d="M4 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
         <span
           style={{
             minWidth: 0,
@@ -164,7 +210,7 @@ export function WorktreeBranchSelector({
         <div
           ref={menuRef}
           role="listbox"
-          aria-label={t("worktree.createBranch")}
+          aria-label={t("worktree.selectRepository")}
           style={{
             position: "fixed",
             top: viewportMenuPos?.top ?? 0,
@@ -173,7 +219,7 @@ export function WorktreeBranchSelector({
             zIndex: 1200,
             width: "max-content",
             minWidth: "220px",
-            maxWidth: "min(300px, calc(100vw - 24px))",
+            maxWidth: "min(320px, calc(100vw - 24px))",
             maxHeight: "min(46dvh, 292px)",
             overflowY: "auto",
             overscrollBehavior: "contain",
@@ -184,79 +230,24 @@ export function WorktreeBranchSelector({
             boxShadow: "0 14px 36px rgba(15, 23, 42, 0.18)",
           }}
         >
-          <button
-            type="button"
-            role="option"
-            aria-selected={branchMode === "new"}
-            onClick={() => selectBranch("new", "")}
-            style={{
-              width: "100%",
-              minHeight: "38px",
-              padding: "7px 9px",
-              border: "none",
-              borderRadius: "8px",
-              background: branchMode === "new" ? "rgba(59, 130, 246, 0.10)" : "transparent",
-              color: branchMode === "new" ? "var(--accent-color)" : "var(--text-primary)",
-              display: "flex",
-              alignItems: "center",
-              gap: "7px",
-              textAlign: "left",
-              cursor: "pointer",
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                width: "24px",
-                height: "24px",
-                flex: "0 0 24px",
-                borderRadius: "7px",
-                background: "color-mix(in srgb, var(--accent-color) 12%, transparent)",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "var(--accent-color)",
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
-                <path d="M6 3v12a4 4 0 0 0 4 4h2M6 7h4a4 4 0 0 1 4 4v1m4-3v6m-3-3h6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </span>
-            <span style={{ minWidth: 0, flex: 1, fontSize: "13px", fontWeight: 700 }}>
-              {t("worktree.createBranch")}
-            </span>
-            {renderCheck(branchMode === "new")}
-          </button>
-
-          {branches.length > 0 ? (
-            <div
-              aria-hidden="true"
-              style={{
-                height: "1px",
-                margin: "5px 7px",
-                background: "var(--menu-border)",
-              }}
-            />
-          ) : null}
-
-          {branches.map((item) => {
-            const selected = branchMode === "existing" && branch === item.name;
+          {options.map((item) => {
+            const isSelected = !unselected && item.path === value;
             return (
               <button
-                key={item.name}
+                key={item.path || "__root__"}
                 type="button"
                 role="option"
-                aria-selected={selected}
-                title={item.name}
-                onClick={() => selectBranch("existing", item.name)}
+                aria-selected={isSelected}
+                title={item.path || item.label}
+                onClick={() => selectRepo(item.path)}
                 style={{
                   width: "100%",
                   minHeight: "38px",
                   padding: "7px 9px",
                   border: "none",
                   borderRadius: "8px",
-                  background: selected ? "rgba(59, 130, 246, 0.10)" : "transparent",
-                  color: selected ? "var(--accent-color)" : "var(--text-primary)",
+                  background: isSelected ? "rgba(59, 130, 246, 0.10)" : "transparent",
+                  color: isSelected ? "var(--accent-color)" : "var(--text-primary)",
                   display: "flex",
                   alignItems: "center",
                   gap: "7px",
@@ -264,35 +255,33 @@ export function WorktreeBranchSelector({
                   cursor: "pointer",
                 }}
               >
-                <span
-                  style={{
-                    minWidth: 0,
-                    flex: 1,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontSize: "13px",
-                    fontWeight: selected ? 700 : 550,
-                  }}
-                >
-                  {item.name}
-                </span>
-                {item.current ? (
+                <span style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: "1px" }}>
                   <span
                     style={{
-                      flex: "0 0 auto",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "rgba(100, 116, 139, 0.11)",
-                      color: "var(--text-secondary)",
-                      fontSize: "10px",
+                      fontSize: "13px",
                       fontWeight: 700,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                     }}
                   >
-                    {t("worktree.current")}
+                    {item.label}
                   </span>
-                ) : null}
-                {renderCheck(selected)}
+                  {item.branch ? (
+                    <span
+                      style={{
+                        fontSize: "11px",
+                        color: "var(--text-secondary)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {item.branch}
+                    </span>
+                  ) : null}
+                </span>
+                {renderCheck(isSelected)}
               </button>
             );
           })}

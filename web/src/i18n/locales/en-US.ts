@@ -259,6 +259,10 @@ export const enUS = {
   "git.loadingStatusInline": "Loading git status...",
   "git.notRepository": "Not a Git repository",
   "git.emptyChangesOrHistory": "No Git changes or history",
+  "git.subRepositories": "Sub-repositories ({count})",
+  "git.confirmCommitRepository": "Commit all tracked changes in \"{repo}\"?",
+  "git.subRepositoriesTruncated": "More repositories exist; only the first ones are shown",
+  "git.scanningSubRepositories": "Scanning for Git repositories...",
   "git.openFile": "Open file",
   "git.discardChanges": "Discard changes",
   "git.confirmDeleteUntracked": "Delete untracked file \"{path}\"?",
@@ -598,6 +602,7 @@ export const enUS = {
   "e2ee.continue": "Continue",
 
   "worktree.createBranch": "Create new branch",
+  "worktree.selectRepository": "Select repository",
   "worktree.current": "Current",
   "worktree.loadingBranches": "Loading branches...",
   "worktree.processing": "Processing...",

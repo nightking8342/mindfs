@@ -145,7 +145,18 @@ func (s *AppContext) GetKanbanService() (*kanban.Service, error) {
 }
 
 func (s *AppContext) CreateTaskWorktree(ctx context.Context, rootID, name, branchMode, branch string) (kanban.WorktreeInfo, error) {
-	root, err := s.GetRoot(rootID)
+	return s.CreateTaskWorktreeInRepo(ctx, rootID, "", name, branchMode, branch)
+}
+
+// CreateTaskWorktreeInRepo adds a worktree to a specific repository under the
+// managed root. An empty repoPath targets the root itself.
+//
+// The worktree lands in "<repo>/.worktree/" rather than "<root>/.worktree/":
+// generated names are date-sequenced, so sibling repositories sharing one parent
+// would collide on the same day, and .git/info/exclude only covers paths inside
+// its own repository.
+func (s *AppContext) CreateTaskWorktreeInRepo(ctx context.Context, rootID, repoPath, name, branchMode, branch string) (kanban.WorktreeInfo, error) {
+	repoRoot, err := s.resolveWorktreeRepoPath(ctx, rootID, repoPath)
 	if err != nil {
 		return kanban.WorktreeInfo{}, err
 	}
@@ -153,16 +164,17 @@ func (s *AppContext) CreateTaskWorktree(ctx context.Context, rootID, name, branc
 	if branchMode == "" {
 		branchMode = "new"
 	}
-	parentPath := filepath.Join(root.RootPath, ".worktree")
+	parentPath := filepath.Join(repoRoot, ".worktree")
 	if err := os.MkdirAll(parentPath, 0o755); err != nil {
 		return kanban.WorktreeInfo{}, err
 	}
-	if err := ensureTaskWorktreeExcluded(root.RootPath); err != nil {
-		log.Printf("[kanban] worktree.exclude.error root=%s err=%v", root.RootPath, err)
+	if err := ensureTaskWorktreeExcluded(repoRoot); err != nil {
+		log.Printf("[kanban] worktree.exclude.error root=%s err=%v", repoRoot, err)
 	}
 	uc := &usecase.Service{Registry: s}
 	out, err := uc.CreateGitWorktree(ctx, usecase.CreateGitWorktreeInput{
 		RootID:     rootID,
+		RepoPath:   repoPath,
 		ParentPath: parentPath,
 		Name:       name,
 		BranchMode: branchMode,
@@ -176,7 +188,13 @@ func (s *AppContext) CreateTaskWorktree(ctx context.Context, rootID, name, branc
 }
 
 func (s *AppContext) CreateSessionWorktree(ctx context.Context, rootID, branchMode, branch string) (kanban.WorktreeInfo, error) {
-	root, err := s.GetRoot(rootID)
+	return s.CreateSessionWorktreeInRepo(ctx, rootID, "", branchMode, branch)
+}
+
+// CreateSessionWorktreeInRepo creates a session worktree in a specific
+// repository under the managed root. An empty repoPath targets the root itself.
+func (s *AppContext) CreateSessionWorktreeInRepo(ctx context.Context, rootID, repoPath, branchMode, branch string) (kanban.WorktreeInfo, error) {
+	repoRoot, err := s.resolveWorktreeRepoPath(ctx, rootID, repoPath)
 	if err != nil {
 		return kanban.WorktreeInfo{}, err
 	}
@@ -184,7 +202,7 @@ func (s *AppContext) CreateSessionWorktree(ctx context.Context, rootID, branchMo
 	defer s.sessionWorktreeMu.Unlock()
 
 	names := make([]string, 0, 16)
-	worktreeParent := filepath.Join(root.RootPath, ".worktree")
+	worktreeParent := filepath.Join(repoRoot, ".worktree")
 	if entries, readErr := os.ReadDir(worktreeParent); readErr == nil {
 		for _, entry := range entries {
 			names = append(names, entry.Name())
@@ -192,7 +210,7 @@ func (s *AppContext) CreateSessionWorktree(ctx context.Context, rootID, branchMo
 	} else if !os.IsNotExist(readErr) {
 		return kanban.WorktreeInfo{}, readErr
 	}
-	branches, err := gitview.ListBranches(ctx, root.RootPath)
+	branches, err := gitview.ListBranches(ctx, repoRoot)
 	if err != nil {
 		return kanban.WorktreeInfo{}, err
 	}
@@ -200,7 +218,35 @@ func (s *AppContext) CreateSessionWorktree(ctx context.Context, rootID, branchMo
 		names = append(names, item.Name)
 	}
 	name := nextSessionWorktreeName(time.Now(), names)
-	return s.CreateTaskWorktree(ctx, rootID, name, branchMode, branch)
+	return s.CreateTaskWorktreeInRepo(ctx, rootID, repoPath, name, branchMode, branch)
+}
+
+// resolveWorktreeRepoPath validates a caller-supplied repository path and
+// returns the absolute repository root to operate on.
+//
+// Beyond the "inside the managed root" check, the target must actually be a
+// repository: without this the caller would surface git's raw "not a git
+// repository" output from a later step instead of a clear error.
+func (s *AppContext) resolveWorktreeRepoPath(ctx context.Context, rootID, repoPath string) (string, error) {
+	root, err := s.GetRoot(rootID)
+	if err != nil {
+		return "", err
+	}
+	uc := &usecase.Service{Registry: s}
+	resolved, err := uc.ResolveRepoPath(root.RootPath, repoPath)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(repoPath) != "" {
+		ok, err := gitview.HasRepo(ctx, resolved)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", fmt.Errorf("%q is not a git repository", resolved)
+		}
+	}
+	return resolved, nil
 }
 
 func nextSessionWorktreeName(now time.Time, existingNames []string) string {

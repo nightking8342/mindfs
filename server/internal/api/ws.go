@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -569,6 +570,9 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	createWorktree := getBool(req.Payload, "create_worktree")
 	worktreeBranchMode := getString(req.Payload, "worktree_branch_mode")
 	worktreeBranch := getString(req.Payload, "worktree_branch")
+	// Selects which repository under the root gets the worktree; empty means the
+	// root itself, which is the only option when the root is a plain repository.
+	worktreeRepoPath := getString(req.Payload, "worktree_repo_path")
 	if content == "" || sessionType == "" || (agentName == "" && sessionType != session.TypeCommand) {
 		h.sendWSError(conn, clientID, req.ID, "invalid_request", "content, type and agent required")
 		return
@@ -611,7 +615,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		}
 		key = created.Key
 		if createWorktree && sessionType != session.TypeCommand {
-			wt, worktreeErr := h.AppContext.CreateSessionWorktree(ctx, rootID, worktreeBranchMode, worktreeBranch)
+			wt, worktreeErr := h.AppContext.CreateSessionWorktreeInRepo(ctx, rootID, worktreeRepoPath, worktreeBranchMode, worktreeBranch)
 			if worktreeErr != nil {
 				if manager, managerErr := h.AppContext.GetSessionManager(rootID); managerErr == nil {
 					_ = manager.Delete(ctx, created.Key)
@@ -624,7 +628,16 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 				branch := worktreeBranch
 				head := ""
 				if root, rootErr := h.AppContext.GetRoot(rootID); rootErr == nil {
-					if match, ok := resolveRelatedWorktree(ctx, root, wt.Path); ok {
+					// resolveRelatedWorktree lists worktrees of root.RootPath, which
+					// yields nothing when the root is a plain container of
+					// repositories. Resolve against the owning repository instead, or
+					// the recorded branch stays empty in "new branch" mode (the client
+					// sends no branch name in that case).
+					resolveRoot := root
+					if trimmed := strings.TrimSpace(worktreeRepoPath); trimmed != "" {
+						resolveRoot = fs.NewRootInfo(root.ID, root.Name, filepath.Clean(trimmed))
+					}
+					if match, ok := resolveRelatedWorktree(ctx, resolveRoot, wt.Path); ok {
 						branch = match.Branch
 						head = match.Head
 					}

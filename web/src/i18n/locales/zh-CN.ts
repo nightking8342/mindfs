@@ -257,6 +257,10 @@ export const zhCN = {
   "git.loadingStatusInline": "加载 git status 中...",
   "git.notRepository": "不是 Git 仓库",
   "git.emptyChangesOrHistory": "暂无 Git 变更或历史",
+  "git.subRepositories": "子仓库（{count}）",
+  "git.confirmCommitRepository": "提交「{repo}」中全部已跟踪的修改？",
+  "git.subRepositoriesTruncated": "仓库较多，仅显示前若干个",
+  "git.scanningSubRepositories": "正在扫描 Git 仓库...",
   "git.openFile": "打开文件",
   "git.discardChanges": "撤销变更",
   "git.confirmDeleteUntracked": "确认删除未跟踪文件“{path}”？",
@@ -596,6 +600,7 @@ export const zhCN = {
   "e2ee.continue": "继续",
 
   "worktree.createBranch": "创建新分支",
+  "worktree.selectRepository": "选择仓库",
   "worktree.current": "当前",
   "worktree.loadingBranches": "加载分支中...",
   "worktree.processing": "处理中...",

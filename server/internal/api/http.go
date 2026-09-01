@@ -289,6 +289,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/git/commit/diff", h.protectedEndpoint(h.handleGitCommitDiff))
 	r.Get("/api/git/related-file/diff", h.protectedEndpoint(h.handleGitRelatedFileDiff))
 	r.Get("/api/git/branches", h.protectedEndpoint(h.handleGitBranches))
+	r.Get("/api/git/repos", h.protectedEndpoint(h.handleGitSubRepos))
 	r.Get("/api/git/worktrees", h.protectedEndpoint(h.handleGitWorktreeList))
 	r.Post("/api/git/checkout", h.protectedEndpoint(h.handleGitCheckout))
 	r.Post("/api/git/pull", h.protectedEndpoint(h.handleGitPull))
@@ -1821,7 +1822,11 @@ func (h *HTTPHandler) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uc := h.service()
-	out, err := uc.GetGitStatus(r.Context(), usecase.GitStatusInput{RootID: rootID, RootPath: rootPath})
+	out, err := uc.GetGitStatus(r.Context(), usecase.GitStatusInput{
+		RootID:   rootID,
+		RootPath: rootPath,
+		RepoPath: strings.TrimSpace(r.URL.Query().Get("repo_path")),
+	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
@@ -1872,6 +1877,7 @@ func (h *HTTPHandler) handleGitHistory(w http.ResponseWriter, r *http.Request) {
 	uc := h.service()
 	out, err := uc.GetGitHistory(r.Context(), usecase.GitHistoryInput{
 		RootID:       rootID,
+		RepoPath:     strings.TrimSpace(r.URL.Query().Get("repo_path")),
 		Limit:        limit,
 		BeforeCommit: strings.TrimSpace(r.URL.Query().Get("before_commit")),
 		AfterCommit:  strings.TrimSpace(r.URL.Query().Get("after_commit")),
@@ -1896,8 +1902,9 @@ func (h *HTTPHandler) handleGitCommitFiles(w http.ResponseWriter, r *http.Reques
 	}
 	uc := h.service()
 	out, err := uc.GetGitCommitFiles(r.Context(), usecase.GitCommitFilesInput{
-		RootID: rootID,
-		Commit: commit,
+		RootID:   rootID,
+		RepoPath: strings.TrimSpace(r.URL.Query().Get("repo_path")),
+		Commit:   commit,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
@@ -1924,9 +1931,10 @@ func (h *HTTPHandler) handleGitCommitDiff(w http.ResponseWriter, r *http.Request
 	}
 	uc := h.service()
 	out, err := uc.GetGitCommitDiff(r.Context(), usecase.GitCommitDiffInput{
-		RootID: rootID,
-		Commit: commit,
-		Path:   path,
+		RootID:   rootID,
+		RepoPath: strings.TrimSpace(r.URL.Query().Get("repo_path")),
+		Commit:   commit,
+		Path:     path,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
@@ -1971,7 +1979,25 @@ func (h *HTTPHandler) handleGitBranches(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	uc := h.service()
-	out, err := uc.ListGitBranches(r.Context(), usecase.ListGitBranchesInput{RootID: rootID})
+	out, err := uc.ListGitBranches(r.Context(), usecase.ListGitBranchesInput{
+		RootID:   rootID,
+		RepoPath: strings.TrimSpace(r.URL.Query().Get("repo_path")),
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
+func (h *HTTPHandler) handleGitSubRepos(w http.ResponseWriter, r *http.Request) {
+	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	if rootID == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
+		return
+	}
+	uc := h.service()
+	out, err := uc.ListGitSubRepos(r.Context(), usecase.ListGitSubReposInput{RootID: rootID})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
@@ -1981,14 +2007,16 @@ func (h *HTTPHandler) handleGitBranches(w http.ResponseWriter, r *http.Request) 
 
 func (h *HTTPHandler) handleGitCheckout(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RootID string `json:"root"`
-		Branch string `json:"branch"`
+		RootID   string `json:"root"`
+		RepoPath string `json:"repo_path"`
+		Branch   string `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid json body"))
 		return
 	}
 	req.RootID = strings.TrimSpace(req.RootID)
+	req.RepoPath = strings.TrimSpace(req.RepoPath)
 	req.Branch = strings.TrimSpace(req.Branch)
 	if req.RootID == "" {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
@@ -2000,8 +2028,9 @@ func (h *HTTPHandler) handleGitCheckout(w http.ResponseWriter, r *http.Request) 
 	}
 	uc := h.service()
 	out, err := uc.CheckoutGitBranch(r.Context(), usecase.CheckoutGitBranchInput{
-		RootID: req.RootID,
-		Branch: req.Branch,
+		RootID:   req.RootID,
+		RepoPath: req.RepoPath,
+		Branch:   req.Branch,
 	})
 	if err != nil {
 		respondJSON(w, http.StatusConflict, map[string]any{
@@ -2019,7 +2048,7 @@ func (h *HTTPHandler) handleGitPull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uc := h.service()
-	out, err := uc.GitPull(r.Context(), usecase.GitActionInput{RootID: req.RootID})
+	out, err := uc.GitPull(r.Context(), usecase.GitActionInput{RootID: req.RootID, RepoPath: req.RepoPath})
 	respondGitAction(w, out, err, "git_pull_failed")
 }
 
@@ -2029,7 +2058,7 @@ func (h *HTTPHandler) handleGitPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uc := h.service()
-	out, err := uc.GitPush(r.Context(), usecase.GitActionInput{RootID: req.RootID})
+	out, err := uc.GitPush(r.Context(), usecase.GitActionInput{RootID: req.RootID, RepoPath: req.RepoPath})
 	respondGitAction(w, out, err, "git_push_failed")
 }
 
@@ -2040,8 +2069,9 @@ func (h *HTTPHandler) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GitCommit(r.Context(), usecase.GitActionInput{
-		RootID:  req.RootID,
-		Message: req.Message,
+		RootID:   req.RootID,
+		RepoPath: req.RepoPath,
+		Message:  req.Message,
 	})
 	respondGitAction(w, out, err, "git_commit_failed")
 }
@@ -2053,8 +2083,9 @@ func (h *HTTPHandler) handleGitStage(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GitStagePath(r.Context(), usecase.GitActionInput{
-		RootID: req.RootID,
-		Path:   req.Path,
+		RootID:   req.RootID,
+		RepoPath: req.RepoPath,
+		Path:     req.Path,
 	})
 	respondGitAction(w, out, err, "git_stage_failed")
 }
@@ -2066,8 +2097,9 @@ func (h *HTTPHandler) handleGitUnstage(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GitUnstagePath(r.Context(), usecase.GitActionInput{
-		RootID: req.RootID,
-		Path:   req.Path,
+		RootID:   req.RootID,
+		RepoPath: req.RepoPath,
+		Path:     req.Path,
 	})
 	respondGitAction(w, out, err, "git_unstage_failed")
 }
@@ -2079,18 +2111,22 @@ func (h *HTTPHandler) handleGitDiscard(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GitDiscardPath(r.Context(), usecase.GitActionInput{
-		RootID: req.RootID,
-		Path:   req.Path,
-		Status: req.Status,
+		RootID:   req.RootID,
+		RepoPath: req.RepoPath,
+		Path:     req.Path,
+		Status:   req.Status,
 	})
 	respondGitAction(w, out, err, "git_discard_failed")
 }
 
 type gitActionRequest struct {
-	RootID  string `json:"root"`
-	Path    string `json:"path"`
-	Status  string `json:"status"`
-	Message string `json:"message"`
+	RootID string `json:"root"`
+	// RepoPath selects a sub-repository under the managed root; empty means the
+	// root itself. Validated against the root in the usecase layer.
+	RepoPath string `json:"repo_path"`
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
 }
 
 func decodeGitActionRequest(w http.ResponseWriter, r *http.Request, requirePath bool, requireMessage bool) (gitActionRequest, bool) {
@@ -2100,6 +2136,7 @@ func decodeGitActionRequest(w http.ResponseWriter, r *http.Request, requirePath 
 		return req, false
 	}
 	req.RootID = strings.TrimSpace(req.RootID)
+	req.RepoPath = strings.TrimSpace(req.RepoPath)
 	req.Path = strings.TrimSpace(req.Path)
 	req.Status = strings.TrimSpace(req.Status)
 	req.Message = strings.TrimSpace(req.Message)

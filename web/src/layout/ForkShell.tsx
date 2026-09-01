@@ -191,6 +191,21 @@ function useSwipeRevealSidebar(
     let activeSide: "left" | "right" | null = null;
     let mode: "reveal" | "close" | null = null;
 
+    // 触摸起点落在「自带横向手势的控件」内时不接管侧栏滑动。这些控件自己处理
+    // 触摸（如输入框小蓝圈的「左滑新建会话」），否则两个手势抢同一 touch 事件，
+    // 会既新建会话又误关侧边栏。用 closest 判断起点是否落在这些标记内。
+    const isOwnGestureTarget = (target: Element | null): boolean => {
+      if (!target) {
+        return false;
+      }
+      const el = target as HTMLElement;
+      return !!(
+        el.closest('[data-onboarding="session-ring"]') ||
+        el.closest('[data-onboarding="action-bar"]') ||
+        el.closest('[data-fork-region="footer"]')
+      );
+    };
+
     // 从触摸起点向上（到 main 为止）找横向可滚动容器：看板、代码块、表格这类
     // overflow-x auto/scroll 且内容超宽的元素，横向拖拽是它们的功能，不能让位给唤出。
     const isHorizScrollable = (target: Element | null): boolean => {
@@ -273,8 +288,12 @@ function useSwipeRevealSidebar(
       }
       startX = touch.clientX;
       startY = touch.clientY;
-      // 起点在横向可滚动容器内 → 本次让位给滚动，不操作侧栏
-      tracking = !isHorizScrollable(e.target as Element | null);
+      // 起点在横向可滚动容器内 → 本次让位给滚动，不操作侧栏；
+      // 起点在自带横向手势的控件内（输入框小蓝圈「左滑新建会话」等）→ 同样让位，
+      // 避免与新会话手势抢同一 touch 事件而误关侧边栏。
+      tracking =
+        !isHorizScrollable(e.target as Element | null) &&
+        !isOwnGestureTarget(e.target as Element | null);
       activeSide = null;
       mode = null;
     };

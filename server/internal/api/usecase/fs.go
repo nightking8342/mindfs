@@ -214,6 +214,10 @@ type ReadFileOutput struct {
 type GitStatusInput struct {
 	RootID   string
 	RootPath string
+	// RepoPath selects a sub-repository under the managed root. Unlike RootPath
+	// (which addresses a repository directly, including linked worktrees living
+	// outside the root) this is validated against the root.
+	RepoPath string
 }
 
 type GitStatusOutput struct {
@@ -232,6 +236,7 @@ type GitDiffOutput struct {
 
 type GitHistoryInput struct {
 	RootID       string
+	RepoPath     string
 	Limit        int
 	BeforeCommit string
 	AfterCommit  string
@@ -242,8 +247,9 @@ type GitHistoryOutput struct {
 }
 
 type GitCommitFilesInput struct {
-	RootID string
-	Commit string
+	RootID   string
+	RepoPath string
+	Commit   string
 }
 
 type GitCommitFilesOutput struct {
@@ -251,9 +257,10 @@ type GitCommitFilesOutput struct {
 }
 
 type GitCommitDiffInput struct {
-	RootID string
-	Commit string
-	Path   string
+	RootID   string
+	RepoPath string
+	Commit   string
+	Path     string
 }
 
 type GitCommitDiffOutput struct {
@@ -321,7 +328,11 @@ func (s *Service) GetGitStatus(ctx context.Context, in GitStatusInput) (GitStatu
 	if err != nil {
 		return GitStatusOutput{}, err
 	}
-	status, err := gitview.InspectStatus(ctx, root.RootPath)
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
+	if err != nil {
+		return GitStatusOutput{}, err
+	}
+	status, err := gitview.InspectStatus(ctx, rootPath)
 	if err != nil {
 		return GitStatusOutput{}, err
 	}
@@ -341,14 +352,11 @@ func (s *Service) GetGitDiff(ctx context.Context, in GitDiffInput) (GitDiffOutpu
 	}
 	path := strings.TrimSpace(in.Path)
 	repoPath := strings.TrimSpace(in.RepoPath)
-	rootPath := root.RootPath
-	if repoPath != "" {
-		if !filepath.IsAbs(repoPath) {
-			return GitDiffOutput{}, errors.New("repo path must be absolute")
-		}
-		rootPath = filepath.Clean(repoPath)
-	} else {
-		var err error
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, repoPath)
+	if err != nil {
+		return GitDiffOutput{}, err
+	}
+	if repoPath == "" {
 		path, err = root.NormalizePath(path)
 		if err != nil {
 			return GitDiffOutput{}, err
@@ -376,7 +384,11 @@ func (s *Service) GetGitHistory(ctx context.Context, in GitHistoryInput) (GitHis
 	if err != nil {
 		return GitHistoryOutput{}, err
 	}
-	history, err := gitview.ListHistory(ctx, root.RootPath, in.Limit, in.BeforeCommit, in.AfterCommit)
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
+	if err != nil {
+		return GitHistoryOutput{}, err
+	}
+	history, err := gitview.ListHistory(ctx, rootPath, in.Limit, in.BeforeCommit, in.AfterCommit)
 	if err != nil {
 		return GitHistoryOutput{}, err
 	}
@@ -394,7 +406,11 @@ func (s *Service) GetGitCommitFiles(ctx context.Context, in GitCommitFilesInput)
 	if strings.TrimSpace(in.Commit) == "" {
 		return GitCommitFilesOutput{}, errors.New("commit required")
 	}
-	files, err := gitview.ListCommitFiles(ctx, root.RootPath, in.Commit)
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
+	if err != nil {
+		return GitCommitFilesOutput{}, err
+	}
+	files, err := gitview.ListCommitFiles(ctx, rootPath, in.Commit)
 	if err != nil {
 		return GitCommitFilesOutput{}, err
 	}
@@ -415,17 +431,29 @@ func (s *Service) GetGitCommitDiff(ctx context.Context, in GitCommitDiffInput) (
 	if strings.TrimSpace(in.Path) == "" {
 		return GitCommitDiffOutput{}, errors.New("path required")
 	}
-	path, err := root.NormalizePath(in.Path)
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
 	if err != nil {
 		return GitCommitDiffOutput{}, err
 	}
-	diff, err := gitview.ReadCommitDiff(ctx, root.RootPath, in.Commit, path)
+	// With a sub-repository the path is already relative to that repository, so
+	// normalizing against the managed root would reject or rewrite it.
+	path := strings.TrimSpace(in.Path)
+	repoIsRoot := sameManagedDirPath(rootPath, root.RootPath)
+	if repoIsRoot {
+		path, err = root.NormalizePath(in.Path)
+		if err != nil {
+			return GitCommitDiffOutput{}, err
+		}
+	}
+	diff, err := gitview.ReadCommitDiff(ctx, rootPath, in.Commit, path)
 	if err != nil {
 		return GitCommitDiffOutput{}, err
 	}
-	meta, err := root.GetFileMeta(path)
-	if err != nil {
-		meta = nil
+	var meta []fs.FileMetaEntry
+	if repoIsRoot {
+		if value, err := root.GetFileMeta(path); err == nil {
+			meta = value
+		}
 	}
 	diff.FileMeta = fillFileMetaSessionInfo(ctx, s, in.RootID, meta)
 	return GitCommitDiffOutput{Diff: diff}, nil

@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { ModeIcon } from "./ModeIcon";
 import { useI18n, type MessageKey } from "../i18n";
+import { useViewportMenu } from "../hooks/useViewportMenu";
 
 export type SessionMode = "chat" | "plugin" | "command";
 
@@ -28,6 +30,14 @@ export function ModeSelector({
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const viewportMenuPos = useViewportMenu({
+    open: isOpen,
+    anchorRef: dropdownRef,
+    menuRef,
+    menuPlacement: "top",
+    align: "right",
+  });
 
   useEffect(() => {
     if (disabled) {
@@ -91,12 +101,14 @@ export function ModeSelector({
         </div>
       </button>
 
-      {isOpen && !disabled && (
+      {isOpen && !disabled && createPortal(
         <div
+          ref={menuRef}
           style={{
-            position: "absolute",
-            bottom: "calc(100% + 8px)",
-            right: 0,
+            position: "fixed",
+            top: viewportMenuPos?.top ?? 0,
+            left: viewportMenuPos?.left ?? 0,
+            visibility: viewportMenuPos ? "visible" : "hidden",
             background: "var(--menu-bg)",
             border: "1px solid var(--menu-border)",
             borderRadius: "12px",
@@ -148,7 +160,8 @@ export function ModeSelector({
               <span>{t(modeLabelKeys[m])}</span>
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

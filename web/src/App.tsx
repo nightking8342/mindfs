@@ -71,9 +71,11 @@ import {
   fetchGitHistory,
   fetchGitStatus,
   fetchGitStatusByPath,
+  fetchGitSubRepos,
   fetchGitWorktrees,
   getCachedGitHistory,
   getCachedGitHistoryHead,
+  gitScopeKey,
   pullGit,
   pushGit,
   removeGitWorktree,
@@ -85,6 +87,8 @@ import {
   type GitHistoryPayload,
   type GitStatusItem,
   type GitStatusPayload,
+  type GitSubRepoItem,
+  type GitSubReposPayload,
   type GitWorktreeItem,
 } from "./services/git";
 import {
@@ -1223,6 +1227,16 @@ function parentDirsOfFile(path: string): string[] {
     dirs.push(parts.slice(0, i).join("/"));
   }
   return dirs;
+}
+
+// Joins a sub-repository's root-relative prefix with a path inside it, so a
+// sub-repository entry can be addressed relative to the managed root.
+function joinRootRelativePath(prefix: string, path: string): string {
+  const normalizedPrefix = normalizePath(prefix);
+  const normalizedPath = normalizePath(path);
+  if (!normalizedPrefix) return normalizedPath;
+  if (!normalizedPath) return normalizedPrefix;
+  return `${normalizedPrefix}/${normalizedPath}`;
 }
 
 function dirnameOfPath(path: string): string {
@@ -2496,6 +2510,17 @@ export function App({ onGoHome }: AppProps) {
   const [gitStatusLoadingByRoot, setGitStatusLoadingByRoot] = useState<Record<string, boolean>>({});
   const [gitHistoryByRoot, setGitHistoryByRoot] = useState<Record<string, GitHistoryPayload | null>>({});
   const [gitHistoryLoadingByRoot, setGitHistoryLoadingByRoot] = useState<Record<string, boolean>>({});
+  // Sub-repository git state. A managed root can be a container of independent
+  // repositories rather than a repository itself, so these key on
+  // gitScopeKey(rootId, repoPath) instead of the root alone. The root's own
+  // repository keeps using the by-root state above.
+  const [gitSubReposByRoot, setGitSubReposByRoot] = useState<Record<string, GitSubReposPayload | null>>({});
+  const [gitSubReposLoadingByRoot, setGitSubReposLoadingByRoot] = useState<Record<string, boolean>>({});
+  const [gitStatusByScope, setGitStatusByScope] = useState<Record<string, GitStatusPayload | null>>({});
+  const [gitStatusLoadingByScope, setGitStatusLoadingByScope] = useState<Record<string, boolean>>({});
+  const [gitHistoryByScope, setGitHistoryByScope] = useState<Record<string, GitHistoryPayload | null>>({});
+  const [gitHistoryLoadingByScope, setGitHistoryLoadingByScope] = useState<Record<string, boolean>>({});
+  const [gitScopeExpanded, setGitScopeExpanded] = useState<Record<string, boolean>>({});
   const [gitStatusExpandedByRoot, setGitStatusExpandedByRoot] = useState<Record<string, boolean>>(() =>
     loadBooleanRecord(GIT_STATUS_EXPANDED_STORAGE_KEY),
   );
@@ -4847,6 +4872,123 @@ export function App({ onGoHome }: AppProps) {
     }
   }, [gitHistory, gitHistoryByRoot, gitHistoryLoadingMore]);
 
+  // Discovers independent repositories nested under a managed root. Cached per
+  // root and refreshed only on demand (sidebar refresh, tab entry) because the
+  // scan touches the filesystem.
+  const refreshGitSubRepos = useCallback(async (rootID: string) => {
+    if (!rootID) {
+      return null;
+    }
+    setGitSubReposLoadingByRoot((prev) => ({ ...prev, [rootID]: true }));
+    try {
+      const payload = await fetchGitSubRepos(rootID);
+      setGitSubReposByRoot((prev) => ({ ...prev, [rootID]: payload }));
+      return payload;
+    } catch (err) {
+      console.error("[git.repos] failed", { rootID, err });
+      const fallback: GitSubReposPayload = { items: [], truncated: false, root_is_repo: false };
+      setGitSubReposByRoot((prev) => ({ ...prev, [rootID]: fallback }));
+      return fallback;
+    } finally {
+      setGitSubReposLoadingByRoot((prev) => ({ ...prev, [rootID]: false }));
+    }
+  }, []);
+
+  const refreshGitScopeStatus = useCallback(async (rootID: string, repoPath: string) => {
+    if (!rootID || !repoPath) {
+      return null;
+    }
+    const scope = gitScopeKey(rootID, repoPath);
+    setGitStatusLoadingByScope((prev) => ({ ...prev, [scope]: true }));
+    try {
+      const next = await fetchGitStatus(rootID, { repoPath });
+      setGitStatusByScope((prev) => ({ ...prev, [scope]: next }));
+      return next;
+    } catch (err) {
+      console.error("[git.status.scope] failed", { rootID, repoPath, err });
+      const fallback = { available: false, dirty_count: 0, items: [] } as GitStatusPayload;
+      setGitStatusByScope((prev) => ({ ...prev, [scope]: fallback }));
+      return fallback;
+    } finally {
+      setGitStatusLoadingByScope((prev) => ({ ...prev, [scope]: false }));
+    }
+  }, []);
+
+  const refreshGitScopeHistory = useCallback(async (
+    rootID: string,
+    repoPath: string,
+    options?: { force?: boolean },
+  ) => {
+    if (!rootID || !repoPath) {
+      return null;
+    }
+    const scope = gitScopeKey(rootID, repoPath);
+    if (!options?.force) {
+      const cachedHead = getCachedGitHistoryHead(rootID, undefined, { repoPath });
+      if (cachedHead && cachedHead.items.length > 0) {
+        setGitHistoryByScope((prev) => ({ ...prev, [scope]: cachedHead }));
+        return cachedHead;
+      }
+    }
+    setGitHistoryLoadingByScope((prev) => ({ ...prev, [scope]: true }));
+    try {
+      const next = await fetchGitHistory(rootID, { repoPath, force: options?.force });
+      if (next.commit_missing) {
+        clearGitHistoryCache(rootID, { repoPath });
+        const fresh = await fetchGitHistory(rootID, { repoPath, force: true });
+        setGitHistoryByScope((prev) => ({ ...prev, [scope]: fresh }));
+        return fresh;
+      }
+      setGitHistoryByScope((prev) => ({ ...prev, [scope]: next }));
+      return next;
+    } catch (err) {
+      console.error("[git.history.scope] failed", { rootID, repoPath, err });
+      const fallback = { available: false, items: [], has_more: false } as GitHistoryPayload;
+      setGitHistoryByScope((prev) => ({ ...prev, [scope]: fallback }));
+      return fallback;
+    } finally {
+      setGitHistoryLoadingByScope((prev) => ({ ...prev, [scope]: false }));
+    }
+  }, []);
+
+  const loadMoreGitScopeHistory = useCallback(async (rootID: string, repoPath: string) => {
+    if (!rootID || !repoPath || gitHistoryLoadingMore) {
+      return;
+    }
+    const scope = gitScopeKey(rootID, repoPath);
+    const currentItems = gitHistoryByScope[scope]?.items || [];
+    const beforeCommit = currentItems[currentItems.length - 1]?.hash || "";
+    if (!beforeCommit) {
+      return;
+    }
+    setGitHistoryLoadingMore(true);
+    try {
+      const next = await fetchGitHistory(rootID, { repoPath, beforeCommit });
+      if (next.commit_missing) {
+        clearGitHistoryCache(rootID, { repoPath });
+        const fresh = await fetchGitHistory(rootID, { repoPath, force: true });
+        setGitHistoryByScope((prev) => ({ ...prev, [scope]: fresh }));
+        return;
+      }
+      const cached = getCachedGitHistory(rootID, { repoPath });
+      const loadedCount = currentItems.length + next.items.length;
+      setGitHistoryByScope((prev) => ({
+        ...prev,
+        [scope]: cached
+          ? {
+              ...cached,
+              items: cached.items.slice(0, loadedCount),
+              has_more: cached.items.length > loadedCount || cached.has_more,
+            }
+          : next,
+      }));
+    } catch (err) {
+      console.error("[git.history.scope.more] failed", { rootID, repoPath, beforeCommit, err });
+    } finally {
+      setGitHistoryLoadingMore(false);
+    }
+  }, [gitHistoryByScope, gitHistoryLoadingMore]);
+
   const loadSessionsForRoot = useCallback(
     async (
       rootID: string,
@@ -5168,7 +5310,12 @@ export function App({ onGoHome }: AppProps) {
   );
 
   const openGitCommitDiff = useCallback(
-    async (rootID: string, commit: GitHistoryItem, item: GitStatusItem) => {
+    async (
+      rootID: string,
+      commit: GitHistoryItem,
+      item: GitStatusItem,
+      options?: { repoPath?: string },
+    ) => {
       if (!rootID || !commit?.hash || !item?.path) {
         return;
       }
@@ -5187,7 +5334,9 @@ export function App({ onGoHome }: AppProps) {
         pluginQuery: {},
       });
       try {
-        const next = await fetchGitCommitDiff(rootID, commit.hash, item);
+        const next = await fetchGitCommitDiff(rootID, commit.hash, item, {
+          repoPath: options?.repoPath,
+        });
         setGitDiff(next);
         if (currentRootIdRef.current !== rootID) {
           setCurrentRootId(rootID);
@@ -5208,12 +5357,25 @@ export function App({ onGoHome }: AppProps) {
   );
 
   const switchGitBranch = useCallback(
-    async (rootID: string, branch: string) => {
+    async (rootID: string, branch: string, repoPath?: string) => {
       if (!rootID || !branch) {
         return;
       }
+      const targetRepoPath = String(repoPath || "").trim();
       try {
-        const nextStatus = await checkoutGitBranch(rootID, branch);
+        const nextStatus = await checkoutGitBranch(rootID, branch, { repoPath: targetRepoPath });
+        if (targetRepoPath) {
+          const scope = gitScopeKey(rootID, targetRepoPath);
+          clearGitHistoryCache(rootID, { repoPath: targetRepoPath });
+          setGitStatusByScope((prev) => ({ ...prev, [scope]: nextStatus }));
+          await refreshGitScopeHistory(rootID, targetRepoPath, { force: true });
+          if (currentRootIdRef.current === rootID) {
+            setGitDiff(null);
+            setFile(null);
+            await refreshTreeDir(rootID, selectedDirRef.current || ".", true);
+          }
+          return;
+        }
         clearGitHistoryCache(rootID);
         setGitStatusByRoot((prev) => ({ ...prev, [rootID]: nextStatus }));
         await refreshGitHistory(rootID, { force: true });
@@ -5227,6 +5389,7 @@ export function App({ onGoHome }: AppProps) {
         const message = err instanceof Error ? err.message : t("git.checkoutFailed");
         console.error("[git.checkout] failed", {
           rootID,
+          repoPath: targetRepoPath,
           branch,
           message,
           payload: err instanceof ProtectedAPIError ? err.payload : undefined,
@@ -5237,6 +5400,7 @@ export function App({ onGoHome }: AppProps) {
           recoverable: true,
           details: {
             root: rootID,
+            repoPath: targetRepoPath,
             branch,
             payload: err instanceof ProtectedAPIError ? err.payload : undefined,
           },
@@ -5244,11 +5408,35 @@ export function App({ onGoHome }: AppProps) {
         throw err;
       }
     },
-    [refreshGitHistory, refreshTreeDir, t],
+    [refreshGitHistory, refreshGitScopeHistory, refreshTreeDir, t],
   );
 
   const applyGitActionResult = useCallback(
-    async (rootID: string, nextStatus: GitStatusPayload, options?: { refreshHistory?: boolean; clearDiff?: boolean }) => {
+    async (
+      rootID: string,
+      nextStatus: GitStatusPayload,
+      options?: { refreshHistory?: boolean; clearDiff?: boolean; repoPath?: string },
+    ) => {
+      const repoPath = String(options?.repoPath || "").trim();
+      // A sub-repository action must land in that repository's own state: writing
+      // its status into the by-root state would relabel the root's panel with
+      // another repository's changes.
+      if (repoPath) {
+        const scope = gitScopeKey(rootID, repoPath);
+        clearGitHistoryCache(rootID, { repoPath });
+        setGitStatusByScope((prev) => ({ ...prev, [scope]: nextStatus }));
+        if (options?.refreshHistory !== false) {
+          await refreshGitScopeHistory(rootID, repoPath, { force: true });
+        }
+        if (currentRootIdRef.current !== rootID) {
+          return;
+        }
+        if (options?.clearDiff) {
+          setGitDiff(null);
+        }
+        await refreshTreeDir(rootID, selectedDirRef.current || ".", true);
+        return;
+      }
       clearGitHistoryCache(rootID);
       setGitStatusByRoot((prev) => ({ ...prev, [rootID]: nextStatus }));
       if (options?.refreshHistory !== false) {
@@ -5263,7 +5451,7 @@ export function App({ onGoHome }: AppProps) {
       }
       await refreshTreeDir(rootID, selectedDirRef.current || ".", true);
     },
-    [refreshGitHistory, refreshTreeDir],
+    [refreshGitHistory, refreshGitScopeHistory, refreshTreeDir],
   );
 
   const runGitAction = useCallback(
@@ -5271,7 +5459,7 @@ export function App({ onGoHome }: AppProps) {
       rootID: string,
       action: string,
       run: () => Promise<{ status: GitStatusPayload; output?: string }>,
-      options?: { refreshHistory?: boolean; clearDiff?: boolean },
+      options?: { refreshHistory?: boolean; clearDiff?: boolean; repoPath?: string },
     ) => {
       if (!rootID) {
         return;
@@ -5283,6 +5471,7 @@ export function App({ onGoHome }: AppProps) {
         const message = err instanceof Error ? err.message : t("common.actionFailed", { action });
         console.error(`[git.${action}] failed`, {
           rootID,
+          repoPath: options?.repoPath || "",
           message,
           payload: err instanceof ProtectedAPIError ? err.payload : undefined,
           err,
@@ -5294,47 +5483,55 @@ export function App({ onGoHome }: AppProps) {
     [applyGitActionResult, t],
   );
 
+  // Each write takes an optional repoPath so the same handler serves the root
+  // repository and any sub-repository panel.
   const handleGitPull = useCallback(
-    (rootID: string) =>
-      runGitAction(rootID, "pull", () => pullGit(rootID), { clearDiff: true }),
+    (rootID: string, repoPath?: string) =>
+      runGitAction(rootID, "pull", () => pullGit(rootID, { repoPath }), { clearDiff: true, repoPath }),
     [runGitAction],
   );
 
   const handleGitPush = useCallback(
-    (rootID: string) =>
-      runGitAction(rootID, "push", () => pushGit(rootID)),
+    (rootID: string, repoPath?: string) =>
+      runGitAction(rootID, "push", () => pushGit(rootID, { repoPath }), { repoPath }),
     [runGitAction],
   );
 
   const handleGitCommit = useCallback(
-    (rootID: string, message: string) =>
-      runGitAction(rootID, "commit", () => commitGit(rootID, message), { clearDiff: true }),
+    (rootID: string, message: string, repoPath?: string) =>
+      runGitAction(rootID, "commit", () => commitGit(rootID, message, { repoPath }), {
+        clearDiff: true,
+        repoPath,
+      }),
     [runGitAction],
   );
 
   const handleGitStageItem = useCallback(
-    (rootID: string, item: GitStatusItem) =>
-      runGitAction(rootID, "stage", () => stageGitItem(rootID, item), {
+    (rootID: string, item: GitStatusItem, repoPath?: string) =>
+      runGitAction(rootID, "stage", () => stageGitItem(rootID, item, { repoPath }), {
         refreshHistory: false,
         clearDiff: true,
+        repoPath,
       }),
     [runGitAction],
   );
 
   const handleGitUnstageItem = useCallback(
-    (rootID: string, item: GitStatusItem) =>
-      runGitAction(rootID, "unstage", () => unstageGitItem(rootID, item), {
+    (rootID: string, item: GitStatusItem, repoPath?: string) =>
+      runGitAction(rootID, "unstage", () => unstageGitItem(rootID, item, { repoPath }), {
         refreshHistory: false,
         clearDiff: true,
+        repoPath,
       }),
     [runGitAction],
   );
 
   const handleGitDiscardItem = useCallback(
-    (rootID: string, item: GitStatusItem) =>
-      runGitAction(rootID, "discard", () => discardGitItem(rootID, item), {
+    (rootID: string, item: GitStatusItem, repoPath?: string) =>
+      runGitAction(rootID, "discard", () => discardGitItem(rootID, item, { repoPath }), {
         refreshHistory: false,
         clearDiff: true,
+        repoPath,
       }),
     [runGitAction],
   );
@@ -8002,6 +8199,31 @@ export function App({ onGoHome }: AppProps) {
     }
     void loadProjectTreeWorktrees(currentRootId);
   }, [currentRootId, loadProjectTreeWorktrees, projectTreeTab, worktreeItemsByRoot, worktreeLoadingByRoot]);
+
+  // Sub-repository discovery walks the filesystem, so it runs only where the
+  // result is actually used: the git tab, and the composer's new-session state
+  // where it decides whether a worktree target must be picked. Cached per root
+  // afterwards, so a root is scanned at most once per session.
+  const needsSubRepoDiscoveryForComposer = !selectedSession && !currentSession;
+  useEffect(() => {
+    if (!currentRootId) {
+      return;
+    }
+    if (projectTreeTab !== "git" && !needsSubRepoDiscoveryForComposer) {
+      return;
+    }
+    if (gitSubReposByRoot[currentRootId] || gitSubReposLoadingByRoot[currentRootId]) {
+      return;
+    }
+    void refreshGitSubRepos(currentRootId);
+  }, [
+    currentRootId,
+    gitSubReposByRoot,
+    gitSubReposLoadingByRoot,
+    needsSubRepoDiscoveryForComposer,
+    projectTreeTab,
+    refreshGitSubRepos,
+  ]);
 
   const handleSwitchWorktree = useCallback(async (item: GitWorktreeItem) => {
     const targetPath = String(item.path || "").trim();
@@ -10953,6 +11175,17 @@ export function App({ onGoHome }: AppProps) {
       actionBarSession as any,
     ) || (actionBarSession as any),
   );
+  // Sub-repositories offered as worktree targets in the composer. Reuses the git
+  // tab's discovery cache, so a root is scanned at most once per session.
+  const actionBarWorktreeRepos = useMemo(
+    () =>
+      (gitSubReposByRoot[currentRootId || ""]?.items || []).map((item) => ({
+        path: item.path,
+        label: item.rel_path || item.name,
+        branch: item.branch,
+      })),
+    [currentRootId, gitSubReposByRoot],
+  );
   const isBoundSessionInMain =
     !!activeBoundSessionKey &&
     selectedKey === activeBoundSessionKey &&
@@ -11872,12 +12105,24 @@ export function App({ onGoHome }: AppProps) {
         await refreshTreeDir(root, dir, true);
         return;
       }
-      case "git":
-        await Promise.all([
+      case "git": {
+        const [, , subRepos] = await Promise.all([
           refreshGitStatus(root),
           refreshGitHistory(root, { waitForIncremental: true }),
+          refreshGitSubRepos(root),
         ]);
+        // Refresh only the sub-repositories the user has open; the rest load
+        // lazily on expand.
+        await Promise.all(
+          (subRepos?.items || [])
+            .filter((item) => gitScopeExpanded[gitScopeKey(root, item.path)] === true)
+            .flatMap((item) => [
+              refreshGitScopeStatus(root, item.path),
+              refreshGitScopeHistory(root, item.path, { force: true }),
+            ]),
+        );
         return;
+      }
       case "worktrees": {
         const items = await loadProjectTreeWorktrees(root);
         const expandedPath = expandedWorktreeByRoot[root] || "";
@@ -11894,10 +12139,14 @@ export function App({ onGoHome }: AppProps) {
     }
   }, [
     expandedWorktreeByRoot,
+    gitScopeExpanded,
     loadProjectTreeWorktreeStatus,
     loadProjectTreeWorktrees,
     refreshGitHistory,
+    refreshGitScopeHistory,
+    refreshGitScopeStatus,
     refreshGitStatus,
+    refreshGitSubRepos,
     refreshProjectTreeRelatedFiles,
     refreshTreeDir,
   ]);
@@ -12335,6 +12584,180 @@ export function App({ onGoHome }: AppProps) {
       </div>
     );
   };
+  // One collapsible section per sub-repository: changes plus history, scoped to
+  // that repository via repo_path. Reuses the same panels as the root repository.
+  const renderSubRepoGitSection = (root: string, item: GitSubRepoItem): React.ReactNode => {
+    const scope = gitScopeKey(root, item.path);
+    const expanded = gitScopeExpanded[scope] === true;
+    const status = gitStatusByScope[scope] || null;
+    const history = gitHistoryByScope[scope] || null;
+    const statusLoading = gitStatusLoadingByScope[scope] === true;
+    const historyLoading = gitHistoryLoadingByScope[scope] === true;
+    const dirtyCount = status?.items?.length || 0;
+    const countLabel = statusLoading ? "..." : status ? String(dirtyCount) : "";
+    const showStatusPanel = statusLoading || status?.available === true;
+    const showHistoryPanel =
+      historyLoading || (history?.available === true && (history?.items.length || 0) > 0);
+    const expandedCommits = gitHistoryExpandedByRoot[scope] || {};
+    return (
+      <div key={scope} style={{ minWidth: 0 }}>
+        <button
+          type="button"
+          title={item.path}
+          onClick={() => {
+            setGitScopeExpanded((prev) => ({ ...prev, [scope]: !expanded }));
+            if (!expanded && !status && !statusLoading) {
+              void refreshGitScopeStatus(root, item.path);
+              void refreshGitScopeHistory(root, item.path);
+            }
+          }}
+          style={{
+            width: "100%",
+            border: "none",
+            borderRadius: "7px",
+            background: expanded ? "var(--selection-bg)" : "transparent",
+            color: expanded ? "var(--accent-color)" : "var(--text-primary)",
+            padding: "6px 4px 6px 0",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "8px",
+            textAlign: "left",
+            cursor: "pointer",
+          }}
+        >
+          <span style={{ minWidth: 0, display: "inline-flex", alignItems: "center", gap: "8px" }}>
+            <span
+              aria-hidden="true"
+              style={{
+                width: "18px",
+                height: "18px",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-primary)",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M7 5a2 2 0 1 1 3.763.945h.58a4 4 0 0 1 4 4v1.28a2 2 0 0 1-1.02 3.72a2 2 0 0 1-.98-3.745V9.945a2 2 0 0 0-2-2H10v9.323A2 2 0 0 1 9 21a2 2 0 0 1-1-3.732V6.732A2 2 0 0 1 7 5"
+                />
+              </svg>
+            </span>
+            <span style={{ minWidth: 0, display: "inline-flex", flexDirection: "column", gap: "1px" }}>
+              <span style={{ fontSize: "12px", fontWeight: expanded ? 700 : 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {item.rel_path || item.name}
+              </span>
+              {item.branch ? (
+                <span style={{ fontSize: "10px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {item.branch}
+                </span>
+              ) : null}
+            </span>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11px", color: expanded ? "var(--accent-color)" : "var(--text-secondary)", flexShrink: 0 }}>
+            <span>{countLabel}</span>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+              style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
+            >
+              <path
+                fillRule="evenodd"
+                d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06"
+                clipRule="evenodd"
+              />
+            </svg>
+          </span>
+        </button>
+        {expanded ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px", padding: "4px 0" }}>
+            {showStatusPanel ? (
+              <GitStatusPanel
+                rootId={root}
+                repoPath={item.path}
+                status={status}
+                loading={statusLoading}
+                compact
+                expanded
+                showHeader={!!status?.branch}
+                showExpandedToggle={false}
+                onSelectItem={(statusItem) => {
+                  void openGitDiff(root, statusItem, { repoPath: item.path });
+                }}
+                onOpenItem={(statusItem) => {
+                  if (statusItem.is_dir === true) {
+                    return;
+                  }
+                  // The path is relative to the sub-repository, so it is resolved
+                  // against that repository rather than the managed root.
+                  actionHandlers.open({
+                    path: joinRootRelativePath(item.rel_path, statusItem.path),
+                    root,
+                  });
+                }}
+                onDiscardItem={(statusItem) => handleGitDiscardItem(root, statusItem, item.path)}
+                onStageItem={(statusItem) =>
+                  statusItem.staged === true
+                    ? handleGitUnstageItem(root, statusItem, item.path)
+                    : handleGitStageItem(root, statusItem, item.path)
+                }
+                onPull={() => handleGitPull(root, item.path)}
+                onPush={() => handleGitPush(root, item.path)}
+                onCommit={(message) => {
+                  // "commit -am" covers every tracked change in the repository, so
+                  // the target repository is named explicitly: several commit
+                  // buttons sit side by side once a root holds many repositories.
+                  const ok = window.confirm(
+                    t("git.confirmCommitRepository", { repo: item.rel_path || item.name }),
+                  );
+                  if (!ok) {
+                    return;
+                  }
+                  return handleGitCommit(root, message, item.path);
+                }}
+                onSwitchBranch={(branch) => switchGitBranch(root, branch, item.path)}
+              />
+            ) : null}
+            {showHistoryPanel ? (
+              <GitHistoryPanel
+                rootId={root}
+                items={history?.items || []}
+                loading={historyLoading}
+                loadingMore={gitHistoryLoadingMore}
+                hasMore={history?.has_more === true}
+                compact
+                expandedCommits={expandedCommits}
+                onToggleCommit={(hash) => {
+                  setGitHistoryExpandedByRoot((prev) => {
+                    const current = prev[scope] || {};
+                    return { ...prev, [scope]: { ...current, [hash]: current[hash] !== true } };
+                  });
+                }}
+                onLoadMore={() => {
+                  void loadMoreGitScopeHistory(root, item.path);
+                }}
+                onSelectFile={(commit, statusItem) => {
+                  void openGitCommitDiff(root, commit, statusItem, { repoPath: item.path });
+                }}
+              />
+            ) : null}
+            {!showStatusPanel && !showHistoryPanel ? (
+              <div style={{ padding: "6px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
+                {t("git.emptyChangesOrHistory")}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   const renderRootGitContent = (root: string): React.ReactNode => {
     const rootGitStatus = root === currentRootId ? gitStatus : gitStatusByRoot[root] || null;
     const rootGitHistory = root === currentRootId ? gitHistory : gitHistoryByRoot[root] || null;
@@ -12349,7 +12772,39 @@ export function App({ onGoHome }: AppProps) {
     const rootShouldRenderGitPanel = rootGitStatusLoading || rootGitStatusAvailable;
     const rootShouldRenderGitHistoryPanel =
       rootGitHistoryLoading || (rootGitHistoryAvailable && (rootGitHistory?.items.length || 0) > 0);
-    if (managedRootByIdRef.current[root]?.is_git_repo !== true) {
+    const isRootRepo = managedRootByIdRef.current[root]?.is_git_repo === true;
+    const subRepos = gitSubReposByRoot[root];
+    const subReposLoading = gitSubReposLoadingByRoot[root] === true;
+    const subRepoItems = subRepos?.items || [];
+    const subRepoSection = subRepoItems.length > 0 ? (
+      <div style={{ display: "flex", flexDirection: "column", gap: "5px", minWidth: 0 }}>
+        {isRootRepo ? (
+          <div style={{ padding: "2px 4px 0", fontSize: "11px", color: "var(--text-secondary)" }}>
+            {t("git.subRepositories", { count: subRepoItems.length })}
+          </div>
+        ) : null}
+        {subRepoItems.map((item) => renderSubRepoGitSection(root, item))}
+        {subRepos?.truncated ? (
+          <div style={{ padding: "2px 4px", fontSize: "11px", color: "var(--text-secondary)" }}>
+            {t("git.subRepositoriesTruncated")}
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
+    // A root that is not a repository is still useful when it contains some: show
+    // the discovered repositories instead of a flat "not a git repository".
+    if (!isRootRepo) {
+      if (subRepoItems.length > 0) {
+        return subRepoSection;
+      }
+      if (subReposLoading || !subRepos) {
+        return (
+          <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
+            {t("git.scanningSubRepositories")}
+          </div>
+        );
+      }
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
           {t("git.notRepository")}
@@ -12382,8 +12837,11 @@ export function App({ onGoHome }: AppProps) {
     }
     if (!rootGitStatusLoading && !rootGitHistoryLoading && !rootShouldRenderGitPanel && !rootShouldRenderGitHistoryPanel) {
       return (
-        <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          {t("git.emptyChangesOrHistory")}
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px", minWidth: 0 }}>
+          <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
+            {t("git.emptyChangesOrHistory")}
+          </div>
+          {subRepoSection}
         </div>
       );
     }
@@ -12489,6 +12947,7 @@ export function App({ onGoHome }: AppProps) {
             }}
           />
         ) : null}
+        {subRepoSection}
       </div>
     );
   };
@@ -14617,6 +15076,7 @@ export function App({ onGoHome }: AppProps) {
               codexRateLimitsRefreshToken={codexRateLimitsRefreshToken}
               currentRootId={currentRootId}
               currentRootIsGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
+              currentRootSubRepos={actionBarWorktreeRepos}
               currentSession={actionBarSession}
               pendingPlanMode={pendingPlanMode}
               attachedFileContext={attachedFileContext}

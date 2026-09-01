@@ -77,6 +77,36 @@ export type GitWorktreesPayload = {
   items: GitWorktreeItem[];
 };
 
+/** An independent git repository nested under a managed root. */
+export type GitSubRepoItem = {
+  path: string;
+  rel_path: string;
+  name: string;
+  branch?: string;
+  head?: string;
+};
+
+export type GitSubReposPayload = {
+  items: GitSubRepoItem[];
+  truncated: boolean;
+  /** Whether the managed root is itself a repository. */
+  root_is_repo: boolean;
+};
+
+/**
+ * Scope for repo-aware git calls. An empty repoPath means the managed root
+ * itself, so callers can pass the value through without branching.
+ */
+export type GitRepoScope = { repoPath?: string };
+
+function withRepoPath(params: URLSearchParams, repoPath?: string): URLSearchParams {
+  const value = String(repoPath || "").trim();
+  if (value) {
+    params.set("repo_path", value);
+  }
+  return params;
+}
+
 export type GitActionPayload = {
   output: string;
   status: GitStatusPayload;
@@ -98,8 +128,28 @@ function normalizeGitActionPayload(payload: any): GitActionPayload {
   };
 }
 
-export async function fetchGitStatus(rootId: string): Promise<GitStatusPayload> {
-  const payload = await protectedJSON<any>(appURL("/api/git/status", new URLSearchParams({ root: rootId })));
+export async function fetchGitSubRepos(rootId: string): Promise<GitSubReposPayload> {
+  const payload = await protectedJSON<any>(appURL("/api/git/repos", new URLSearchParams({ root: rootId })));
+  return {
+    items: Array.isArray(payload?.items)
+      ? payload.items
+          .map((item: any) => ({
+            path: typeof item?.path === "string" ? item.path : "",
+            rel_path: typeof item?.rel_path === "string" ? item.rel_path : "",
+            name: typeof item?.name === "string" ? item.name : "",
+            branch: typeof item?.branch === "string" ? item.branch : undefined,
+            head: typeof item?.head === "string" ? item.head : undefined,
+          }))
+          .filter((item: GitSubRepoItem) => !!item.path)
+      : [],
+    truncated: payload?.truncated === true,
+    root_is_repo: payload?.root_is_repo === true,
+  };
+}
+
+export async function fetchGitStatus(rootId: string, options?: GitRepoScope): Promise<GitStatusPayload> {
+  const params = withRepoPath(new URLSearchParams({ root: rootId }), options?.repoPath);
+  const payload = await protectedJSON<any>(appURL("/api/git/status", params));
   return normalizeGitStatusPayload(payload);
 }
 
@@ -156,24 +206,42 @@ function removeStorageByPrefix(prefix: string): void {
   }
 }
 
-function historyListStorageKey(rootId: string): string {
-  return `${HISTORY_LIST_STORAGE_PREFIX}${encodeURIComponent(rootId)}`;
+// Separator for the "<rootId>@@<repoPath>" scope segment of a cache key. A root
+// id is a directory basename and may contain spaces, so a printable sequence
+// that does not occur in a path is used rather than a single character.
+const GIT_SCOPE_SEP = "@@";
+
+/**
+ * Cache scope for history and commit data. A managed root can hold several
+ * independent repositories, so caches key on root plus repository instead of
+ * root alone.
+ *
+ * With no repoPath the scope is the bare rootId, keeping already persisted
+ * localStorage keys valid across the upgrade.
+ */
+export function gitScopeKey(rootId: string, repoPath?: string): string {
+  const repo = String(repoPath || "").trim();
+  return repo ? `${rootId}${GIT_SCOPE_SEP}${repo}` : rootId;
 }
 
-function commitFilesStorageKey(rootId: string, commit: string): string {
-  return `${COMMIT_FILES_STORAGE_PREFIX}${encodeURIComponent(rootId)}:${encodeURIComponent(commit)}`;
+function historyListStorageKey(scope: string): string {
+  return `${HISTORY_LIST_STORAGE_PREFIX}${encodeURIComponent(scope)}`;
 }
 
-function commitDiffStorageKey(rootId: string, commit: string, oldPath: string, path: string): string {
-  return `${COMMIT_DIFF_STORAGE_PREFIX}${encodeURIComponent(rootId)}:${encodeURIComponent(commit)}:${encodeURIComponent(oldPath)}:${encodeURIComponent(path)}`;
+function commitFilesStorageKey(scope: string, commit: string): string {
+  return `${COMMIT_FILES_STORAGE_PREFIX}${encodeURIComponent(scope)}:${encodeURIComponent(commit)}`;
 }
 
-function getHistoryCacheEntry(rootId: string): GitHistoryCacheEntry | null {
-  const cached = gitHistoryListCache.get(rootId);
+function commitDiffStorageKey(scope: string, commit: string, oldPath: string, path: string): string {
+  return `${COMMIT_DIFF_STORAGE_PREFIX}${encodeURIComponent(scope)}:${encodeURIComponent(commit)}:${encodeURIComponent(oldPath)}:${encodeURIComponent(path)}`;
+}
+
+function getHistoryCacheEntry(scope: string): GitHistoryCacheEntry | null {
+  const cached = gitHistoryListCache.get(scope);
   if (cached) {
     return cached;
   }
-  const persisted = readStorageJSON<GitHistoryCacheEntry>(historyListStorageKey(rootId));
+  const persisted = readStorageJSON<GitHistoryCacheEntry>(historyListStorageKey(scope));
   if (persisted && Array.isArray(persisted.items)) {
     const normalized = {
       items: persisted.items.filter((item) => !!item?.hash),
@@ -181,15 +249,15 @@ function getHistoryCacheEntry(rootId: string): GitHistoryCacheEntry | null {
       remoteHead: typeof persisted.remoteHead === "string" ? persisted.remoteHead : undefined,
     };
     normalized.items = applyRemoteHead(normalized.items, normalized.remoteHead);
-    gitHistoryListCache.set(rootId, normalized);
+    gitHistoryListCache.set(scope, normalized);
     return normalized;
   }
   return null;
 }
 
-function setHistoryCacheEntry(rootId: string, entry: GitHistoryCacheEntry): void {
-  gitHistoryListCache.set(rootId, entry);
-  writeStorageJSON(historyListStorageKey(rootId), entry);
+function setHistoryCacheEntry(scope: string, entry: GitHistoryCacheEntry): void {
+  gitHistoryListCache.set(scope, entry);
+  writeStorageJSON(historyListStorageKey(scope), entry);
 }
 
 function normalizeGitHistoryPayload(payload: any): GitHistoryPayload {
@@ -236,8 +304,8 @@ function mergeHistoryItems(existing: GitHistoryItem[], next: GitHistoryItem[]): 
   return merged;
 }
 
-export function getCachedGitHistory(rootId: string): GitHistoryPayload | null {
-  const cached = getHistoryCacheEntry(rootId);
+export function getCachedGitHistory(rootId: string, options?: GitRepoScope): GitHistoryPayload | null {
+  const cached = getHistoryCacheEntry(gitScopeKey(rootId, options?.repoPath));
   if (!cached) {
     return null;
   }
@@ -249,8 +317,12 @@ export function getCachedGitHistory(rootId: string): GitHistoryPayload | null {
   };
 }
 
-export function getCachedGitHistoryHead(rootId: string, limit = DEFAULT_HISTORY_LIMIT): GitHistoryPayload | null {
-  const cached = getHistoryCacheEntry(rootId);
+export function getCachedGitHistoryHead(
+  rootId: string,
+  limit = DEFAULT_HISTORY_LIMIT,
+  options?: GitRepoScope,
+): GitHistoryPayload | null {
+  const cached = getHistoryCacheEntry(gitScopeKey(rootId, options?.repoPath));
   if (!cached) {
     return null;
   }
@@ -262,14 +334,44 @@ export function getCachedGitHistoryHead(rootId: string, limit = DEFAULT_HISTORY_
   };
 }
 
-export function clearGitHistoryCache(rootId?: string): void {
+/**
+ * Drops cached history and commit data.
+ *
+ * Passing only a rootId clears every repository under that root; add repoPath to
+ * limit the purge to one sub-repository.
+ */
+export function clearGitHistoryCache(rootId?: string, options?: GitRepoScope): void {
+  const repoPath = String(options?.repoPath || "").trim();
+  const scope = rootId ? gitScopeKey(rootId, repoPath) : "";
+  // Match by prefix instead of splitting: a scope embeds a repository path, which
+  // can itself contain the ":" that separates a scope from the rest of the key.
+  // A root-wide purge covers the root's own keys ("<rootId>:...") plus every
+  // sub-repository ("<rootId>@@<path>...").
+  const scopePrefixes = repoPath
+    ? [`${scope}:`]
+    : [`${rootId}:`, `${rootId}${GIT_SCOPE_SEP}`];
+  const matchesScopePrefix = (candidate: string): boolean =>
+    scopePrefixes.some((prefix) => candidate.startsWith(prefix));
+
   if (rootId) {
-    gitHistoryListCache.delete(rootId);
-    if (canUseStorage()) {
-      window.localStorage.removeItem(historyListStorageKey(rootId));
+    for (const key of Array.from(gitHistoryListCache.keys())) {
+      // The history cache keys on the scope alone, with no trailing segment.
+      if (key === scope || (!repoPath && key.startsWith(`${rootId}${GIT_SCOPE_SEP}`))) {
+        gitHistoryListCache.delete(key);
+      }
     }
-    removeStorageByPrefix(`${COMMIT_FILES_STORAGE_PREFIX}${encodeURIComponent(rootId)}:`);
-    removeStorageByPrefix(`${COMMIT_DIFF_STORAGE_PREFIX}${encodeURIComponent(rootId)}:`);
+    if (canUseStorage()) {
+      window.localStorage.removeItem(historyListStorageKey(scope));
+      if (!repoPath) {
+        removeStorageByPrefix(`${HISTORY_LIST_STORAGE_PREFIX}${encodeURIComponent(`${rootId}${GIT_SCOPE_SEP}`)}`);
+      }
+    }
+    for (const prefix of [COMMIT_FILES_STORAGE_PREFIX, COMMIT_DIFF_STORAGE_PREFIX]) {
+      removeStorageByPrefix(`${prefix}${encodeURIComponent(scope)}:`);
+      if (!repoPath) {
+        removeStorageByPrefix(`${prefix}${encodeURIComponent(`${rootId}${GIT_SCOPE_SEP}`)}`);
+      }
+    }
   } else {
     gitHistoryListCache.clear();
     removeStorageByPrefix(HISTORY_LIST_STORAGE_PREFIX);
@@ -278,7 +380,7 @@ export function clearGitHistoryCache(rootId?: string): void {
   }
   const clearMap = (cache: Map<string, unknown>) => {
     for (const key of Array.from(cache.keys())) {
-      if (!rootId || key.startsWith(`${rootId}:`)) {
+      if (!rootId || matchesScopePrefix(key)) {
         cache.delete(key);
       }
     }
@@ -292,12 +394,19 @@ export function clearGitHistoryCache(rootId?: string): void {
 
 export async function fetchGitHistory(
   rootId: string,
-  options?: { beforeCommit?: string; afterCommit?: string; limit?: number; force?: boolean },
+  options?: {
+    beforeCommit?: string;
+    afterCommit?: string;
+    limit?: number;
+    force?: boolean;
+  } & GitRepoScope,
 ): Promise<GitHistoryPayload> {
   const limit = options?.limit || DEFAULT_HISTORY_LIMIT;
   const beforeCommit = options?.beforeCommit || "";
   const afterCommit = options?.afterCommit || "";
-  const cached = getHistoryCacheEntry(rootId);
+  const repoPath = String(options?.repoPath || "").trim();
+  const scope = gitScopeKey(rootId, repoPath);
+  const cached = getHistoryCacheEntry(scope);
   if (!options?.force && !beforeCommit && !afterCommit && cached) {
     return {
       available: true,
@@ -316,7 +425,7 @@ export async function fetchGitHistory(
     }
   }
 
-  const key = `${rootId}:${beforeCommit}:${afterCommit}:${limit}`;
+  const key = `${scope}:${beforeCommit}:${afterCommit}:${limit}`;
   const inflight = gitHistoryInflight.get(key);
   if (inflight) {
     return inflight;
@@ -324,33 +433,36 @@ export async function fetchGitHistory(
   const promise = protectedJSON<any>(
     appURL(
       "/api/git/history",
-      new URLSearchParams({
-        root: rootId,
-        limit: String(limit),
-        ...(beforeCommit ? { before_commit: beforeCommit } : {}),
-        ...(afterCommit ? { after_commit: afterCommit } : {}),
-      }),
+      withRepoPath(
+        new URLSearchParams({
+          root: rootId,
+          limit: String(limit),
+          ...(beforeCommit ? { before_commit: beforeCommit } : {}),
+          ...(afterCommit ? { after_commit: afterCommit } : {}),
+        }),
+        repoPath,
+      ),
     ),
   ).then((payload) => {
     const normalized = normalizeGitHistoryPayload(payload);
     if (normalized.commit_missing) {
-      clearGitHistoryCache(rootId);
+      clearGitHistoryCache(rootId, { repoPath });
       return normalized;
     }
-    const existing = getHistoryCacheEntry(rootId);
+    const existing = getHistoryCacheEntry(scope);
     if (!normalized.available) {
       return normalized;
     }
     if (!beforeCommit && !afterCommit) {
       const remoteHead = normalized.remote_head;
-      setHistoryCacheEntry(rootId, {
+      setHistoryCacheEntry(scope, {
         items: applyRemoteHead(normalized.items.slice(), remoteHead),
         hasMore: normalized.has_more,
         remoteHead,
       });
     } else if (beforeCommit) {
       const remoteHead = normalized.remote_head || existing?.remoteHead;
-      setHistoryCacheEntry(rootId, {
+      setHistoryCacheEntry(scope, {
         items: applyRemoteHead(mergeHistoryItems(existing?.items || [], normalized.items), remoteHead),
         hasMore: normalized.has_more,
         remoteHead,
@@ -371,13 +483,19 @@ export async function fetchGitHistory(
   return promise;
 }
 
-export async function fetchGitCommitFiles(rootId: string, commit: string): Promise<GitCommitFilesPayload> {
-  const key = `${rootId}:${commit}`;
+export async function fetchGitCommitFiles(
+  rootId: string,
+  commit: string,
+  options?: GitRepoScope,
+): Promise<GitCommitFilesPayload> {
+  const repoPath = String(options?.repoPath || "").trim();
+  const scope = gitScopeKey(rootId, repoPath);
+  const key = `${scope}:${commit}`;
   const cached = gitCommitFilesCache.get(key);
   if (cached) {
     return cached;
   }
-  const persisted = readStorageJSON<GitCommitFilesPayload>(commitFilesStorageKey(rootId, commit));
+  const persisted = readStorageJSON<GitCommitFilesPayload>(commitFilesStorageKey(scope, commit));
   if (persisted && Array.isArray(persisted.items)) {
     gitCommitFilesCache.set(key, persisted);
     return persisted;
@@ -387,14 +505,14 @@ export async function fetchGitCommitFiles(rootId: string, commit: string): Promi
     return inflight;
   }
   const promise = protectedJSON<any>(
-    appURL("/api/git/commit/files", new URLSearchParams({ root: rootId, commit })),
+    appURL("/api/git/commit/files", withRepoPath(new URLSearchParams({ root: rootId, commit }), repoPath)),
   ).then((payload) => {
     const normalized = {
       commit: typeof payload?.commit === "string" ? payload.commit : commit,
       items: Array.isArray(payload?.items) ? payload.items as GitStatusItem[] : [],
     };
     gitCommitFilesCache.set(key, normalized);
-    writeStorageJSON(commitFilesStorageKey(rootId, commit), normalized);
+    writeStorageJSON(commitFilesStorageKey(scope, commit), normalized);
     return normalized;
   }).finally(() => {
     gitCommitFilesInflight.delete(key);
@@ -403,8 +521,9 @@ export async function fetchGitCommitFiles(rootId: string, commit: string): Promi
   return promise;
 }
 
-export async function fetchGitBranches(rootId: string): Promise<GitBranchesPayload> {
-  const payload = await protectedJSON<any>(appURL("/api/git/branches", new URLSearchParams({ root: rootId })));
+export async function fetchGitBranches(rootId: string, options?: GitRepoScope): Promise<GitBranchesPayload> {
+  const params = withRepoPath(new URLSearchParams({ root: rootId }), options?.repoPath);
+  const payload = await protectedJSON<any>(appURL("/api/git/branches", params));
   return {
     current: typeof payload?.current === "string" ? payload.current : undefined,
     branches: Array.isArray(payload?.branches)
@@ -418,65 +537,94 @@ export async function fetchGitBranches(rootId: string): Promise<GitBranchesPaylo
   };
 }
 
-export async function checkoutGitBranch(rootId: string, branch: string): Promise<GitStatusPayload> {
+export async function checkoutGitBranch(
+  rootId: string,
+  branch: string,
+  options?: GitRepoScope,
+): Promise<GitStatusPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/checkout"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId, branch }),
+    body: gitActionBody(rootId, options?.repoPath, { branch }),
   });
   return normalizeGitStatusPayload(payload?.status || {});
 }
 
-export async function pullGit(rootId: string): Promise<GitActionPayload> {
+/**
+ * Body for a repo-scoped write. An omitted repoPath targets the managed root, so
+ * callers can pass the value straight through without branching.
+ */
+function gitActionBody(rootId: string, repoPath: string | undefined, extra?: Record<string, unknown>): string {
+  const repo = String(repoPath || "").trim();
+  return JSON.stringify({
+    root: rootId,
+    ...(repo ? { repo_path: repo } : {}),
+    ...(extra || {}),
+  });
+}
+
+export async function pullGit(rootId: string, options?: GitRepoScope): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/pull"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId }),
+    body: gitActionBody(rootId, options?.repoPath),
   });
   return normalizeGitActionPayload(payload);
 }
 
-export async function pushGit(rootId: string): Promise<GitActionPayload> {
+export async function pushGit(rootId: string, options?: GitRepoScope): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/push"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId }),
+    body: gitActionBody(rootId, options?.repoPath),
   });
   return normalizeGitActionPayload(payload);
 }
 
-export async function commitGit(rootId: string, message: string): Promise<GitActionPayload> {
+export async function commitGit(rootId: string, message: string, options?: GitRepoScope): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/commit"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId, message }),
+    body: gitActionBody(rootId, options?.repoPath, { message }),
   });
   return normalizeGitActionPayload(payload);
 }
 
-export async function stageGitItem(rootId: string, item: Pick<GitStatusItem, "path">): Promise<GitActionPayload> {
+export async function stageGitItem(
+  rootId: string,
+  item: Pick<GitStatusItem, "path">,
+  options?: GitRepoScope,
+): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/stage"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId, path: item.path }),
+    body: gitActionBody(rootId, options?.repoPath, { path: item.path }),
   });
   return normalizeGitActionPayload(payload);
 }
 
-export async function unstageGitItem(rootId: string, item: Pick<GitStatusItem, "path">): Promise<GitActionPayload> {
+export async function unstageGitItem(
+  rootId: string,
+  item: Pick<GitStatusItem, "path">,
+  options?: GitRepoScope,
+): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/unstage"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId, path: item.path }),
+    body: gitActionBody(rootId, options?.repoPath, { path: item.path }),
   });
   return normalizeGitActionPayload(payload);
 }
 
-export async function discardGitItem(rootId: string, item: Pick<GitStatusItem, "path" | "status">): Promise<GitActionPayload> {
+export async function discardGitItem(
+  rootId: string,
+  item: Pick<GitStatusItem, "path" | "status">,
+  options?: GitRepoScope,
+): Promise<GitActionPayload> {
   const payload = await protectedJSON<any>(appURL("/api/git/discard"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root: rootId, path: item.path, status: item.status }),
+    body: gitActionBody(rootId, options?.repoPath, { path: item.path, status: item.status }),
   });
   return normalizeGitActionPayload(payload);
 }
@@ -577,14 +725,17 @@ export async function fetchGitCommitDiff(
   rootId: string,
   commit: string,
   item: Pick<GitStatusItem, "path" | "old_path" | "status" | "additions" | "deletions">,
+  options?: GitRepoScope,
 ): Promise<GitDiffPayload> {
   const path = item.path;
-  const key = `${rootId}:${commit}:${item.old_path || ""}:${path}`;
+  const repoPath = String(options?.repoPath || "").trim();
+  const scope = gitScopeKey(rootId, repoPath);
+  const key = `${scope}:${commit}:${item.old_path || ""}:${path}`;
   const cached = gitCommitDiffCache.get(key);
   if (cached) {
     return cached;
   }
-  const persisted = readStorageJSON<GitDiffPayload>(commitDiffStorageKey(rootId, commit, item.old_path || "", path));
+  const persisted = readStorageJSON<GitDiffPayload>(commitDiffStorageKey(scope, commit, item.old_path || "", path));
   if (persisted && typeof persisted.content === "string") {
     gitCommitDiffCache.set(key, persisted);
     return persisted;
@@ -594,7 +745,7 @@ export async function fetchGitCommitDiff(
     return inflight;
   }
   const promise = protectedJSON<any>(
-    appURL("/api/git/commit/diff", new URLSearchParams({ root: rootId, commit, path })),
+    appURL("/api/git/commit/diff", withRepoPath(new URLSearchParams({ root: rootId, commit, path }), repoPath)),
   ).then((payload) => {
     const diff = {
     path: typeof payload?.path === "string" ? payload.path : path,
@@ -609,7 +760,7 @@ export async function fetchGitCommitDiff(
       source: "commit" as const,
     };
     gitCommitDiffCache.set(key, diff);
-    writeStorageJSON(commitDiffStorageKey(rootId, commit, item.old_path || "", path), diff);
+    writeStorageJSON(commitDiffStorageKey(scope, commit, item.old_path || "", path), diff);
     return diff;
   }).finally(() => {
     gitCommitDiffInflight.delete(key);

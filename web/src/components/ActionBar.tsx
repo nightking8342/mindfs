@@ -1,5 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { type SessionMode } from "./ModeSelector";
+import { useViewportMenu } from "../hooks/useViewportMenu";
 import { ModeSelector } from "./ModeSelector";
 import { AgentSelector } from "./AgentSelector";
 import { fetchAgents, fetchShells, restartAgent, type AgentStatus, type ShellStatus } from "../services/agents";
@@ -19,6 +21,7 @@ import { useI18n, type MessageKey } from "../i18n";
 import { CompactUploadProgress } from "./CompactUploadProgress";
 import { fetchGitBranches, type GitBranchesPayload } from "../services/git";
 import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
+import { WorktreeRepoSelector, type WorktreeRepoOption } from "./WorktreeRepoSelector";
 import { NoWorktreeIcon } from "./NoWorktreeIcon";
 import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
@@ -76,6 +79,12 @@ type ActionBarProps = {
   codexRateLimitsRefreshToken?: number;
   currentRootId?: string | null;
   currentRootIsGitRepo?: boolean;
+  /**
+   * Independent repositories nested under the current root. A root can be a
+   * plain container of checkouts rather than a repository itself, in which case
+   * worktrees must target one of these instead of the root.
+   */
+  currentRootSubRepos?: WorktreeRepoOption[];
   currentSession?: SessionInfo | null;
   pendingPlanMode?: boolean;
   attachedFileContext?: AttachedFileContext | null;
@@ -103,6 +112,7 @@ type ActionBarProps = {
       create: boolean;
       branchMode: "new" | "existing";
       branch: string;
+      repoPath?: string;
     },
   ) => void | Promise<void>;
   onSetPlanMode?: (
@@ -211,6 +221,14 @@ function ShellSelector({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const viewportMenuPos = useViewportMenu({
+    open: isOpen,
+    anchorRef: dropdownRef,
+    menuRef,
+    menuPlacement: "top",
+    align: "right",
+  });
   const selected = shells.find((item) => item.id === shell || item.command === shell || item.resolved_command === shell) || shells.find((item) => item.default) || shells[0];
 
   useEffect(() => {
@@ -271,12 +289,14 @@ function ShellSelector({
         </span>
       </button>
 
-      {isOpen && (
+      {isOpen && createPortal(
         <div
+          ref={menuRef}
           style={{
-            position: "absolute",
-            bottom: "calc(100% + 8px)",
-            right: 0,
+            position: "fixed",
+            top: viewportMenuPos?.top ?? 0,
+            left: viewportMenuPos?.left ?? 0,
+            visibility: viewportMenuPos ? "visible" : "hidden",
             background: "var(--menu-bg)",
             border: "1px solid var(--menu-border)",
             borderRadius: "12px",
@@ -335,7 +355,8 @@ function ShellSelector({
               </button>
             );
           })}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -404,6 +425,7 @@ export function ActionBar({
   codexRateLimitsRefreshToken = 0,
   currentRootId,
   currentRootIsGitRepo = false,
+  currentRootSubRepos,
   currentSession,
   pendingPlanMode = false,
   attachedFileContext,
@@ -470,6 +492,12 @@ export function ActionBar({
   const [worktreeBranches, setWorktreeBranches] = useState<GitBranchesPayload>({ branches: [] });
   const [worktreeBranchesLoading, setWorktreeBranchesLoading] = useState(false);
   const [worktreeBranchError, setWorktreeBranchError] = useState("");
+  // Which repository the worktree goes into. Empty means the managed root, which
+  // is the only possibility when the root is itself a plain repository.
+  const [worktreeRepoPath, setWorktreeRepoPath] = useState("");
+  // Distinguishes "the root is deliberately selected" from "nothing picked yet".
+  // Only reachable when the root is not a repository and several candidates exist.
+  const [worktreeRepoChosen, setWorktreeRepoChosen] = useState(false);
   const dragStartRef = useRef(0);
   const syncedSessionSignatureRef = useRef<string>("");
   const editorRef = useRef<TokenEditorHandle>(null);
@@ -542,6 +570,28 @@ export function ActionBar({
     setFastService(nextFastService);
   }, [currentSession]);
 
+  // Repositories a worktree can be created in: the root itself when it is a
+  // repository, plus any independent repositories discovered beneath it.
+  const worktreeRepoOptions = useMemo<WorktreeRepoOption[]>(() => {
+    const options: WorktreeRepoOption[] = [];
+    if (currentRootIsGitRepo) {
+      options.push({ path: "", label: currentRootId || t("session.currentProject") });
+    }
+    (currentRootSubRepos || []).forEach((item) => {
+      if (item.path) {
+        options.push(item);
+      }
+    });
+    return options;
+  }, [currentRootId, currentRootIsGitRepo, currentRootSubRepos, t]);
+
+  const canCreateWorktree = worktreeRepoOptions.length > 0;
+  const showWorktreeRepoSelector = worktreeRepoOptions.length > 1;
+  // With several candidates and no repository of its own, the root cannot stand
+  // in as a sensible default, so nothing is preselected and the menu opens itself.
+  const worktreeRepoNeedsChoice = showWorktreeRepoSelector && !currentRootIsGitRepo && !worktreeRepoChosen;
+  const worktreeRepoReady = canCreateWorktree && !worktreeRepoNeedsChoice;
+
   useEffect(() => {
     if (!currentSession?.pending) {
       setCancelling(false);
@@ -559,17 +609,44 @@ export function ActionBar({
     setWorktreeBranch("");
     setWorktreeBranches({ branches: [] });
     setWorktreeBranchError("");
+    setWorktreeRepoPath("");
+    setWorktreeRepoChosen(false);
   }, [currentRootId]);
 
+  // Default selection: the root when it is a repository (preserving the previous
+  // single-repository behaviour), otherwise a lone sub-repository. Several
+  // candidates under a non-repository root stay unselected on purpose.
   useEffect(() => {
-    if (!createWorktree || currentSession || mode === "command" || !currentRootId || !currentRootIsGitRepo) {
+    if (currentRootIsGitRepo || worktreeRepoChosen) {
+      return;
+    }
+    const subRepos = (currentRootSubRepos || []).filter((item) => !!item.path);
+    if (subRepos.length === 1) {
+      setWorktreeRepoPath(subRepos[0].path);
+      setWorktreeRepoChosen(true);
+    }
+  }, [currentRootIsGitRepo, currentRootSubRepos, worktreeRepoChosen]);
+
+  // Drop a selection that no longer exists (repository removed, root rescanned).
+  useEffect(() => {
+    if (!worktreeRepoPath) {
+      return;
+    }
+    if (!worktreeRepoOptions.some((item) => item.path === worktreeRepoPath)) {
+      setWorktreeRepoPath("");
+      setWorktreeRepoChosen(false);
+    }
+  }, [worktreeRepoOptions, worktreeRepoPath]);
+
+  useEffect(() => {
+    if (!createWorktree || currentSession || mode === "command" || !currentRootId || !worktreeRepoReady) {
       setWorktreeBranchError("");
       return;
     }
     let active = true;
     setWorktreeBranchesLoading(true);
     setWorktreeBranchError("");
-    fetchGitBranches(currentRootId)
+    fetchGitBranches(currentRootId, { repoPath: worktreeRepoPath || undefined })
       .then((payload) => {
         if (active) setWorktreeBranches(payload);
       })
@@ -584,7 +661,15 @@ export function ActionBar({
     return () => {
       active = false;
     };
-  }, [createWorktree, currentRootId, currentRootIsGitRepo, currentSession, mode, t]);
+  }, [createWorktree, currentRootId, currentSession, mode, t, worktreeRepoPath, worktreeRepoReady]);
+
+  // Switching repositories invalidates the branch list: a branch name from the
+  // previous repository would be sent to git as an existing branch and fail.
+  useEffect(() => {
+    setWorktreeBranchMode("new");
+    setWorktreeBranch("");
+    setWorktreeBranches({ branches: [] });
+  }, [worktreeRepoPath]);
 
   useEffect(() => {
     Promise.all([fetchAgents(true), fetchShells(true)])
@@ -1011,11 +1096,14 @@ export function ActionBar({
         supportsEffort ? effort || undefined : undefined,
         supportsServiceTier ? fastService : undefined,
         mode === "command" ? shell || undefined : undefined,
-        !currentSession && mode !== "command" && currentRootIsGitRepo
+        !currentSession && mode !== "command" && canCreateWorktree
           ? {
-              create: createWorktree,
+              // A pending repository choice must not silently fall back to the
+              // root: that would create the worktree in the wrong place.
+              create: createWorktree && worktreeRepoReady,
               branchMode: worktreeBranchMode,
               branch: worktreeBranchMode === "existing" ? worktreeBranch : "",
+              repoPath: worktreeRepoPath,
             }
           : undefined,
       );
@@ -1053,7 +1141,7 @@ export function ActionBar({
         requestAnimationFrame(() => editorRef.current?.focus());
       }
     }
-  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, agentPreset, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell, t, currentSession, currentRootIsGitRepo, createWorktree, worktreeBranchMode, worktreeBranch]);
+  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, agentPreset, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell, t, currentSession, canCreateWorktree, worktreeRepoReady, worktreeRepoPath, createWorktree, worktreeBranchMode, worktreeBranch]);
 
   const handleCancel = useCallback(async () => {
     const sessionKey = currentSession?.key;
@@ -1303,7 +1391,7 @@ export function ActionBar({
   return (
     <div data-onboarding="action-bar" style={{ width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}>
       <div style={{ position: "relative", width: "100%", minWidth: 0, display: "flex", flexDirection: "column", gap: 0 }}>
-        {planModeActive || (!currentSession && currentRootIsGitRepo && mode !== "command") || (mode !== "command" && agent === "codex") ? (
+        {planModeActive || (!currentSession && canCreateWorktree && mode !== "command") || (mode !== "command" && agent === "codex") ? (
           <div
             style={{
               position: "absolute",
@@ -1336,12 +1424,28 @@ export function ActionBar({
                   </button>
                 </div>
               ) : null}
-              {!currentSession && currentRootIsGitRepo ? (
+              {!currentSession && canCreateWorktree ? (
                 <>
                   <button type="button" onClick={() => setCreateWorktree((value) => !value)} disabled={sending} aria-label={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} title={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} style={{ height: "24px", borderRadius: "6px", border: createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)", background: createWorktree ? "linear-gradient(rgba(22, 163, 74, 0.08), rgba(22, 163, 74, 0.08)), var(--mobile-overlay-bg)" : "linear-gradient(rgba(100, 116, 139, 0.10), rgba(100, 116, 139, 0.10)), var(--mobile-overlay-bg)", color: createWorktree ? "#15803d" : "var(--text-secondary)", padding: createWorktree ? "0 8px" : "0 8px 0 5px", fontSize: "11px", fontWeight: 800, cursor: sending ? "not-allowed" : "pointer", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "3px" }}>
                     {createWorktree ? "worktree" : <><NoWorktreeIcon size={12} />worktree</>}
                   </button>
-                  {createWorktree ? <><WorktreeBranchSelector branchMode={worktreeBranchMode} branch={worktreeBranch} branches={worktreeBranches.branches} disabled={sending} maxWidth={isMobile ? 150 : 240} menuAlign={isMobile ? "left" : "right"} menuPlacement="top" onChange={(nextMode, nextBranch) => { setWorktreeBranchMode(nextMode); setWorktreeBranch(nextBranch); }} />{worktreeBranchesLoading ? <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span> : worktreeBranchError ? <span title={worktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>{t("common.loadingFailed")}</span> : null}</> : null}
+                  {createWorktree && showWorktreeRepoSelector ? (
+                    <WorktreeRepoSelector
+                      options={worktreeRepoOptions}
+                      value={worktreeRepoPath}
+                      unselected={worktreeRepoNeedsChoice}
+                      autoOpen={worktreeRepoNeedsChoice}
+                      disabled={sending}
+                      maxWidth={isMobile ? 130 : 200}
+                      menuAlign={isMobile ? "left" : "right"}
+                      menuPlacement="top"
+                      onChange={(nextRepoPath) => {
+                        setWorktreeRepoPath(nextRepoPath);
+                        setWorktreeRepoChosen(true);
+                      }}
+                    />
+                  ) : null}
+                  {createWorktree && worktreeRepoReady ? <><WorktreeBranchSelector branchMode={worktreeBranchMode} branch={worktreeBranch} branches={worktreeBranches.branches} disabled={sending} maxWidth={isMobile ? 150 : 240} menuAlign={isMobile ? "left" : "right"} menuPlacement="top" onChange={(nextMode, nextBranch) => { setWorktreeBranchMode(nextMode); setWorktreeBranch(nextBranch); }} />{worktreeBranchesLoading ? <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span> : worktreeBranchError ? <span title={worktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>{t("common.loadingFailed")}</span> : null}</> : null}
                 </>
               ) : null}
             </div>

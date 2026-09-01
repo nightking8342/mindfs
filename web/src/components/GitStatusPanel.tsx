@@ -9,6 +9,11 @@ import { useI18n } from "../i18n";
 
 type GitStatusPanelProps = {
   rootId?: string;
+  /**
+   * Sub-repository under the root this panel shows; empty means the root itself.
+   * Needed because the branch menu loads branches for the displayed repository.
+   */
+  repoPath?: string;
   status: GitStatusPayload | null;
   loading?: boolean;
   isFiltered?: boolean;
@@ -191,6 +196,7 @@ function GitIconButton({
 
 export function GitStatusPanel({
   rootId,
+  repoPath,
   status,
   loading = false,
   isFiltered = false,
@@ -241,14 +247,14 @@ export function GitStatusPanel({
     }
     let cancelled = false;
     setBranchesLoading(true);
-    void fetchGitBranches(rootId)
+    void fetchGitBranches(rootId, { repoPath })
       .then((payload) => {
         if (!cancelled) {
           setBranches(payload.branches || []);
         }
       })
       .catch((err) => {
-        console.error("[git.branches] failed", { rootId, err });
+        console.error("[git.branches] failed", { rootId, repoPath, err });
         if (!cancelled) {
           setBranches([]);
         }
@@ -261,7 +267,7 @@ export function GitStatusPanel({
     return () => {
       cancelled = true;
     };
-  }, [branchMenuOpen, rootId]);
+  }, [branchMenuOpen, repoPath, rootId]);
 
   const runPanelAction = async (key: string, action?: () => void | Promise<void>) => {
     if (!action || actionBusy) {

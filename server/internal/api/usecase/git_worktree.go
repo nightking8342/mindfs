@@ -13,6 +13,9 @@ import (
 
 type ListGitBranchesInput struct {
 	RootID string
+	// RepoPath selects a sub-repository under the managed root; empty means the
+	// root itself.
+	RepoPath string
 }
 
 type ListGitBranchesOutput struct {
@@ -28,7 +31,11 @@ func (s *Service) ListGitBranches(ctx context.Context, in ListGitBranchesInput) 
 	if err != nil {
 		return ListGitBranchesOutput{}, err
 	}
-	result, err := gitview.ListBranches(ctx, root.RootPath)
+	rootPath, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
+	if err != nil {
+		return ListGitBranchesOutput{}, err
+	}
+	result, err := gitview.ListBranches(ctx, rootPath)
 	if err != nil {
 		return ListGitBranchesOutput{}, err
 	}
@@ -37,7 +44,10 @@ func (s *Service) ListGitBranches(ctx context.Context, in ListGitBranchesInput) 
 
 type CheckoutGitBranchInput struct {
 	RootID string
-	Branch string
+	// RepoPath selects a sub-repository under the managed root; empty means the
+	// root itself.
+	RepoPath string
+	Branch   string
 }
 
 type CheckoutGitBranchOutput struct {
@@ -45,10 +55,7 @@ type CheckoutGitBranchOutput struct {
 }
 
 func (s *Service) CheckoutGitBranch(ctx context.Context, in CheckoutGitBranchInput) (CheckoutGitBranchOutput, error) {
-	if err := s.ensureRegistry(); err != nil {
-		return CheckoutGitBranchOutput{}, err
-	}
-	root, err := s.Registry.GetRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return CheckoutGitBranchOutput{}, err
 	}
@@ -56,10 +63,10 @@ func (s *Service) CheckoutGitBranch(ctx context.Context, in CheckoutGitBranchInp
 	if branch == "" {
 		return CheckoutGitBranchOutput{}, errors.New("branch required")
 	}
-	if err := gitview.CheckoutBranch(ctx, root.RootPath, branch); err != nil {
+	if err := gitview.CheckoutBranch(ctx, repoPath, branch); err != nil {
 		return CheckoutGitBranchOutput{}, err
 	}
-	status, err := gitview.InspectStatus(ctx, root.RootPath)
+	status, err := gitview.InspectStatus(ctx, repoPath)
 	if err != nil {
 		return CheckoutGitBranchOutput{}, err
 	}
@@ -67,10 +74,13 @@ func (s *Service) CheckoutGitBranch(ctx context.Context, in CheckoutGitBranchInp
 }
 
 type GitActionInput struct {
-	RootID  string
-	Path    string
-	Status  string
-	Message string
+	RootID string
+	// RepoPath selects a sub-repository under the managed root; empty means the
+	// root itself. Paths in Path are relative to the selected repository.
+	RepoPath string
+	Path     string
+	Status   string
+	Message  string
 }
 
 type GitActionOutput struct {
@@ -79,11 +89,11 @@ type GitActionOutput struct {
 }
 
 func (s *Service) GitPull(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.Pull(ctx, root.RootPath)
+	result, err := gitview.Pull(ctx, repoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
@@ -91,11 +101,11 @@ func (s *Service) GitPull(ctx context.Context, in GitActionInput) (GitActionOutp
 }
 
 func (s *Service) GitPush(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.Push(ctx, root.RootPath)
+	result, err := gitview.Push(ctx, repoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
@@ -103,11 +113,11 @@ func (s *Service) GitPush(ctx context.Context, in GitActionInput) (GitActionOutp
 }
 
 func (s *Service) GitCommit(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.Commit(ctx, root.RootPath, in.Message)
+	result, err := gitview.Commit(ctx, repoPath, in.Message)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
@@ -115,11 +125,11 @@ func (s *Service) GitCommit(ctx context.Context, in GitActionInput) (GitActionOu
 }
 
 func (s *Service) GitStagePath(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.StagePath(ctx, root.RootPath, in.Path)
+	result, err := gitview.StagePath(ctx, repoPath, in.Path)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
@@ -127,11 +137,11 @@ func (s *Service) GitStagePath(ctx context.Context, in GitActionInput) (GitActio
 }
 
 func (s *Service) GitUnstagePath(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.UnstagePath(ctx, root.RootPath, in.Path)
+	result, err := gitview.UnstagePath(ctx, repoPath, in.Path)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
@@ -139,15 +149,28 @@ func (s *Service) GitUnstagePath(ctx context.Context, in GitActionInput) (GitAct
 }
 
 func (s *Service) GitDiscardPath(ctx context.Context, in GitActionInput) (GitActionOutput, error) {
-	root, err := s.gitActionRoot(in.RootID)
+	repoPath, err := s.gitActionRepoPath(in.RootID, in.RepoPath)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
-	result, err := gitview.DiscardPath(ctx, root.RootPath, in.Path, in.Status)
+	result, err := gitview.DiscardPath(ctx, repoPath, in.Path, in.Status)
 	if err != nil {
 		return GitActionOutput{}, err
 	}
 	return GitActionOutput{Output: result.Output, Status: result.Status}, nil
+}
+
+// gitActionRepoPath resolves the repository a write operation applies to.
+//
+// Write operations are the reason resolveRepoPathUnderRoot enforces containment:
+// these commands mutate state ("commit -am", "checkout", "restore"), so an
+// unchecked absolute path would let any repository on the machine be written to.
+func (s *Service) gitActionRepoPath(rootID, repoPath string) (string, error) {
+	root, err := s.gitActionRoot(rootID)
+	if err != nil {
+		return "", err
+	}
+	return resolveRepoPathUnderRoot(root.RootPath, repoPath)
 }
 
 func (s *Service) gitActionRoot(rootID string) (fs.RootInfo, error) {
@@ -185,7 +208,10 @@ func (s *Service) ListGitWorktrees(ctx context.Context, in ListGitWorktreesInput
 }
 
 type CreateGitWorktreeInput struct {
-	RootID     string
+	RootID string
+	// RepoPath selects a sub-repository under the managed root to add the
+	// worktree to; empty means the root itself.
+	RepoPath   string
 	ParentPath string
 	Name       string
 	BranchMode string
@@ -202,6 +228,10 @@ func (s *Service) CreateGitWorktree(ctx context.Context, in CreateGitWorktreeInp
 		return CreateGitWorktreeOutput{}, err
 	}
 	root, err := s.Registry.GetRoot(in.RootID)
+	if err != nil {
+		return CreateGitWorktreeOutput{}, err
+	}
+	repoRoot, err := resolveRepoPathUnderRoot(root.RootPath, in.RepoPath)
 	if err != nil {
 		return CreateGitWorktreeOutput{}, err
 	}
@@ -250,7 +280,7 @@ func (s *Service) CreateGitWorktree(ctx context.Context, in CreateGitWorktreeInp
 		return CreateGitWorktreeOutput{}, errors.New("branch required")
 	}
 
-	if err := gitview.AddWorktree(ctx, root.RootPath, targetPath, branchMode, branch); err != nil {
+	if err := gitview.AddWorktree(ctx, repoRoot, targetPath, branchMode, branch); err != nil {
 		return CreateGitWorktreeOutput{}, err
 	}
 	if !in.Register {
