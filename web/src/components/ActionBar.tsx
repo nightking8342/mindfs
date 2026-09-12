@@ -26,6 +26,7 @@ import { NoWorktreeIcon } from "./NoWorktreeIcon";
 import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
 import { AgentMemoryIndicator } from "./AgentMemoryIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
+import { matchesSendShortcut, type SendShortcut } from "../services/sendShortcut";
 
 type SessionInfo = {
   key: string;
@@ -99,6 +100,7 @@ type ActionBarProps = {
   queuedMessages?: QueuedMessageInfo[];
   inputHistory?: string[];
   mobileEnterKeySends?: boolean;
+  sendShortcut?: SendShortcut | null;
   onSendMessage?: (
     message: string,
     mode: SessionMode,
@@ -449,6 +451,7 @@ export function ActionBar({
   onToggleLeftSidebar,
   onToggleRightSidebar,
   mobileEnterKeySends = false,
+  sendShortcut = null,
   sidebarsSwapped = false,
 }: ActionBarProps) {
   const { t } = useI18n();
@@ -513,13 +516,37 @@ export function ActionBar({
   const applyingInputHistoryRef = useRef(false);
   const { isMobile } = useResponsive();
   const isConnected = status === "connected";
-  const connectionMeta = wsStatusMeta(status, t);
+  const [displayStatus, setDisplayStatus] = useState<WSStatus>(status);
+  const reconnectDisplayTimerRef = useRef<number | null>(null);
+  const connectionMeta = wsStatusMeta(displayStatus, t);
   const DRAG_THRESHOLD = -40;
   const boundRingColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
   const boundRingShadow = detachedBoundSession
     ? "0 0 0 1px rgba(245,158,11,0.18)"
     : "0 0 0 1px rgba(37,99,235,0.08)";
   const boundArrowColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
+
+  useEffect(() => {
+    if (reconnectDisplayTimerRef.current) {
+      window.clearTimeout(reconnectDisplayTimerRef.current);
+      reconnectDisplayTimerRef.current = null;
+    }
+    if (status !== "reconnecting") {
+      setDisplayStatus(status);
+      return;
+    }
+    setDisplayStatus("connecting");
+    reconnectDisplayTimerRef.current = window.setTimeout(() => {
+      reconnectDisplayTimerRef.current = null;
+      setDisplayStatus("reconnecting");
+    }, 800);
+    return () => {
+      if (reconnectDisplayTimerRef.current) {
+        window.clearTimeout(reconnectDisplayTimerRef.current);
+        reconnectDisplayTimerRef.current = null;
+      }
+    };
+  }, [status]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1193,6 +1220,12 @@ export function ActionBar({
     if (isCompositionActive(e.nativeEvent)) {
       return;
     }
+    if (e.key !== "Enter" && !e.repeat && matchesSendShortcut(e.nativeEvent, sendShortcut)) {
+      e.preventDefault();
+      e.stopPropagation();
+      void handleSend();
+      return;
+    }
     if (candidates.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -1230,12 +1263,18 @@ export function ActionBar({
         e.stopPropagation();
       }
     }
-  }, [candidates, activeCandidateIndex, applyCandidate, isCompositionActive, activeToken, navigateInputHistory]);
+  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, activeToken, navigateInputHistory, sendShortcut]);
 
   const handleEditorEnter = useCallback((event: KeyboardEvent | null) => {
     if (isCompositionActive(event)) {
       // Stop Lexical's plain-text Enter handler without preventing the native
       // event, so an IME can finish committing its composition text.
+      return true;
+    }
+    if (event && !event.repeat && matchesSendShortcut(event, sendShortcut)) {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleSend();
       return true;
     }
     if (event?.shiftKey) {
@@ -1262,7 +1301,7 @@ export function ActionBar({
       return true;
     }
     return false;
-  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, isMobile, mobileEnterKeySends, mode]);
+  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, isMobile, mobileEnterKeySends, mode, sendShortcut]);
 
   const handleEditorPaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     if (sending || !currentRootId) {

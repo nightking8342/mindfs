@@ -33,6 +33,9 @@ type ForkShellProps = {
   onOpenLeft?: () => void;
   onOpenRight?: () => void;
   sidebarsSwapped?: boolean;
+  fileSidebarFontScale?: number;
+  mainFontScale?: number;
+  sessionSidebarFontScale?: number;
 };
 
 // 上游 AppShellProps 未 export，从组件类型反推，避免为此改动上游文件。
@@ -565,6 +568,9 @@ export function ForkShell(props: ForkShellProps) {
     onOpenLeft,
     onOpenRight,
     sidebarsSwapped = false,
+    fileSidebarFontScale = 1,
+    mainFontScale = 1,
+    sessionSidebarFontScale = 1,
   } = props;
   const { t } = useI18n();
   const viewport = useViewport();
@@ -651,6 +657,12 @@ export function ForkShell(props: ForkShellProps) {
   const physicalRightOpenHandler = sidebarsSwapped ? onOpenLeft : onOpenRight;
   const physicalLeftLabel = sidebarsSwapped ? t("sidebar.session") : t("sidebar.file");
   const physicalRightLabel = sidebarsSwapped ? t("sidebar.file") : t("sidebar.session");
+  // 字号缩放跟随侧栏对调，与上面的 label 同源：用户看到的是「文件/会话」，
+  // 而他调的是哪个槽位的字号要以物理位置为准。
+  const physicalLeftFontScale = sidebarsSwapped ? sessionSidebarFontScale : fileSidebarFontScale;
+  const physicalRightFontScale = sidebarsSwapped ? fileSidebarFontScale : sessionSidebarFontScale;
+  const fontScaleStyle = (scale: number): React.CSSProperties =>
+    ({ "--mindfs-font-scale": scale }) as React.CSSProperties;
 
   const shellStyle: React.CSSProperties & {
     "--mindfs-actionbar-bottom-padding"?: string;
@@ -682,7 +694,8 @@ export function ForkShell(props: ForkShellProps) {
     isolation: "isolate",
     boxSizing: "border-box",
     "--mindfs-actionbar-bottom-padding": "calc(var(--mindfs-safe-area-bottom) + var(--fork-actionbar-gap, 12px))",
-    "--mindfs-file-menu-width": isMobile ? "52.5vw" : (isTablet ? "140px" : "182px"),
+    // 跟上游 v0.5.1：移动端不再用固定 52.5vw（窄屏下过窄），桌面/平板统一 220px。
+    "--mindfs-file-menu-width": isMobile ? "min(240px, calc(100vw - 16px))" : "220px",
   };
 
   // 桌面端 main：用 margin-left/right 推挤整个玻璃板。侧栏 absolute 盖在左侧
@@ -849,11 +862,12 @@ export function ForkShell(props: ForkShellProps) {
               style={drawerWallpaperStyle("left", physicalLeftOpen)}
             />
             <aside
-              className="fork-shell__pane fork-shell__pane--left"
+              className="fork-shell__pane fork-shell__pane--left mindfs-font-scale-region"
+              data-mindfs-font-scale-region="sidebar"
               data-fork-region="left"
               data-fork-open={physicalLeftOpen ? "" : undefined}
               ref={leftDrawerRef}
-              style={mobileSidebarStyle("left", physicalLeftOpen)}
+              style={{ ...mobileSidebarStyle("left", physicalLeftOpen), ...fontScaleStyle(physicalLeftFontScale) }}
             >
               {physicalLeftContent}
             </aside>
@@ -862,10 +876,11 @@ export function ForkShell(props: ForkShellProps) {
       ) : physicalLeftContent ? (
         <aside
           ref={desktopLeftRef}
-          className="fork-shell__pane fork-shell__pane--left"
+          className="fork-shell__pane fork-shell__pane--left mindfs-font-scale-region"
+          data-mindfs-font-scale-region="sidebar"
           data-fork-region="left"
           data-fork-open={physicalLeftOpen ? "" : undefined}
-          style={desktopPaneStyle("left")}
+          style={{ ...desktopPaneStyle("left"), ...fontScaleStyle(physicalLeftFontScale) }}
         >
           {physicalLeftContent}
         </aside>
@@ -873,7 +888,8 @@ export function ForkShell(props: ForkShellProps) {
 
       <main
         ref={mainRef}
-        className="fork-shell__main"
+        className="fork-shell__main mindfs-font-scale-region"
+        data-mindfs-font-scale-region="main"
         data-fork-region="main"
         style={
           isMobile
@@ -882,6 +898,7 @@ export function ForkShell(props: ForkShellProps) {
                 flex: 1,
                 minHeight: 0,
                 minWidth: 0,
+                ...fontScaleStyle(mainFontScale),
               }
             : floatingFooter
               ? {
@@ -889,8 +906,9 @@ export function ForkShell(props: ForkShellProps) {
                   // 代价是内容不会真的滚到玻璃下方——可用性优先于那点动态效果。
                   ...desktopMainStyle,
                   paddingBottom: "var(--fork-floating-footer-space, 96px)",
+                  ...fontScaleStyle(mainFontScale),
                 }
-              : desktopMainStyle
+              : { ...desktopMainStyle, ...fontScaleStyle(mainFontScale) }
         }
       >
         {main}
@@ -898,9 +916,11 @@ export function ForkShell(props: ForkShellProps) {
         {drawer}
         {floatingFooter ? (
           <div
-            className="fork-shell__footer fork-shell__footer--floating"
+            className="fork-shell__footer fork-shell__footer--floating mindfs-font-scale-region"
+            data-mindfs-font-scale-region="main"
             data-fork-region="footer"
             style={{
+              ...fontScaleStyle(mainFontScale),
               position: "absolute",
               left: 0,
               right: 0,
@@ -930,11 +950,12 @@ export function ForkShell(props: ForkShellProps) {
               style={drawerWallpaperStyle("right", physicalRightOpen)}
             />
             <aside
-              className="fork-shell__pane fork-shell__pane--right"
+              className="fork-shell__pane fork-shell__pane--right mindfs-font-scale-region"
+              data-mindfs-font-scale-region="sidebar"
               data-fork-region="right"
               data-fork-open={physicalRightOpen ? "" : undefined}
               ref={rightDrawerRef}
-              style={mobileSidebarStyle("right", physicalRightOpen)}
+              style={{ ...mobileSidebarStyle("right", physicalRightOpen), ...fontScaleStyle(physicalRightFontScale) }}
             >
               {physicalRightContent}
             </aside>
@@ -943,10 +964,11 @@ export function ForkShell(props: ForkShellProps) {
       ) : physicalRightContent ? (
         <aside
           ref={desktopRightRef}
-          className="fork-shell__pane fork-shell__pane--right"
+          className="fork-shell__pane fork-shell__pane--right mindfs-font-scale-region"
+          data-mindfs-font-scale-region="sidebar"
           data-fork-region="right"
           data-fork-open={physicalRightOpen ? "" : undefined}
-          style={desktopPaneStyle("right")}
+          style={{ ...desktopPaneStyle("right"), ...fontScaleStyle(physicalRightFontScale) }}
         >
           {physicalRightContent}
         </aside>
@@ -998,9 +1020,14 @@ export function ForkShell(props: ForkShellProps) {
           留一个空 footer 会被 grid 自动排布，挤乱三栏。 */}
       {floatingFooter ? null : (
         <footer
-          className="fork-shell__footer"
+          className="fork-shell__footer mindfs-font-scale-region"
+          data-mindfs-font-scale-region="main"
           data-fork-region="footer"
-          style={isMobile ? { ...footerStyle, flexShrink: 0 } : footerStyle}
+          style={
+            isMobile
+              ? { ...footerStyle, flexShrink: 0, ...fontScaleStyle(mainFontScale) }
+              : { ...footerStyle, ...fontScaleStyle(mainFontScale) }
+          }
         >
           {footer}
         </footer>

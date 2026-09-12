@@ -69,6 +69,18 @@ import {
   updateSessionNamingPreference,
   type NewProjectMetaLocation,
 } from "../services/preferences";
+import {
+  formatSendShortcut,
+  shortcutFromKeyboardEvent,
+  type SendShortcut,
+} from "../services/sendShortcut";
+import {
+  changeFontSize,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  type FontSizePreferences,
+  type FontSizeRegion,
+} from "../services/fontSize";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -194,12 +206,17 @@ type FileTreeProps = {
   showEnterKeySendOption?: boolean;
   enterKeySends?: boolean;
   onEnterKeySendsChange?: (enabled: boolean) => void;
+  showSendShortcutOption?: boolean;
+  sendShortcut?: SendShortcut | null;
+  onSendShortcutChange?: (shortcut: SendShortcut | null) => void;
   sidebarsSwapped?: boolean;
   onSidebarsSwappedChange?: (enabled: boolean) => void;
   gitDiffSideBySide?: boolean;
   onGitDiffSideBySideChange?: (enabled: boolean) => void;
   multiProjectSessionsEnabled?: boolean;
   onMultiProjectSessionsChange?: (enabled: boolean) => void;
+  fontSizePreferences?: FontSizePreferences;
+  onFontSizePreferencesChange?: (preferences: FontSizePreferences) => void;
   onRunAgentLifecycleCommand?: (agentName: string, action: AgentLifecycleCommandAction, commands: string[]) => void | Promise<void>;
   onRestartAgent?: (agentName: string) => void | Promise<void>;
   onGoHome?: () => void;
@@ -256,6 +273,21 @@ const fileTreeMenuButtonStyle: React.CSSProperties = {
   textAlign: "left",
   cursor: "pointer",
   fontSize: "12px",
+};
+
+const fontSizeAdjustButtonStyle: React.CSSProperties = {
+  width: "26px",
+  height: "26px",
+  padding: 0,
+  border: "none",
+  background: "transparent",
+  color: "var(--text-primary)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  fontSize: "16px",
+  lineHeight: 1,
 };
 
 function NotificationIcon() {
@@ -2059,12 +2091,17 @@ export function FileTree({
   showEnterKeySendOption = false,
   enterKeySends = false,
   onEnterKeySendsChange,
+  showSendShortcutOption = false,
+  sendShortcut = null,
+  onSendShortcutChange,
   sidebarsSwapped = false,
   onSidebarsSwappedChange,
   gitDiffSideBySide = false,
   onGitDiffSideBySideChange,
   multiProjectSessionsEnabled = false,
   onMultiProjectSessionsChange,
+  fontSizePreferences = { fileSidebar: 1, main: 1, sessionSidebar: 1 },
+  onFontSizePreferencesChange,
   onRunAgentLifecycleCommand,
   onRestartAgent,
   onGoHome,
@@ -2099,6 +2136,7 @@ export function FileTree({
     handleClick: handleRefreshClick,
   } = useRefreshSpin(handleTabRefresh);
   const [isAppearanceMenuOpen, setIsAppearanceMenuOpen] = React.useState(false);
+  const [isFontSizeMenuOpen, setIsFontSizeMenuOpen] = React.useState(false);
   const [isLocaleMenuOpen, setIsLocaleMenuOpen] = React.useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = React.useState(false);
   const [sessionNamingOpen, setSessionNamingOpen] = React.useState(false);
@@ -2109,6 +2147,9 @@ export function FileTree({
   const [sessionNamingBusy, setSessionNamingBusy] = React.useState(false);
   const [sessionNamingError, setSessionNamingError] = React.useState("");
   const [idleReleaseOpen, setIdleReleaseOpen] = React.useState(false);
+  const [sendShortcutOpen, setSendShortcutOpen] = React.useState(false);
+  const [sendShortcutDraft, setSendShortcutDraft] = React.useState<SendShortcut | null>(sendShortcut);
+  const [sendShortcutError, setSendShortcutError] = React.useState("");
   const [idleReleaseHours, setIdleReleaseHours] = React.useState("72");
   const [idleReleaseBusy, setIdleReleaseBusy] = React.useState(false);
   const [idleReleaseError, setIdleReleaseError] = React.useState("");
@@ -2190,6 +2231,7 @@ export function FileTree({
   const agentConfigPopoverRef = React.useRef<HTMLDivElement | null>(null);
   const agentLifecyclePopoverRef = React.useRef<HTMLDivElement | null>(null);
   const relayServicesPopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const sendShortcutPopoverRef = React.useRef<HTMLDivElement | null>(null);
   const updateNotesRef = React.useRef<HTMLDivElement | null>(null);
   const createInputRef = React.useRef<HTMLInputElement | null>(null);
   const previousCreatingRootNameRef = React.useRef<string | null>(null);
@@ -2608,6 +2650,17 @@ export function FileTree({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [isMenuOpen]);
 
+  React.useEffect(() => {
+    if (!sendShortcutOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!sendShortcutPopoverRef.current?.contains(event.target as Node)) {
+        setSendShortcutOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [sendShortcutOpen]);
+
   // Clears everything that belongs to the backup editor: draft file contents,
   // the open file editor and the entry being edited.
   const resetAgentConfigEditingState = React.useCallback(() => {
@@ -2715,6 +2768,23 @@ export function FileTree({
       })
       .finally(() => setIdleReleaseBusy(false));
   }, [t]);
+
+  const openSendShortcut = React.useCallback(() => {
+    setAgentConfigFlow(null);
+    setAgentLifecycleOpen(false);
+    setRelayServicesOpen(false);
+    setSessionNamingOpen(false);
+    setIdleReleaseOpen(false);
+    setIsMenuOpen(false);
+    setSendShortcutDraft(sendShortcut);
+    setSendShortcutError("");
+    setSendShortcutOpen(true);
+  }, [sendShortcut]);
+
+  const saveSendShortcut = React.useCallback(() => {
+    onSendShortcutChange?.(sendShortcutDraft);
+    setSendShortcutOpen(false);
+  }, [onSendShortcutChange, sendShortcutDraft]);
 
   const saveIdleSessionResourceRelease = React.useCallback(async () => {
     if (idleReleaseBusy) return;
@@ -3387,6 +3457,12 @@ export function FileTree({
     return hiddenFiltered.filter((entry) => !!rootId && entry.path === rootId);
   }, [projectTreeTab, rootId, showHiddenFiles]);
 
+  const fontSizeRows: Array<{ region: FontSizeRegion; labelKey: MessageKey }> = [
+    { region: "fileSidebar", labelKey: "fileTree.fontSizeFileSidebar" },
+    { region: "main", labelKey: "fileTree.fontSizeMain" },
+    { region: "sessionSidebar", labelKey: "fileTree.fontSizeSessionSidebar" },
+  ];
+
   const renderEntries = (items: FileEntry[], depth: number, branchRoot: string) => (
     <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
       {depth === 0 && creatingRootName !== null ? (
@@ -3714,8 +3790,10 @@ export function FileTree({
                 const nextOpen = !open;
                 if (nextOpen) {
                   setIsAppearanceMenuOpen(false);
+                  setIsFontSizeMenuOpen(false);
                   setIsLocaleMenuOpen(false);
                   setIsSortMenuOpen(false);
+                  setSendShortcutOpen(false);
                 }
                 return nextOpen;
               });
@@ -3879,6 +3957,7 @@ export function FileTree({
                   type="button"
                   onClick={() => {
                     setIsAppearanceMenuOpen((open) => !open);
+                    setIsFontSizeMenuOpen(false);
                     setIsLocaleMenuOpen(false);
                     setIsSortMenuOpen(false);
                   }}
@@ -3942,8 +4021,94 @@ export function FileTree({
                 <button
                   type="button"
                   onClick={() => {
+                    setIsFontSizeMenuOpen((open) => !open);
+                    setIsAppearanceMenuOpen(false);
+                    setIsLocaleMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  style={fileTreeMenuButtonStyle}
+                  aria-expanded={isFontSizeMenuOpen}
+                >
+                  <span style={{ flex: 1 }}>{t("fileTree.fontSize")}</span>
+                  <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>
+                    {t("fileTree.fontSizeByRegion")}
+                  </span>
+                  <ChevronRight isOpen={isFontSizeMenuOpen} />
+                </button>
+                {isFontSizeMenuOpen ? (
+                  <div style={{ padding: "2px 6px 6px", display: "flex", flexDirection: "column", gap: "3px" }}>
+                    {fontSizeRows.map(({ region, labelKey }) => {
+                      const label = t(labelKey);
+                      const scale = fontSizePreferences[region];
+                      return (
+                        <div
+                          key={region}
+                          style={{
+                            minHeight: "30px",
+                            padding: "0 4px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px",
+                            color: "var(--text-primary)",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }} title={label}>
+                            {label}
+                          </span>
+                          <div
+                            style={{
+                              flexShrink: 0,
+                              display: "inline-flex",
+                              alignItems: "center",
+                              border: "1px solid var(--border-color)",
+                              borderRadius: "7px",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="mindfs-font-size-adjust"
+                              disabled={scale <= FONT_SIZE_MIN}
+                              aria-label={t("fileTree.fontSizeDecrease", { region: label })}
+                              onClick={() => onFontSizePreferencesChange?.(changeFontSize(fontSizePreferences, region, -1))}
+                              style={fontSizeAdjustButtonStyle}
+                            >
+                              −
+                            </button>
+                            <span
+                              style={{
+                                width: "42px",
+                                textAlign: "center",
+                                color: "var(--text-secondary)",
+                                fontSize: "11px",
+                                fontVariantNumeric: "tabular-nums",
+                              }}
+                            >
+                              {Math.round(scale * 100)}%
+                            </span>
+                            <button
+                              type="button"
+                              className="mindfs-font-size-adjust"
+                              disabled={scale >= FONT_SIZE_MAX}
+                              aria-label={t("fileTree.fontSizeIncrease", { region: label })}
+                              onClick={() => onFontSizePreferencesChange?.(changeFontSize(fontSizePreferences, region, 1))}
+                              style={fontSizeAdjustButtonStyle}
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
                     setIsLocaleMenuOpen((open) => !open);
                     setIsAppearanceMenuOpen(false);
+                    setIsFontSizeMenuOpen(false);
                     setIsSortMenuOpen(false);
                   }}
                   style={{
@@ -4007,6 +4172,7 @@ export function FileTree({
                   onClick={() => {
                     setIsSortMenuOpen((open) => !open);
                     setIsAppearanceMenuOpen(false);
+                    setIsFontSizeMenuOpen(false);
                     setIsLocaleMenuOpen(false);
                   }}
                   style={{
@@ -4243,6 +4409,18 @@ export function FileTree({
                   <span style={{ fontSize: "11px", opacity: enterKeySends ? 1 : 0 }}>✓</span>
                 </button>
               ) : null}
+              {showSendShortcutOption ? (
+                <button type="button" onClick={openSendShortcut} style={fileTreeMenuButtonStyle}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="5" width="18" height="14" rx="2" />
+                    <path d="M7 9h.01M11 9h.01M15 9h.01M7 13h.01M11 13h6" />
+                  </svg>
+                  <span style={{ flex: 1 }}>{t("fileTree.sendShortcut")}</span>
+                  <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>
+                    {sendShortcut ? formatSendShortcut(sendShortcut) : t("sendShortcut.notSet")}
+                  </span>
+                </button>
+              ) : null}
             </div>
           ) : null}
           {projectAddOverlay ? (
@@ -4443,6 +4621,85 @@ export function FileTree({
                 style={agentConfigPrimaryButtonStyle(idleReleaseBusy)}
               >
                 {idleReleaseBusy ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {sendShortcutOpen ? (
+          <div
+            ref={sendShortcutPopoverRef}
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 40,
+              padding: "14px",
+              borderRadius: "12px",
+              border: "1px solid var(--border-color)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 16px 36px rgba(15, 23, 42, 0.18)",
+            }}
+          >
+            <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }}>
+              {t("sendShortcut.title")}
+            </div>
+            <div style={{ marginTop: "6px", fontSize: "11px", lineHeight: 1.5, color: "var(--text-secondary)" }}>
+              {t("sendShortcut.description")}
+            </div>
+            <button
+              type="button"
+              autoFocus
+              onKeyDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (event.key === "Escape") {
+                  setSendShortcutOpen(false);
+                  return;
+                }
+                const next = shortcutFromKeyboardEvent(event.nativeEvent);
+                if (next) {
+                  setSendShortcutDraft(next);
+                  setSendShortcutError("");
+                } else if (!["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) {
+                  setSendShortcutError(t("sendShortcut.modifierRequired"));
+                }
+              }}
+              style={{
+                width: "100%",
+                minHeight: "48px",
+                marginTop: "12px",
+                padding: "10px 12px",
+                border: "1px solid var(--border-color)",
+                borderRadius: "10px",
+                background: "var(--content-bg)",
+                color: sendShortcutDraft ? "var(--text-primary)" : "var(--text-secondary)",
+                fontSize: "13px",
+                fontWeight: sendShortcutDraft ? 700 : 500,
+                outline: "none",
+                cursor: "text",
+              }}
+            >
+              {sendShortcutDraft ? formatSendShortcut(sendShortcutDraft) : t("sendShortcut.pressKeys")}
+            </button>
+            {sendShortcutError ? (
+              <div style={{ marginTop: "8px", color: "#dc2626", fontSize: "11px", lineHeight: 1.4 }}>
+                {sendShortcutError}
+              </div>
+            ) : null}
+            <div style={{ ...agentConfigActionRowStyle, marginTop: "12px" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setSendShortcutDraft(null);
+                  setSendShortcutError("");
+                }}
+                style={agentConfigSecondaryButtonStyle(false)}
+              >
+                {t("sendShortcut.clear")}
+              </button>
+              <button type="button" onClick={saveSendShortcut} style={agentConfigPrimaryButtonStyle(false)}>
+                {t("common.save")}
               </button>
             </div>
           </div>
