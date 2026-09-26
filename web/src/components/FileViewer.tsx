@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { CodeViewer, supportsLineSelection } from "./CodeViewer";
 import { ImageViewer } from "./ImageViewer";
@@ -10,27 +10,35 @@ import { downloadFile } from "../services/download";
 import { isNativeShellRuntime } from "../services/runtime";
 import { useI18n } from "../i18n";
 
-type FilePayload = {
-  name: string;
-  path: string;
-  content: string;
-  encoding: string;
-  truncated: boolean;
-  size: number;
-  ext?: string;
-  mime?: string;
-  root?: string;
-  targetLine?: number;
-  targetColumn?: number;
-  file_meta?: Array<{
-    source_session: string;
-    session_name?: string;
-    agent?: string;
-    created_at?: string;
-    updated_at?: string;
-    created_by?: string;
-  }>;
-};
+import type { FilePayload } from "../services/file";
+import { FileEditStore, fileEditKey, MAX_EDITABLE_FILE_BYTES } from "../services/fileEditing";
+import { FileEditor } from "./FileEditor";
+import { FileOperationItems, FileMenuIcon, fileMenuItemStyle, MoreMenuButton, moreMenuPopoverStyle, menuOverlayStyle, MoveFilePopover } from "./FileOperations";
+
+function FileViewerMenu({ root, rootPath, path, downloading, onDownload, onEdit, onComplete }: {
+  root: string; rootPath?: string; path: string; downloading: boolean; onDownload: () => void;
+  onEdit?: () => void; onComplete?: () => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open && !moveOpen) return;
+    const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) { setOpen(false); setMoveOpen(false); } };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open, moveOpen]);
+  return <div ref={ref} style={{ position: "relative" }} onKeyDown={event => { if (event.key === "Escape") { setOpen(false); setMoveOpen(false); } }}>
+    <MoreMenuButton open={open} label={t("fileOperation.menu")} onClick={() => { setMoveOpen(false); setOpen(value => !value); }} />
+    {open && <div role="menu" style={moreMenuPopoverStyle}>
+      <button type="button" role="menuitem" style={fileMenuItemStyle} disabled={!root || downloading} onClick={() => { setOpen(false); onDownload(); }}><FileMenuIcon action="download" /><span>{t("fileOperation.download")}</span></button>
+      {onEdit && <button type="button" role="menuitem" style={fileMenuItemStyle} onClick={() => { setOpen(false); onEdit(); }}><FileMenuIcon action="edit" /><span>{t("fileEditor.edit")}</span></button>}
+      {root && !/^(?:\/|[A-Za-z]:)/.test(path) && <FileOperationItems root={root} path={path} onMove={() => { setOpen(false); setMoveOpen(true); }} onComplete={async () => { await onComplete?.(); setOpen(false); }} />}
+    </div>}
+    {moveOpen && <div style={menuOverlayStyle}><MoveFilePopover root={root} rootPath={rootPath} path={path} onComplete={async () => { setMoveOpen(false); await onComplete?.(); }} /></div>}
+  </div>;
+}
 
 type RelatedSession = {
   source_session: string;
@@ -41,6 +49,11 @@ type RelatedSession = {
 };
 
 type FileViewerProps = {
+  rootPath?: string;
+  onFileOperationComplete?: () => void | Promise<void>;
+  editStore: FileEditStore;
+  onFileUpdated: (file: FilePayload) => void;
+  onFileSaved: (file: FilePayload) => void;
   file?: FilePayload | null;
   onSessionClick?: (sessionKey: string) => void;
   onPathClick?: (path: string) => void;
@@ -131,9 +144,14 @@ function Breadcrumbs({ root, path, onPathClick }: { root?: string; path: string;
   );
 }
 
-export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onSelectionChange, initialScrollTop = 0, onScrollTopChange, isVisible = true }: FileViewerProps) {
+export function FileViewer({ rootPath, onFileOperationComplete, editStore, onFileUpdated, onFileSaved, file, onSessionClick, onPathClick, onFileClick, onSelectionChange, initialScrollTop = 0, onScrollTopChange, isVisible = true }: FileViewerProps) {
   const { t } = useI18n();
+  const editKey = fileEditKey(file?.root || "", file?.path || "");
+  const editSession = useSyncExternalStore(editStore.subscribe, () => editStore.get(editKey));
+  const canEdit = !!file?.root && file.encoding === "utf-8" && file.size <= MAX_EDITABLE_FILE_BYTES
+    && !/^(?:\/|[A-Za-z]:)/.test(file.path);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [editorActions, setEditorActions] = useState<HTMLSpanElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const restoredScrollKeyRef = useRef("");
   const contentRootRef = useRef<HTMLDivElement | null>(null);
@@ -155,6 +173,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
   }, []);
 
   useLayoutEffect(() => {
+    if (editSession) { restoredScrollKeyRef.current = ""; return; }
     if (!isVisible) return;
     if (!fileScrollKey || !scrollRef.current) return;
     if (file?.targetLine && file.targetLine > 0) return;
@@ -180,7 +199,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
       window.cancelAnimationFrame(frame1);
       window.cancelAnimationFrame(frame2);
     };
-  }, [fileScrollKey, file?.targetLine, file?.content, initialScrollTop, isVisible]);
+  }, [fileScrollKey, file?.targetLine, file?.content, initialScrollTop, isVisible, !!editSession]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -190,18 +209,18 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => node.removeEventListener("scroll", handleScroll);
-  }, [fileScrollKey, onScrollTopChange]);
+  }, [fileScrollKey, onScrollTopChange, !!editSession]);
 
   const ext = file?.ext || (file?.path.includes(".") ? `.${file.path.split(".").pop()}` : "");
   const documentPreviewKind = getDocumentPreviewKind(ext, file?.mime);
   const usesMarkdownViewer = ext === ".md" || ext === ".markdown";
-  const lineSelectionEnabled = !!file
+  const lineSelectionEnabled = !editSession && !!file
     && !usesMarkdownViewer
     && file.encoding !== "binary"
     && supportsLineSelection(ext);
 
   const updateSelection = useCallback(() => {
-    if (!file || !onSelectionChange) {
+    if (!file || !onSelectionChange || editSession) {
       return;
     }
     if (file.encoding === "binary" || file.mime?.startsWith("image/")) {
@@ -244,13 +263,13 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
       filePath: file.path,
       text,
     });
-  }, [file, onSelectionChange, lineSelectionEnabled, usesMarkdownViewer]);
+  }, [file, onSelectionChange, lineSelectionEnabled, usesMarkdownViewer, editSession]);
 
   useEffect(() => {
     if (!onSelectionChange) {
       return;
     }
-    if (!file || file.encoding === "binary" || file.mime?.startsWith("image/")) {
+    if (editSession || !file || file.encoding === "binary" || file.mime?.startsWith("image/")) {
       onSelectionChange(null);
       return;
     }
@@ -262,7 +281,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
       document.removeEventListener("selectionchange", handleSelectionChange);
       onSelectionChange(null);
     };
-  }, [file, onSelectionChange, updateSelection]);
+  }, [file, onSelectionChange, updateSelection, editSession]);
 
   const [downloadToast, setDownloadToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -340,7 +359,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
   const visibleRelatedSessions = relatedSessions.slice(0, isMobile ? 2 : 3);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, background: "transparent" }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, minWidth: 0, background: "transparent" }}>
       {/* 下载结果 toast */}
       {downloadToast && (
         <div style={{
@@ -362,7 +381,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
           {downloadToast.msg}
         </div>
       )}
-      <header style={{ height: "36px", padding: "0 16px", borderBottom: "1px solid var(--border-color)", display: "flex", alignItems: "center", gap: "10px", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", zIndex: 10, flexShrink: 0 }}>
+      <header style={{ height: "36px", padding: "0 3px 0 16px", borderBottom: "1px solid var(--border-color)", display: "flex", alignItems: "center", gap: "10px", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", zIndex: 10, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", overflow: "hidden", flex: 1, minWidth: 0 }}>
           <Breadcrumbs root={file.root} path={file.path} onPathClick={onPathClick} />
 
@@ -434,39 +453,15 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
               </div>
             </div>
           )}
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", minWidth: 0, flexShrink: 0 }}>
-            <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginLeft: "6px", flexShrink: 0, opacity: 0.7 }}>{(file.size / 1024).toFixed(1)} KB</div>
-            <button
-              type="button"
-              onClick={() => { void handleDownload(); }}
-              disabled={!file.root || isDownloading}
-              title={isDownloading ? t("fileViewer.downloading") : t("fileViewer.downloadFile")}
-              aria-label={isDownloading ? t("fileViewer.downloading") : t("fileViewer.downloadFile")}
-              style={{
-                border: "none",
-                background: "transparent",
-                borderRadius: 6,
-                padding: 0,
-                width: 20,
-                height: 20,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                cursor: !file.root || isDownloading ? "not-allowed" : "pointer",
-                color: "var(--text-secondary)",
-                opacity: !file.root || isDownloading ? 0.6 : 1,
-                flexShrink: 0,
-              }}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path fill="currentColor" d="M16.59 9H15V4c0-.55-.45-1-1-1h-4c-.55 0-1 .45-1 1v5H7.41c-.89 0-1.34 1.08-.71 1.71l4.59 4.59c.39.39 1.02.39 1.41 0l4.59-4.59c.63-.63.19-1.71-.7-1.71M5 19c0 .55.45 1 1 1h12c.55 0 1-.45 1-1s-.45-1-1-1H6c-.55 0-1 .45-1 1"/>
-              </svg>
-            </button>
-          </div>
         </div>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "2px", minWidth: 0, flexShrink: 0 }}>
+            <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginLeft: "6px", flexShrink: 0, opacity: 0.7 }}>{(file.size / 1024).toFixed(1)} KB</div>
+            <span className="file-editor-actions" ref={setEditorActions} />
+            {!editSession && <FileViewerMenu key={editKey} root={file.root || ""} rootPath={rootPath} path={file.path} downloading={isDownloading} onDownload={() => { void handleDownload(); }} onEdit={canEdit ? () => { void editStore.open(file.root!, file.path); } : undefined} onComplete={onFileOperationComplete} />}
+          </div>
       </header>
 
-      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: documentPreviewKind === "powerpoint" ? "hidden" : "auto", position: "relative", WebkitOverflowScrolling: "touch" }}>
+      {editSession ? <FileEditor key={editKey} actionsTarget={editorActions} store={editStore} editKey={editKey} session={editSession} isVisible={isVisible} onFileUpdated={onFileUpdated} onFileSaved={onFileSaved} onExitError={(error) => showToast(error, false)} /> : <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: documentPreviewKind === "powerpoint" ? "hidden" : "auto", position: "relative", WebkitOverflowScrolling: "touch" }}>
         <div style={{ minWidth: "100%", height: documentPreviewKind === "powerpoint" ? "100%" : undefined, display: "block", background: "transparent" }}>
           {documentPreviewKind ? (
             <DocumentViewer key={`${file.root || ""}:${file.path}`} path={file.path} root={file.root} kind={documentPreviewKind} />
@@ -499,7 +494,7 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
             />
           )}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

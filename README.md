@@ -37,8 +37,11 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Scheduled tasks**: Trigger agents to run tasks at specified times.
 - **Codex Remote Login**: Login to Codex remotely via the /login command.
 - **Built-in Token Stagion**: Real-time balance display and one-click activation.
+- **Token Usage data**: Record and display token usage and context-window usage.
 
 ### Task Board
+
+- **Task Orchestration**: Automatically break down complex goals into subtasks with dependencies, coordinate parallel execution across multiple agents, and complete the workflow with an overall acceptance review in the parent conversation.
 - **Concurrent Execution**: Run multiple tasks in parallel, with each task isolated via its own worktree.
 - **Task Templates**: Customize task stages within templates. Each stage supports configuration of the agent, model, planning mode toggle, preset prompts, and more.
 - **Deep Linking**: Dynamic, interactive associations between tasks, worktrees, sessions, and files.

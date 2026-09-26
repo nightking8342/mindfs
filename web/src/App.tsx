@@ -1,11 +1,19 @@
+import { TaskGroupPanel } from "./components/TaskGroupPanel";
+import { TaskCardText } from "./components/TaskCardText";
+import { AgentSelector } from "./components/AgentSelector";
+import { patchTask, fetchTaskDetail, deleteCachedTask } from "./services/tasks";
 import React, {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
+import { resolveInputSession } from "./services/inputSession";
+import { FileEditStore, fileEditKey } from "./services/fileEditing";
+import { normalizePathForRoot, shouldRedirectToRelayNodes } from "./services/fileNavigation";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
 import { Renderer } from "./renderer/Renderer";
 import {
@@ -63,6 +71,8 @@ import {
 } from "./services/fontSize";
 import {
   fetchFile,
+  fetchEditableFile,
+  saveTextFile,
   clearFileCacheForRoot,
   getCachedFile,
   invalidateFileCache,
@@ -235,6 +245,12 @@ function firstUserInputTemplate(template: TaskTemplate | null): string {
 
 function firstAgentStage(template: TaskTemplate | null): StageTemplate | null {
   return template?.stages?.map((stage) => stage.snapshot).find((stage) => stage.role === "agent") || null;
+}
+
+function taskAgentStage(task: KanbanTask, template?: TaskTemplate): StageTemplate | null {
+  const stage = firstAgentStage(template || null);
+  if (!stage) return null;
+  return { ...stage, agent: task.agent || stage.agent, model: task.model ?? (task.agent ? "" : stage.model) };
 }
 
 function isUnfinishedKanbanTask(task: KanbanTask): boolean {
@@ -433,6 +449,9 @@ type TaskInlineAttachment = {
 };
 
 type TaskInlineEditState = {
+  agent?: string;
+  model?: string;
+  canEditExecution?: boolean;
   taskId?: string;
   templateId: string;
   templateName: string;
@@ -1143,18 +1162,6 @@ function normalizePath(value: string): string {
     .replace(/^\/+|\/+$/g, "");
 }
 
-function normalizePathForRoot(value: string, rootPath?: string): string {
-  const normalized = normalizePath(value);
-  if (!normalized) return "";
-  const normalizedRoot = normalizePath(rootPath || "");
-  if (!normalizedRoot) return normalized;
-  if (normalized === normalizedRoot) return "";
-  if (normalized.startsWith(`${normalizedRoot}/`)) {
-    return normalized.slice(normalizedRoot.length + 1);
-  }
-  return normalized;
-}
-
 function relativeDisplayPathFromRoot(rootPath: string | undefined, absolutePath: string): string {
   const root = normalizePath(rootPath || "");
   const target = normalizePath(absolutePath);
@@ -1542,6 +1549,7 @@ function saveTaskCreateWorktreePreference(rootId: string, pref: TaskCreateWorktr
 }
 
 export function App({ onGoHome }: AppProps) {
+  const [fileEditStore] = useState(() => new FileEditStore({ load: fetchEditableFile, save: saveTextFile }));
   const { t } = useI18n();
   const pluginManagerRef = useRef<PluginManager>(new PluginManager());
   const completionAudioContextRef = useRef<AudioContext | null>(null);
@@ -1667,6 +1675,7 @@ export function App({ onGoHome }: AppProps) {
 	  const taskSessionKeysByIdRef = useRef<Record<string, string[]>>({});
 	  const [selectedKanbanTaskId, setSelectedKanbanTaskId] = useState("");
 	  const [expandedTaskInputIds, setExpandedTaskInputIds] = useState<Set<string>>(() => new Set());
+  const [overflowingTaskInputs, setOverflowingTaskInputs] = useState<Set<string>>(() => new Set());
   const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["success", "fail", "cancelled"]));
   const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineEditState | null>(null);
   const [taskSessionErrorDialog, setTaskSessionErrorDialog] = useState<{ title: string; message: string; details: string[] } | null>(null);
@@ -2069,15 +2078,15 @@ export function App({ onGoHome }: AppProps) {
     const rootId = task.root_id || currentRootIdRef.current;
     if (!rootId) return;
     try {
-      const detail = taskDetailsById[task.id];
-      if (!detail) {
-        reportError("file.write_failed", t("task.detailNotSynced"));
-        return;
-      }
+      const detail = taskDetailsById[task.id] || await fetchTaskDetail(rootId,task.id);
       const firstInput = firstTaskInputFromDetail(detail);
       const currentInput = currentTaskInputFromDetail(detail);
+      const agentStage = taskAgentStage(detail.task, taskTemplates.find(item => item.id === detail.task.task_template_id));
 	      setTaskInlineEdit({
 	        taskId: task.id,
+            agent: agentStage?.agent,
+            model: agentStage?.model,
+            canEditExecution: !detail.task.main_session_key && !detail.task.scheduler_admitted && detail.task.current_stage_index===0,
 	        templateId: task.task_template_id,
 	        templateName: task.task_template_name || t("task.defaultTitle"),
 	        text: currentInput,
@@ -2085,7 +2094,7 @@ export function App({ onGoHome }: AppProps) {
 	        createWorktree: detail.task.create_worktree === true,
 	        worktreeBranchMode: detail.task.worktree_branch_mode === "existing" ? "existing" : "new",
 	        worktreeBranch: detail.task.worktree_branch || "",
-	        canToggleWorktree: detail.task.current_stage_index === 0 && !detail.task.worktree_path,
+	        canToggleWorktree: detail.task.current_stage_index === 0 && !detail.task.worktree_path && !detail.task.scheduler_admitted,
 	        attachments: [],
 	      });
       setTaskInlineActiveToken(null);
@@ -2100,7 +2109,7 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError("file.write_failed", String((err as Error)?.message || t("task.editFailed")));
     }
-  }, [taskDetailsById, t]);
+  }, [taskDetailsById, taskTemplates, t]);
 
   const loadTaskWorktreeBranches = useCallback(async (rootId: string) => {
     if (!rootId) return;
@@ -2156,6 +2165,9 @@ export function App({ onGoHome }: AppProps) {
 	    setTaskInlineEdit({
 	      templateId,
 	      templateName: template?.name || t("task.defaultTitle"),
+        agent: template?.stages.find(s=>s.snapshot.role==="agent")?.snapshot.agent,
+        model: template?.stages.find(s=>s.snapshot.role==="agent")?.snapshot.model,
+        canEditExecution: true,
 	      text: initialText,
 	      previousInputs: [],
 	      createWorktree: taskCanCreateWorktree && worktreePref.createWorktree,
@@ -2320,15 +2332,13 @@ export function App({ onGoHome }: AppProps) {
       const taskCanCreateWorktree = managedRootByIdRef.current[rootId]?.is_git_repo === true;
       const createWorktree = taskCanCreateWorktree && edit.createWorktree;
       const detail = edit.taskId
-        ? await updateTaskInput(
-            rootId,
-            edit.taskId,
-            payload,
-            edit.canToggleWorktree ? createWorktree : undefined,
-            edit.canToggleWorktree && createWorktree ? edit.worktreeBranchMode : undefined,
-            edit.canToggleWorktree && createWorktree ? edit.worktreeBranch : undefined,
-          )
-        : await createTask(rootId, edit.templateId, payload, createWorktree, edit.worktreeBranchMode, edit.worktreeBranch);
+        ? (edit.canEditExecution
+          ? await patchTask(rootId, edit.taskId, {
+              ...(edit.canEditExecution ? {input:payload,agent:edit.agent,model:edit.model,
+                ...(edit.canToggleWorktree ? {create_worktree:createWorktree,worktree_branch_mode:edit.worktreeBranchMode,worktree_branch:edit.worktreeBranch}:{})}:{}),
+            })
+          : await updateTaskInput(rootId,edit.taskId,payload))
+        : await createTask(rootId, edit.templateId, payload, createWorktree, edit.worktreeBranchMode, edit.worktreeBranch, {agent:edit.agent,model:edit.model});
       applyTaskDetails(rootId, [detail]);
       if (detail.task.worktree_path) {
         void refreshTaskWorktree(rootId, detail.task.worktree_path);
@@ -2604,6 +2614,7 @@ export function App({ onGoHome }: AppProps) {
   );
   const [status, setStatus] = useState<WSStatus>("disconnected");
   const [file, setFile] = useState<FilePayload | null>(null);
+  const currentFileEditing = useSyncExternalStore(fileEditStore.subscribe, () => !!file?.root && fileEditStore.has(file.root, file.path));
   const [viewerSelection, setViewerSelection] =
     useState<ViewerSelection | null>(null);
   const [attachedFileContext, setAttachedFileContext] =
@@ -3177,16 +3188,15 @@ export function App({ onGoHome }: AppProps) {
         redirectToRelayLogin();
         return true;
       }
-      if (
-        status === 403 ||
-        status === 404 ||
-        status === 502 ||
-        status === 503 ||
-        code === "forbidden" ||
-        code === "node_not_found" ||
-        code === "node_offline" ||
-        code === "connector_unavailable"
-      ) {
+      if (await shouldRedirectToRelayNodes(status, code, async () => {
+        const nodeID = relayNodeIdFromPathname(window.location.pathname);
+        if (!nodeID) return 200;
+        const response = await fetch(`/n/${encodeURIComponent(nodeID)}/`, {
+          cache: "no-cache",
+          headers: { Accept: "application/json" },
+        });
+        return response.status;
+      })) {
         redirectToRelayNodes();
         return true;
       }
@@ -3918,10 +3928,20 @@ export function App({ onGoHome }: AppProps) {
     }
   }, [sessions, syncSessionHeaderFromListItem]);
 
+  const getInputSession = useCallback(() => {
+    const root = currentRootIdRef.current;
+    return resolveInputSession(
+      root,
+      !!drawerOpenByRootRef.current[root || ""],
+      selectedSessionRef.current,
+      drawerSessionByRootRef.current[root || ""] || null,
+    );
+  }, []);
+
   const handleSetPlanMode = useCallback(
     async (enabled: boolean, targetSessionKey?: string, targetRootId?: string) => {
       const activeRoot = targetRootId || currentRootIdRef.current;
-      const session = currentSessionRef.current || drawerSessionByRootRef.current[activeRoot || ""];
+      const session = getInputSession();
       const sessionKey = targetSessionKey || session?.key || (session as any)?.session_key;
       if (!activeRoot) {
         reportError("session.sync_failed", t("session.planModeSelectFirst"));
@@ -3961,7 +3981,7 @@ export function App({ onGoHome }: AppProps) {
         reportError("network.disconnected", t("session.planModeSwitchFailedNotReady"));
       }
     },
-    [rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion, t],
+    [getInputSession, rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion, t],
   );
 
   const promotePendingSessionForRoot = useCallback(
@@ -4703,6 +4723,7 @@ export function App({ onGoHome }: AppProps) {
 
   const refreshCurrentFileContent = useCallback(
     async (rootID: string, changedPath: string) => {
+      if (fileEditStore.has(rootID, changedPath)) return;
       const currentFile = fileRef.current;
       if (!currentFile) return;
       const currentRoot = currentFile.root || currentRootIdRef.current || "";
@@ -4734,7 +4755,8 @@ export function App({ onGoHome }: AppProps) {
           !next ||
           !latestFile ||
           latestRoot !== rootID ||
-          latestFile.path !== changedPath
+          latestFile.path !== changedPath ||
+          fileEditStore.has(rootID, changedPath)
         ) {
           return;
         }
@@ -5609,6 +5631,32 @@ export function App({ onGoHome }: AppProps) {
       }),
     [runGitAction],
   );
+
+  const handleCreateBlankFile = useCallback(async () => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    const targetDir = (selectedDirRef.current === rootID ? "." : selectedDirRef.current) || ".";
+    const input = window.prompt(t("directory.fileNamePrompt"), "");
+    if (input === null) return;
+    const name = input.trim();
+    if (!name || name === "." || name === ".." || /[/\\\x00]/.test(name)) {
+      window.alert(t("directory.invalidFileName"));
+      return;
+    }
+    try {
+      await apiProtectedJSON(appPath(`/api/file?${new URLSearchParams({ root: rootID })}`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir: targetDir, name }),
+      });
+      const currentDir = (selectedDirRef.current === rootID ? "." : selectedDirRef.current) || ".";
+      await refreshTreeDir(rootID, targetDir, rootID === currentRootIdRef.current && currentDir === targetDir);
+    } catch (err) {
+      reportError("file.write_failed", err instanceof ProtectedAPIError && err.status === 409
+        ? t("directory.fileExists")
+        : String((err as Error)?.message || t("directory.createFileFailed")));
+    }
+  }, [refreshTreeDir, t]);
 
   const handleTreeUpload = useCallback(
     async (files: File[]) => {
@@ -6518,46 +6566,14 @@ export function App({ onGoHome }: AppProps) {
     ) => {
       const activeRoot = currentRootIdRef.current;
       if (!activeRoot) return;
-      const selected = selectedSessionRef.current;
-      const selectedKey = selected?.key || selected?.session_key;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot;
-      const currentBoundSessionKey =
-        boundSessionByRootRef.current[activeRoot] || null;
-      const isMainSessionView =
-        interactionModeRef.current !== "drawer" &&
-        !!selectedKey &&
-        selectedRoot === activeRoot;
-      let sendSessionKey: string | null | undefined =
-        isMainSessionView && selectedKey && !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : currentBoundSessionKey;
-      let session: Session | null = null;
-      if (sendSessionKey) {
-        session =
-          sessionCacheRef.current[rootSessionKey(activeRoot, sendSessionKey)];
-        if (!session) {
-          const current = currentSessionRef.current;
-          if (current?.key === sendSessionKey) {
-            session = current as Session;
-          }
-        }
-        if (!session && selectedKey === sendSessionKey) {
-          session = { ...(selected as any), key: sendSessionKey } as Session;
-        }
-      } else {
-        if (
-          selectedRoot === activeRoot &&
-          selectedKey &&
-          !selectedKey.startsWith("pending-")
-        ) {
-          sendSessionKey = selectedKey;
-          session =
-            sessionCacheRef.current[
-              rootSessionKey(activeRoot, sendSessionKey)
-            ] || ({ ...selected, key: selectedKey } as Session);
-        }
-      }
+      const target = getInputSession();
+      let sendSessionKey: string | null | undefined = target?.key || target?.session_key;
+      // The server must assign a real key before this draft can receive more input.
+      if (sendSessionKey?.startsWith("pending-")) return;
+      let session: Session | null = sendSessionKey
+        ? sessionCacheRef.current[rootSessionKey(activeRoot, sendSessionKey)]
+          || ({ ...target, key: sendSessionKey } as Session)
+        : null;
       let effectiveMode = mode,
         effectiveAgent = agent,
         effectiveModel = model || "",
@@ -6586,35 +6602,31 @@ export function App({ onGoHome }: AppProps) {
       if (sendSessionKey && session) {
         const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";
-        const useTargetSessionDefaults =
-          !!currentBoundSessionKey && currentBoundSessionKey !== targetSessionKey;
         effectiveMode = normalizeMode(session.type as any);
         effectiveAgent =
-          (useTargetSessionDefaults ? previousAgent : agent) ||
+          agent ||
           previousAgent ||
           "";
         effectiveModel =
-          (useTargetSessionDefaults ? session.model || "" : model) ||
+          model ||
           (effectiveAgent === previousAgent ? session.model || "" : "");
         effectiveAgentMode =
-          (useTargetSessionDefaults ? (session as any).mode || "" : agentMode) ||
+          agentMode ||
           (effectiveAgent === previousAgent ? (session as any).mode || "" : "");
         effectiveAgentPreset =
-          (useTargetSessionDefaults ? (session as any).preset || "" : agentPreset) ||
+          agentPreset ||
           (effectiveAgent === previousAgent ? (session as any).preset || "" : "");
         effectiveEffort =
-          (useTargetSessionDefaults ? (session as any).effort || "" : effort) ||
+          effort ||
           (effectiveAgent === previousAgent ? (session as any).effort || "" : "");
         effectiveFastService =
-          (useTargetSessionDefaults
-            ? (((session as any).fast_service || "") as "" | "on" | "off")
-            : ((fastService || "") as "" | "on" | "off")) ||
+          ((fastService || "") as "" | "on" | "off") ||
           (effectiveAgent === previousAgent
             ? (((session as any).fast_service || "") as "" | "on" | "off")
             : "");
         effectiveShell =
           effectiveMode === "command"
-            ? ((useTargetSessionDefaults ? (session as any).shell || "" : shell) ||
+            ? (shell ||
                 (session as any).shell ||
                 "")
             : "";
@@ -7036,6 +7048,7 @@ export function App({ onGoHome }: AppProps) {
     },
     [
       attachedFileContext,
+      getInputSession,
       rootSessionKey,
       mergeSessionItems,
       setSelectedPendingByKey,
@@ -7158,57 +7171,30 @@ export function App({ onGoHome }: AppProps) {
   const handleRemoveQueuedMessage = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       await sessionService.removeQueuedMessage(activeRoot, sessionKey, queueId);
     },
-    [],
+    [getInputSession],
   );
 
   const handleUpdateQueuedMessage = useCallback(
     async (queueId: string, content: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId || !content.trim()) return;
       await sessionService.updateQueuedMessage(activeRoot, sessionKey, queueId, content);
     },
-    [],
+    [getInputSession],
   );
 
   const handleSendQueuedMessageNow = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       const cacheKey = rootSessionKey(activeRoot, sessionKey);
       const previousQueue = queuedMessagesBySessionRef.current[cacheKey] || [];
@@ -7227,33 +7213,8 @@ export function App({ onGoHome }: AppProps) {
         setQueueVersion((v) => v + 1);
       }
     },
-    [markSessionPending, rootSessionKey],
+    [getInputSession, markSessionPending, rootSessionKey],
   );
-
-  const handleNewSession = useCallback(() => {
-    const rootID = currentRootIdRef.current;
-    const previousBoundKey = rootID ? boundSessionByRootRef.current[rootID] : "";
-    if (rootID && previousBoundKey && !previousBoundKey.startsWith("pending-")) {
-      suppressedAutoBindSessionByRootRef.current[rootID] = previousBoundKey;
-    }
-    setMainViewPreferenceForRoot(rootID, "session");
-    selectedSessionRef.current = null;
-    currentSessionRef.current = null;
-    interactionModeRef.current = "main";
-    setSelectedSession(null);
-    if (rootID) {
-      selectedSessionByRootRef.current[rootID] = null;
-    }
-    setBoundSessionForRoot(rootID, null);
-    setDrawerSessionForRoot(rootID, null);
-    setInteractionMode("main");
-    setDrawerOpenForRoot(rootID, false);
-  }, [
-    setBoundSessionForRoot,
-    setDrawerOpenForRoot,
-    setDrawerSessionForRoot,
-    setMainViewPreferenceForRoot,
-  ]);
 
   const currentSelectionSource = useMemo(() => {
     if (file?.path) {
@@ -7491,14 +7452,17 @@ export function App({ onGoHome }: AppProps) {
           const fetchFileWithMode = async (
             mode: "full" | "incremental",
             timeoutMs?: number,
-          ) =>
-            fetchFile({
+          ) => {
+            const editing = fileEditStore.get(fileEditKey(String(root), String(path)));
+            if (editing?.file) return editing.file;
+            return fetchFile({
               rootId: String(root),
               path: String(path),
               readMode: mode,
               cursor,
               timeoutMs,
             });
+          };
 
           let readMode: "incremental" | "full" =
             params.readMode === "full" ? "full" : "incremental";
@@ -10553,6 +10517,13 @@ export function App({ onGoHome }: AppProps) {
             }
           }
           break;
+        case "task.deleted":
+          if(payload?.root_id===currentRootIdRef.current && typeof payload?.task_id==="string"){
+            const id=payload.task_id;const next={...taskDetailsByIdRef.current};delete next[id];taskDetailsByIdRef.current=next;setTaskDetailsById(next);
+            setKanbanTaskCountItems(prev=>prev.filter(task=>task.id!==id));
+            void deleteCachedTask(payload.root_id,id).catch(console.error);
+          }
+          break;
         case "task.updated":
           if (
             typeof payload?.root_id === "string" &&
@@ -11211,35 +11182,12 @@ export function App({ onGoHome }: AppProps) {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [actionHandlers, loadSessionsForRoot, refreshTreeDir, tryShowBoundSessionForRoot]);
 
-  const selectedRoot =
-    (selectedSession?.root_id as string | undefined) || currentRootId || "";
-  const selectedInCurrentRoot =
-    !!selectedSession && !!currentRootId && selectedRoot === currentRootId;
-  const selectedKey =
-    selectedSession?.key || selectedSession?.session_key || "";
-  const boundFromSelected =
-    selectedInCurrentRoot && selectedKey === activeBoundSessionKey
-      ? (selectedSession as any)
-      : null;
-  const boundFromCache =
-    activeBoundSessionKey && currentRootId
-      ? (sessionCacheRef.current[
-          rootSessionKey(currentRootId, activeBoundSessionKey)
-        ] as any)
-      : null;
-  const isDetachedMainSessionTarget =
-    !!activeBoundSessionKey &&
-    selectedInCurrentRoot &&
-    !!selectedKey &&
-    selectedKey !== activeBoundSessionKey &&
-    interactionMode !== "drawer";
-  const actionBarSession = activeBoundSessionKey
-    ? isDetachedMainSessionTarget
-      ? (selectedSession as any)
-      : (currentSession as any) || boundFromCache || boundFromSelected
-    : selectedInCurrentRoot
-      ? (selectedSession as any)
-      : null;
+  const actionBarSession = resolveInputSession(
+    currentRootId,
+    isDrawerOpen,
+    selectedSession,
+    currentSession,
+  );
   const actionBarSessionKey =
     (actionBarSession as any)?.key ||
     (actionBarSession as any)?.session_key ||
@@ -11261,13 +11209,6 @@ export function App({ onGoHome }: AppProps) {
       })),
     [currentRootId, gitSubReposByRoot],
   );
-  const isBoundSessionInMain =
-    !!activeBoundSessionKey &&
-    selectedKey === activeBoundSessionKey &&
-    interactionMode !== "drawer";
-  const canOpenSessionDrawer = !!activeBoundSessionKey && !isBoundSessionInMain;
-  const detachedBoundSession =
-    isDetachedMainSessionTarget && !isDrawerOpen;
   const actionBarQueuedMessages = useMemo(() => {
     void queueVersion;
     if (!currentRootId || !actionBarSessionKey) return [];
@@ -11285,7 +11226,7 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, file, pluginVersion, pluginQuery]);
 
   useEffect(() => {
-    if (!file || pluginBypass || !matchedPlugin) return;
+    if (!file || currentFileEditing || pluginBypass || !matchedPlugin) return;
     if (inferReadModeFromPlugin(matchedPlugin) !== "full") return;
     if (!file.truncated) return;
     const root = file.root || currentRootId;
@@ -11302,6 +11243,7 @@ export function App({ onGoHome }: AppProps) {
     });
   }, [
     file,
+    currentFileEditing,
     pluginBypass,
     matchedPlugin,
     currentRootId,
@@ -13100,6 +13042,371 @@ export function App({ onGoHome }: AppProps) {
     });
   }
   kanbanStageColumns.sort((a, b) => a.index - b.index);
+  const renderKanbanTaskCard = (task: KanbanTask, columnName: string, detail?: TaskDetail, allTemplates = isAllTaskTemplateFilter, onNavigate?: () => void) => {
+    const isAllTaskTemplateFilter = allTemplates;
+                    const firstInput = detail?.stage_runs[0]?.input || taskFirstInputById[task.id] || "";
+                    const agentStage = taskAgentStage(task, taskTemplateById[task.task_template_id]);
+                    const agentBadge = agentStage?.agent ? (
+                      <span
+                        title={[agentStage.agent, agentStage.model].filter(Boolean).join(" / ")}
+                        aria-label={[agentStage.agent, agentStage.model].filter(Boolean).join(" / ")}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--text-secondary)" }}
+                      >
+                        <AgentIcon agentName={agentStage.agent} style={{ width: 14, height: 14, display: "block", flexShrink: 0 }} />
+                      </span>
+                    ) : null;
+                    const taskSessionKeys = detail?.stage_runs.some(run => run.session_key)
+                      ? [...new Set(detail.stage_runs.map(run => run.session_key).filter((key): key is string => Boolean(key)))]
+                      : taskSessionKeysById[task.id]?.length
+                      ? taskSessionKeysById[task.id]
+                      : task.main_session_key
+                        ? [task.main_session_key]
+                        : [];
+                    const taskSessionPending = taskSessionKeys.some((key) => !!sessionByKey[key]?.pending);
+                    const taskQueued = task.status === "queued";
+                    const taskCanRunImmediately = taskQueued && !task.scheduler_admitted && !taskSessionKeys.length;
+                    const auxFlags = task.aux_flags || {};
+                    const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
+                    const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
+                    const taskAuxBadges = [
+                      auxFlags.ask_user_waiting ? { key: "ask_user", label: t("task.waitingUser"), icon: renderToolIcon("ask_user"), attention: true } : null,
+                      auxFlags.has_plan ? { key: "plan", label: t("task.hasPlan"), icon: <TaskPlanAuxIcon />, attention: false } : null,
+                      auxFlags.has_todos ? { key: "todos", label: t("task.hasTodos"), icon: renderToolIcon("todo"), attention: false } : null,
+                      auxFlags.has_task ? { key: "task", label: t("task.hasTask"), icon: renderToolIcon("task"), attention: false } : null,
+                    ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
+                    const inputExpanded = expandedTaskInputIds.has(task.id);
+                    const inputLayoutKey = `${detail ? "group" : "board"}:${task.id}`;
+                    const inputNeedsToggle = inputExpanded || overflowingTaskInputs.has(inputLayoutKey);
+                    const taskTerminal = isTerminalKanbanTask(task);
+                    const taskStageRunning = task.current_stage_status === "running";
+                    const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
+                    const showTaskAdvanceButton = !taskTerminal && !taskStageRunning && !taskQueued;
+                    const taskStatusText = taskStatusLabel(task.status || "", t);
+                    const taskWorktreeEnabled = task.create_worktree === true;
+	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
+	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
+	                    const showStageName = isAllTaskTemplateFilter ? columnName === t("task.column.running") : Boolean(taskStageName);
+	                    const showTaskStatus = isAllTaskTemplateFilter && columnName === t("task.column.done");
+	                    const taskSelected = selectedKanbanTaskId === task.id;
+	                    return (
+	                      <article
+	                        key={task.id}
+	                        onClick={() => handleSelectKanbanTask(task)}
+	                        style={{
+	                          position: "relative",
+	                          border: taskSelected ? "1px solid rgba(14, 165, 233, 0.95)" : "1px solid rgba(96, 165, 250, 0.42)",
+	                          borderRadius: "8px",
+	                          background: "var(--menu-bg)",
+	                          padding: "8px",
+	                          boxShadow: taskSelected ? "0 0 0 2px rgba(14, 165, 233, 0.16)" : "0 1px 2px rgba(15, 23, 42, 0.06)",
+	                          cursor: "pointer",
+	                        }}
+	                      >
+                        {taskSessionPending ? (
+                          <span
+                            aria-label={t("task.replying")}
+                            title={t("task.replying")}
+                            style={taskReplyPulseStyle()}
+                          />
+                        ) : null}
+                        {isAllTaskTemplateFilter ? (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "5px",
+                              minWidth: 0,
+                              color: "var(--text-secondary)",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                              lineHeight: "14px",
+                            }}
+                          >
+                            {taskNumberLabel ? (
+                              <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
+                            ) : null}
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.unnamedTemplate")}
+                            </span>
+                            {showStageName ? (
+                              <>
+                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {taskStageName}
+                                </span>
+                              </>
+                            ) : null}
+	                            {showTaskStatus ? (
+	                              <>
+	                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+	                                <span style={{ flex: "0 0 auto" }}>{taskStatusText}</span>
+	                                {task.status === "fail" && taskSessionError ? (
+	                                  <button
+	                                    type="button"
+	                                    title={t("task.viewError")}
+	                                    aria-label={t("task.viewTaskError")}
+		                                    onClick={(event) => {
+		                                      event.stopPropagation();
+		                                      setTaskSessionErrorDialog({
+		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.defaultTitle"),
+		                                        message: taskSessionError,
+		                                        details: taskSessionErrorDetails,
+		                                      });
+		                                    }}
+	                                    style={{ ...taskCardIconButtonStyle("warning"), width: "16px", height: "16px" }}
+	                                  >
+	                                    <TaskSessionErrorIcon />
+	                                  </button>
+	                                ) : null}
+	                              </>
+                            ) : null}
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                            {agentBadge}
+                          </div>
+                        ) : null}
+                        <div
+                          style={{
+                            marginTop: isAllTaskTemplateFilter ? "5px" : 0,
+                            color: firstInput ? "var(--text-color)" : "var(--text-secondary)",
+                            fontSize: "12px",
+                            lineHeight: "18px",
+                            fontWeight: firstInput ? 700 : 500,
+                            ...(!isAllTaskTemplateFilter
+                              ? {
+                                  display: "flex",
+                                  alignItems: "flex-start",
+                                  gap: "6px",
+                                  minWidth: 0,
+                                }
+                              : {}),
+                          }}
+                        >
+                          <TaskCardText
+                            expanded={inputExpanded}
+                            onOverflowChange={overflow => setOverflowingTaskInputs(previous => {
+                              if (previous.has(inputLayoutKey) === overflow) return previous;
+                              const next = new Set(previous);
+                              if (overflow) next.add(inputLayoutKey);
+                              else next.delete(inputLayoutKey);
+                              return next;
+                            })}
+                            style={{
+                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              ...(!inputExpanded
+                                ? {
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 3,
+                                    WebkitBoxOrient: "vertical",
+                                    overflow: "hidden",
+                                  }
+                                : {}),
+                            }}
+                          >
+                            {!isAllTaskTemplateFilter && taskNumberLabel ? (
+                              <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
+                            ) : null}
+                            {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
+                          </TaskCardText>
+                          {!isAllTaskTemplateFilter ? (
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                          ) : null}
+                          {!isAllTaskTemplateFilter && agentBadge}
+                        </div>
+                        {task.block_reason && <div style={{fontSize:11,color:"#b45309"}}>{task.block_reason}</div>}
+                        <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                            {taskSessionKeys.length > 0 ? (
+                              taskSessionKeys.map((sessionKey, sessionIndex) => {
+                                const taskSession = sessionByKey[sessionKey] || null;
+                                return (
+                                  <button
+                                    key={`${task.id}-${sessionKey}`}
+                                    type="button"
+                                    title={taskSession?.name || t("task.openSession", { index: sessionIndex + 1 })}
+                                    aria-label={t("task.openSession", { index: sessionIndex + 1 })}
+	                                    onClick={(event) => {
+	                                      event.stopPropagation();
+	                                      onNavigate?.(); handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
+	                                    }}
+                                    style={taskCardIconButtonStyle()}
+                                  >
+                                    <span
+                                      style={{
+                                        position: "relative",
+                                        width: "18px",
+                                        height: "18px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                      }}
+                                    >
+                                      <ModeIcon type="task" size={16} />
+                                      <span
+                                        style={{
+                                          position: "absolute",
+                                          right: "-2px",
+                                          bottom: "-2px",
+                                          width: "10px",
+                                          height: "10px",
+                                          borderRadius: "999px",
+                                          background: "var(--content-bg, #fff)",
+                                          border: "1px solid rgba(255,255,255,0.9)",
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          overflow: "hidden",
+                                        }}
+                                      >
+                                        <AgentIcon
+                                          agentName={taskSession?.agent || ""}
+                                          style={{ width: "10px", height: "10px", display: "block" }}
+                                        />
+                                      </span>
+                                    </span>
+                                  </button>
+                                );
+                              })
+                            ) : taskQueued ? (
+                              <>
+                                <span
+                                  title={t("task.waitingSchedule")}
+                                  aria-label={t("task.waitingSchedule")}
+                                  style={{
+                                    ...taskCardIconButtonStyle(),
+                                    cursor: "default",
+                                    color: "var(--accent-color)",
+                                  }}
+                                >
+                                  <TaskQueuedSpinnerIcon />
+                                </span>
+                                {taskCanRunImmediately ? (
+                                  <button
+                                    type="button"
+                                    title={t("task.runNow")}
+                                    aria-label={t("task.runNow")}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleMoveKanbanTask(task, "run-now");
+                                    }}
+                                    style={{
+                                      ...taskCardIconButtonStyle(),
+                                      width: "17px",
+                                      marginLeft: "-3px",
+                                      color: "#2563eb",
+                                    }}
+                                  >
+                                    <TaskRunNowIcon />
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : null}
+	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
+                              <button
+                                type="button"
+                                title={t("task.viewError")}
+                                aria-label={t("task.viewTaskSessionError")}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setTaskSessionErrorDialog({
+	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.sessionTitle"),
+	                                    message: taskSessionError,
+	                                    details: taskSessionErrorDetails,
+	                                  });
+	                                }}
+                                style={taskCardIconButtonStyle("warning")}
+                              >
+                                <TaskSessionErrorIcon />
+                              </button>
+                            ) : null}
+                            {taskAuxBadges.length > 0 ? (
+                              <div style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
+                                {taskAuxBadges.map((badge) => (
+                                  <span
+                                    key={badge.key}
+                                    title={badge.label}
+                                    aria-label={badge.label}
+                                    style={taskAuxBadgeStyle(badge.attention)}
+                                  >
+                                    {badge.icon}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {inputNeedsToggle ? (
+                              <button
+                                type="button"
+                                title={inputExpanded ? t("common.collapse") : t("common.expand")}
+                                aria-label={inputExpanded ? t("task.collapseContent") : t("task.expandContent")}
+                                aria-expanded={inputExpanded}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setExpandedTaskInputIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(task.id)) {
+                                      next.delete(task.id);
+                                    } else {
+                                      next.add(task.id);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                style={taskCardIconButtonStyle()}
+                              >
+                                <TaskExpandIcon collapsed={!inputExpanded} />
+                              </button>
+                            ) : null}
+                          </div>
+                          {!taskTerminal ? (
+                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 0 }}>
+                              {showTaskAdvanceButton ? (
+                                <button
+                                  type="button"
+                                  title={taskCanComplete ? t("task.completeShort") : t("task.nextStage")}
+                                  aria-label={taskCanComplete ? t("task.complete") : t("task.nextStage")}
+	                                  onClick={(event) => {
+	                                    event.stopPropagation();
+	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
+	                                  }}
+                                  style={taskCardIconButtonStyle(taskCanComplete ? "success" : "accent")}
+                                >
+                                  {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
+                                </button>
+                              ) : null}
+	                              <button type="button" title={t("common.edit")} aria-label={t("task.edit")} onClick={(event) => {
+	                                event.stopPropagation();
+	                                onNavigate?.(); void openTaskEditDialog(task);
+	                              }} style={taskCardIconButtonStyle()}>
+                                {renderToolIcon("edit")}
+                              </button>
+	                              <button type="button" title={t("common.delete")} aria-label={t("task.delete")} onClick={(event) => {
+	                                event.stopPropagation();
+	                                void handleMoveKanbanTask(task, "cancel");
+	                              }} style={taskCardIconButtonStyle("danger")}>
+                                <DeleteIcon />
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+	                      </article>
+	                    );
+
+  };
 	  const kanbanTaskPanel = currentRootId ? (
 	    <div
 	      data-onboarding="task-board"
@@ -13586,344 +13893,7 @@ export function App({ onGoHome }: AppProps) {
 	                          <span>{section.tasks.length}</span>
 	                        </button>
 	                      ) : null}
-	                      {!sectionCollapsed ? section.tasks.map((task) => {
-                    const firstInput = taskFirstInputById[task.id] || "";
-                    const taskSessionKeys = taskSessionKeysById[task.id]?.length
-                      ? taskSessionKeysById[task.id]
-                      : task.main_session_key
-                        ? [task.main_session_key]
-                        : [];
-                    const taskSessionPending = taskSessionKeys.some((key) => !!sessionByKey[key]?.pending);
-                    const taskQueued = task.status === "queued";
-                    const taskBlockedByConcurrency = taskQueued && !task.scheduler_admitted && !taskSessionKeys.length;
-                    const auxFlags = task.aux_flags || {};
-                    const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
-                    const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
-                    const taskAuxBadges = [
-                      auxFlags.ask_user_waiting ? { key: "ask_user", label: t("task.waitingUser"), icon: renderToolIcon("ask_user"), attention: true } : null,
-                      auxFlags.has_plan ? { key: "plan", label: t("task.hasPlan"), icon: <TaskPlanAuxIcon />, attention: false } : null,
-                      auxFlags.has_todos ? { key: "todos", label: t("task.hasTodos"), icon: renderToolIcon("todo"), attention: false } : null,
-                      auxFlags.has_task ? { key: "task", label: t("task.hasTask"), icon: renderToolIcon("task"), attention: false } : null,
-                    ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
-                    const inputExpanded = expandedTaskInputIds.has(task.id);
-                    const inputNeedsToggle = firstInput.length > 120 || firstInput.split(/\r?\n/).length > 3;
-                    const taskTerminal = isTerminalKanbanTask(task);
-                    const taskStageRunning = task.current_stage_status === "running";
-                    const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
-                    const showTaskAdvanceButton = !taskTerminal && !taskStageRunning && !taskQueued;
-                    const taskStatusText = taskStatusLabel(task.status || "", t);
-                    const taskWorktreeEnabled = task.create_worktree === true;
-	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
-	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
-	                    const showStageName = isAllTaskTemplateFilter ? column.name === t("task.column.running") : Boolean(taskStageName);
-	                    const showTaskStatus = isAllTaskTemplateFilter && column.name === t("task.column.done");
-	                    const taskSelected = selectedKanbanTaskId === task.id;
-	                    return (
-	                      <article
-	                        key={task.id}
-	                        onClick={() => handleSelectKanbanTask(task)}
-	                        style={{
-	                          position: "relative",
-	                          border: taskSelected ? "1px solid rgba(14, 165, 233, 0.95)" : "1px solid rgba(96, 165, 250, 0.42)",
-	                          borderRadius: "8px",
-	                          background: "var(--menu-bg)",
-	                          padding: "8px",
-	                          boxShadow: taskSelected ? "0 0 0 2px rgba(14, 165, 233, 0.16)" : "0 1px 2px rgba(15, 23, 42, 0.06)",
-	                          cursor: "pointer",
-	                        }}
-	                      >
-                        {taskSessionPending ? (
-                          <span
-                            aria-label={t("task.replying")}
-                            title={t("task.replying")}
-                            style={taskReplyPulseStyle()}
-                          />
-                        ) : null}
-                        {isAllTaskTemplateFilter ? (
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "5px",
-                              minWidth: 0,
-                              color: "var(--text-secondary)",
-                              fontSize: "10px",
-                              fontWeight: 700,
-                              lineHeight: "14px",
-                            }}
-                          >
-                            {taskNumberLabel ? (
-                              <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
-                            ) : null}
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.unnamedTemplate")}
-                            </span>
-                            {showStageName ? (
-                              <>
-                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
-                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {taskStageName}
-                                </span>
-                              </>
-                            ) : null}
-	                            {showTaskStatus ? (
-	                              <>
-	                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
-	                                <span style={{ flex: "0 0 auto" }}>{taskStatusText}</span>
-	                                {task.status === "fail" && taskSessionError ? (
-	                                  <button
-	                                    type="button"
-	                                    title={t("task.viewError")}
-	                                    aria-label={t("task.viewTaskError")}
-		                                    onClick={(event) => {
-		                                      event.stopPropagation();
-		                                      setTaskSessionErrorDialog({
-		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.defaultTitle"),
-		                                        message: taskSessionError,
-		                                        details: taskSessionErrorDetails,
-		                                      });
-		                                    }}
-	                                    style={{ ...taskCardIconButtonStyle("warning"), width: "16px", height: "16px" }}
-	                                  >
-	                                    <TaskSessionErrorIcon />
-	                                  </button>
-	                                ) : null}
-	                              </>
-                            ) : null}
-                            <span
-                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
-                            >
-                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                              worktree
-                            </span>
-                          </div>
-                        ) : null}
-                        <div
-                          style={{
-                            marginTop: isAllTaskTemplateFilter ? "5px" : 0,
-                            color: firstInput ? "var(--text-color)" : "var(--text-secondary)",
-                            fontSize: "12px",
-                            lineHeight: "18px",
-                            fontWeight: firstInput ? 700 : 500,
-                            ...(!isAllTaskTemplateFilter
-                              ? {
-                                  display: "flex",
-                                  alignItems: "flex-start",
-                                  gap: "6px",
-                                  minWidth: 0,
-                                }
-                              : {}),
-                          }}
-                        >
-                          <div
-                            style={{
-                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              ...(!inputExpanded
-                                ? {
-                                    display: "-webkit-box",
-                                    WebkitLineClamp: 3,
-                                    WebkitBoxOrient: "vertical",
-                                    overflow: "hidden",
-                                  }
-                                : {}),
-                            }}
-                          >
-                            {!isAllTaskTemplateFilter && taskNumberLabel ? (
-                              <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
-                            ) : null}
-                            {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
-                          </div>
-                          {!isAllTaskTemplateFilter ? (
-                            <span
-                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
-                            >
-                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                              worktree
-                            </span>
-                          ) : null}
-                        </div>
-                        <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                            {taskSessionKeys.length > 0 ? (
-                              taskSessionKeys.map((sessionKey, sessionIndex) => {
-                                const taskSession = sessionByKey[sessionKey] || null;
-                                return (
-                                  <button
-                                    key={`${task.id}-${sessionKey}`}
-                                    type="button"
-                                    title={taskSession?.name || t("task.openSession", { index: sessionIndex + 1 })}
-                                    aria-label={t("task.openSession", { index: sessionIndex + 1 })}
-	                                    onClick={(event) => {
-	                                      event.stopPropagation();
-	                                      handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
-	                                    }}
-                                    style={taskCardIconButtonStyle()}
-                                  >
-                                    <span
-                                      style={{
-                                        position: "relative",
-                                        width: "18px",
-                                        height: "18px",
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                      }}
-                                    >
-                                      <ModeIcon type="task" size={16} />
-                                      <span
-                                        style={{
-                                          position: "absolute",
-                                          right: "-2px",
-                                          bottom: "-2px",
-                                          width: "10px",
-                                          height: "10px",
-                                          borderRadius: "999px",
-                                          background: "var(--content-bg, #fff)",
-                                          border: "1px solid rgba(255,255,255,0.9)",
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "center",
-                                          overflow: "hidden",
-                                        }}
-                                      >
-                                        <AgentIcon
-                                          agentName={taskSession?.agent || ""}
-                                          style={{ width: "10px", height: "10px", display: "block" }}
-                                        />
-                                      </span>
-                                    </span>
-                                  </button>
-                                );
-                              })
-                            ) : taskQueued ? (
-                              <>
-                                <span
-                                  title={t("task.waitingSchedule")}
-                                  aria-label={t("task.waitingSchedule")}
-                                  style={{
-                                    ...taskCardIconButtonStyle(),
-                                    cursor: "default",
-                                    color: "var(--accent-color)",
-                                  }}
-                                >
-                                  <TaskQueuedSpinnerIcon />
-                                </span>
-                                {taskBlockedByConcurrency ? (
-                                  <button
-                                    type="button"
-                                    title={t("task.runNow")}
-                                    aria-label={t("task.runNow")}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      void handleMoveKanbanTask(task, "run-now");
-                                    }}
-                                    style={{
-                                      ...taskCardIconButtonStyle(),
-                                      width: "17px",
-                                      marginLeft: "-3px",
-                                      color: "#2563eb",
-                                    }}
-                                  >
-                                    <TaskRunNowIcon />
-                                  </button>
-                                ) : null}
-                              </>
-                            ) : null}
-	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
-                              <button
-                                type="button"
-                                title={t("task.viewError")}
-                                aria-label={t("task.viewTaskSessionError")}
-	                                onClick={(event) => {
-	                                  event.stopPropagation();
-	                                  setTaskSessionErrorDialog({
-	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.sessionTitle"),
-	                                    message: taskSessionError,
-	                                    details: taskSessionErrorDetails,
-	                                  });
-	                                }}
-                                style={taskCardIconButtonStyle("warning")}
-                              >
-                                <TaskSessionErrorIcon />
-                              </button>
-                            ) : null}
-                            {taskAuxBadges.length > 0 ? (
-                              <div style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
-                                {taskAuxBadges.map((badge) => (
-                                  <span
-                                    key={badge.key}
-                                    title={badge.label}
-                                    aria-label={badge.label}
-                                    style={taskAuxBadgeStyle(badge.attention)}
-                                  >
-                                    {badge.icon}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                            {inputNeedsToggle ? (
-                              <button
-                                type="button"
-                                title={inputExpanded ? t("common.collapse") : t("common.expand")}
-                                aria-label={inputExpanded ? t("task.collapseContent") : t("task.expandContent")}
-	                                onClick={(event) => {
-	                                  event.stopPropagation();
-	                                  setExpandedTaskInputIds((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(task.id)) {
-                                      next.delete(task.id);
-                                    } else {
-                                      next.add(task.id);
-                                    }
-                                    return next;
-                                  });
-                                }}
-                                style={taskCardIconButtonStyle()}
-                              >
-                                <TaskExpandIcon collapsed={!inputExpanded} />
-                              </button>
-                            ) : null}
-                          </div>
-                          {!taskTerminal ? (
-                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 0 }}>
-                              {showTaskAdvanceButton ? (
-                                <button
-                                  type="button"
-                                  title={taskCanComplete ? t("task.completeShort") : t("task.nextStage")}
-                                  aria-label={taskCanComplete ? t("task.complete") : t("task.nextStage")}
-	                                  onClick={(event) => {
-	                                    event.stopPropagation();
-	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
-	                                  }}
-                                  style={taskCardIconButtonStyle(taskCanComplete ? "success" : "accent")}
-                                >
-                                  {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
-                                </button>
-                              ) : null}
-	                              <button type="button" title={t("common.edit")} aria-label={t("task.edit")} onClick={(event) => {
-	                                event.stopPropagation();
-	                                void openTaskEditDialog(task);
-	                              }} style={taskCardIconButtonStyle()}>
-                                {renderToolIcon("edit")}
-                              </button>
-	                              <button type="button" title={t("common.delete")} aria-label={t("task.delete")} onClick={(event) => {
-	                                event.stopPropagation();
-	                                void handleMoveKanbanTask(task, "cancel");
-	                              }} style={taskCardIconButtonStyle("danger")}>
-                                <DeleteIcon />
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-	                      </article>
-	                    );
-	                  }) : null}
+	                      {!sectionCollapsed ? section.tasks.map(task => renderKanbanTaskCard(task, column.name)) : null}
 	                    </React.Fragment>
                       );
 	                  })}
@@ -14051,7 +14021,7 @@ export function App({ onGoHome }: AppProps) {
       />
     );
   } else if (file) {
-    if (pluginRender && pluginRender.output) {
+    if (pluginRender && pluginRender.output && !currentFileEditing) {
       workspaceView = (
         <div
           style={{
@@ -14131,7 +14101,7 @@ export function App({ onGoHome }: AppProps) {
             minHeight: 0,
           }}
         >
-          {pluginBypass && matchedPlugin ? (
+          {pluginBypass && matchedPlugin && !currentFileEditing ? (
             <div
               style={{
                 borderBottom: "1px solid var(--border-color)",
@@ -14197,6 +14167,30 @@ export function App({ onGoHome }: AppProps) {
           ) : null}
           <FileViewer
             file={file}
+            rootPath={managedRootByIdRef.current[file?.root || ""]?.root_path}
+            onFileOperationComplete={async () => {
+              if (!file?.root) return;
+              const parent = file.path.split("/").slice(0, -1).join("/") || ".";
+              clearFileCacheForRoot(file.root);
+              setEntriesByPath({});
+              await refreshTreeDir(file.root, parent, false);
+              await actionHandlers.open_dir({ root: file.root, path: parent === "." ? file.root : parent, isRoot: parent === ".", forceDirectory: true });
+              void refreshGitStatus(file.root);
+            }}
+            editStore={fileEditStore}
+            onFileUpdated={(next) => {
+              const current = fileRef.current;
+              if (current?.root === next.root && current?.path === next.path) {
+                setFile({ ...current, ...next, file_meta: current.file_meta });
+              }
+            }}
+            onFileSaved={(next) => {
+              const current = fileRef.current;
+              if (current?.root === next.root && current?.path === next.path) {
+                setFile({ ...current, ...next, file_meta: current.file_meta });
+              }
+              if (next.root) void refreshGitStatus(next.root);
+            }}
             isVisible={!selectedSession}
             onSelectionChange={handleViewerSelectionChange}
             initialScrollTop={
@@ -14223,6 +14217,16 @@ export function App({ onGoHome }: AppProps) {
     workspaceView = (
       <DefaultListView
         root={currentRootId || undefined}
+        rootPath={managedRootByIdRef.current[currentRootId || ""]?.root_path}
+        onFileOperationComplete={async () => {
+          if (!currentRootId) return;
+          const parent = (selectedDir || "").split("/").slice(0, -1).join("/") || ".";
+          clearFileCacheForRoot(currentRootId);
+          setEntriesByPath({});
+          await refreshTreeDir(currentRootId, parent, false);
+          await actionHandlers.open_dir({ root: currentRootId, path: parent === "." ? currentRootId : parent, isRoot: parent === ".", forceDirectory: true });
+          void refreshGitStatus(currentRootId);
+        }}
         path={selectedDir || ""}
         entries={currentMainContentView === "file-browser" ? visibleMainEntries : []}
         errorMessage={currentMainContentView === "file-browser" ? mainDirectoryError : ""}
@@ -14253,6 +14257,7 @@ export function App({ onGoHome }: AppProps) {
           });
         }}
         onUploadFiles={handleTreeUpload}
+        onCreateBlankFile={handleCreateBlankFile}
         onRenameRoot={handleRenameCurrentRoot}
         onRemoveRoot={handleRemoveCurrentRoot}
         isGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
@@ -15107,6 +15112,7 @@ export function App({ onGoHome }: AppProps) {
               <div
                 style={{
                   display: selectedSession ? "flex" : "none",
+                  flexDirection: "column",
                   flex: 1,
                   minHeight: 0,
                   minWidth: 0,
@@ -15151,18 +15157,33 @@ export function App({ onGoHome }: AppProps) {
               </div>
             ) : null}
             <ActionBar
+              onNewSession={() => {
+                const root = currentRootIdRef.current;
+                if (!root) return;
+                setPendingPlanMode(false);
+                selectedSessionRef.current = null;
+                currentSessionRef.current = null;
+                selectedSessionByRootRef.current[root] = null;
+                setSelectedSession(null);
+                setDrawerSessionForRoot(root, null);
+                interactionModeRef.current = "main";
+                setInteractionMode("main");
+                setDrawerOpenForRoot(root, false);
+              }}
+              onSelectProject={(root) => {
+                void actionHandlers.open_dir({ path: root, root, isRoot: true, suppressTreeExpand: true });
+              }}
+              onSelectSession={(session) => { void handleSelectSession(session); }}
+              taskGroupBadge={actionBarSessionKey ? <TaskGroupPanel key={`${actionBarSession?.root_id || currentRootId}:${actionBarSessionKey}`} rootId={actionBarSession?.root_id || currentRootId || ""} sessionKey={actionBarSessionKey} renderTask={(detail, close) => renderKanbanTaskCard(detail.task, isTerminalKanbanTask(detail.task) ? t("task.column.done") : t("task.column.running"), detail, true, close)} /> : null}
               status={status}
               agentsVersion={agentsVersion}
               codexRateLimitsRefreshToken={codexRateLimitsRefreshToken}
               currentRootId={currentRootId}
               currentRootIsGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
               currentRootSubRepos={actionBarWorktreeRepos}
-              currentSession={actionBarSession}
+              currentSession={actionBarSession ? { ...actionBarSession, name: actionBarSession.name || "", type: normalizeMode(actionBarSession.type), agent: actionBarSession.agent || "" } : null}
               pendingPlanMode={pendingPlanMode}
               attachedFileContext={attachedFileContext}
-              canOpenSessionDrawer={canOpenSessionDrawer}
-              sessionDrawerOpen={isDrawerOpen}
-              detachedBoundSession={detachedBoundSession}
               editDraftRequest={editDraftRequest}
               queuedMessages={actionBarQueuedMessages}
               inputHistory={actionBarInputHistory}
@@ -15174,32 +15195,11 @@ export function App({ onGoHome }: AppProps) {
               onSendQueuedMessageNow={handleSendQueuedMessageNow}
               mobileEnterKeySends={mobileEnterKeySends}
               sendShortcut={sendShortcut}
-              onNewSession={handleNewSession}
               onRequestFileContext={handleRequestFileContext}
               onClearFileContext={handleClearFileContext}
               onToggleLeftSidebar={() => setIsLeftOpen((v) => !v)}
               onToggleRightSidebar={() => setIsRightOpen((v) => !v)}
               sidebarsSwapped={sidebarsSwapped}
-              onSessionClick={() => {
-              const rootID = currentRootIdRef.current;
-              if (!activeBoundSessionKey) return;
-              const selectedKey =
-                selectedSession?.key || selectedSession?.session_key;
-              const isBoundSessionInMain =
-                selectedKey === activeBoundSessionKey &&
-                interactionMode !== "drawer";
-              if (isBoundSessionInMain) return;
-              const isDrawerCurrentlyOpen =
-                !!drawerOpenByRootRef.current[rootID || ""];
-              if (isDrawerCurrentlyOpen) {
-                interactionModeRef.current = "main";
-                setInteractionMode("main");
-                setDrawerOpenForRoot(rootID, false);
-                return;
-              }
-              setInteractionMode("drawer");
-              setDrawerOpenForRoot(rootID, true);
-              }}
             />
           </div>
         }
@@ -15517,8 +15517,10 @@ export function App({ onGoHome }: AppProps) {
                     ) : null}
                   </>
                 ) : null}
+                {taskInlineEdit.canEditExecution ? <AgentSelector agent={taskInlineEdit.agent || "codex"} model={taskInlineEdit.model} agents={availableAgents} compact viewportMenu menuPlacement="bottom" onAgentChange={(agent,model)=>setTaskInlineEdit(prev=>prev?{...prev,agent,model:model||""}:prev)}/> : <span>{taskInlineEdit.agent} {taskInlineEdit.model}</span>}
               </div>
             </div>
+            {taskInlineEdit.createWorktree && taskInlineEdit.worktreeBranchMode === "new" && taskInlineEdit.canToggleWorktree && <input aria-label={t("task.newBranchName")} placeholder={t("task.newBranchName")} value={taskInlineEdit.worktreeBranch} onChange={e=>setTaskInlineEdit(prev=>prev?{...prev,worktreeBranch:e.target.value}:prev)} style={{margin:"8px 12px",padding:8}}/>}
             <div style={{ padding: "12px", overflow: "visible", position: "relative", minHeight: 0, display: "flex", flexDirection: "column" }}>
               {taskInlineActiveToken && taskInlineCandidates.length > 0 ? (
                 <div

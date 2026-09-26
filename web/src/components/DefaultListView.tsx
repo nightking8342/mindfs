@@ -1,4 +1,5 @@
 import React from "react";
+import { FileOperationItems, MoreMenuButton, moreMenuPopoverStyle, menuOverlayStyle, MoveFilePopover } from "./FileOperations";
 import { rootBadgeStyle } from "./rootBadgeStyle";
 import { SymlinkBadge } from "./SymlinkBadge";
 import {
@@ -44,6 +45,8 @@ const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
 );
 
 type DefaultListViewProps = {
+  rootPath?: string;
+  onFileOperationComplete?: () => void | Promise<void>;
   root?: string;
   path?: string;
   entries: FileEntry[];
@@ -55,6 +58,7 @@ type DefaultListViewProps = {
   onItemClick?: (entry: FileEntry) => void;
   onPathClick?: (path: string) => void;
   onSortModeChange?: (mode: DirectorySortControlValue) => void;
+  onCreateBlankFile?: () => void | Promise<void>;
   onUploadFiles?: (files: File[]) => void | Promise<void>;
   onCancelUpload?: () => void;
   uploadProgress?: UploadProgress | null;
@@ -426,10 +430,13 @@ export function DefaultListView({
   onPathClick,
   onSortModeChange,
   onUploadFiles,
+  onCreateBlankFile,
   onCancelUpload,
   uploadProgress = null,
   onRenameRoot,
   onRemoveRoot,
+  onFileOperationComplete,
+  rootPath,
   isGitRepo = false,
   isGitWorktree = false,
   showGitHistory = true,
@@ -448,6 +455,8 @@ export function DefaultListView({
   const rootNameInputRef = React.useRef<HTMLInputElement>(null);
   const menuRef = React.useRef<HTMLDivElement | null>(null);
   const [isMenuOpen, setIsMenuOpen] = React.useState(false);
+  const [moveOpen, setMoveOpen] = React.useState(false);
+  React.useEffect(() => { setMoveOpen(false); }, [root, path]);
   const [isSortMenuOpen, setIsSortMenuOpen] = React.useState(false);
   const [isViewMenuOpen, setIsViewMenuOpen] = React.useState(false);
   const [editingRoot, setEditingRoot] = React.useState(false);
@@ -464,7 +473,7 @@ export function DefaultListView({
     sortMode === "mtime-asc" ||
     sortMode === "size-desc" ||
     sortMode === "size-asc";
-  const isRootView = !!root && (!!path ? path === root : true);
+  const isRootView = !!root && (!path || path === root || path === ".");
   const showTaskKanban = currentViewMode === "task-kanban";
   const showFileBrowser = currentViewMode === "file-browser";
   const currentViewLabel = showTaskKanban ? t("directory.taskKanban") : t("directory.fileBrowser");
@@ -489,17 +498,18 @@ export function DefaultListView({
   }, [editingRoot]);
 
   React.useEffect(() => {
-    if (!isMenuOpen) {
+    if (!isMenuOpen && !moveOpen) {
       return;
     }
     const handlePointerDown = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) {
         setIsMenuOpen(false);
+        setMoveOpen(false);
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [isMenuOpen]);
+  }, [isMenuOpen, moveOpen]);
 
   const cancelRootRename = React.useCallback(() => {
     setEditingRoot(false);
@@ -610,11 +620,13 @@ export function DefaultListView({
               {t("directory.itemCount", { count: sortedEntries.length })}
             </div>
           ) : null}
-          <div ref={menuRef} style={{ position: "relative" }}>
-            <button
-              type="button"
-              data-onboarding="main-menu"
+          <div ref={menuRef} style={{ position: "relative" }} onKeyDown={event => { if (event.key === "Escape") { setIsMenuOpen(false); setMoveOpen(false); } }}>
+            <MoreMenuButton
+              open={isMenuOpen}
+              label={t("directory.openMenu")}
+              onboarding="main-menu"
               onClick={() => {
+                setMoveOpen(false);
                 setIsMenuOpen((open) => {
                   const nextOpen = !open;
                   if (nextOpen) {
@@ -624,47 +636,10 @@ export function DefaultListView({
                   return nextOpen;
                 });
               }}
-              aria-label={t("directory.openMenu")}
-              style={{
-                width: "28px",
-                height: "28px",
-                borderRadius: "8px",
-                border: "none",
-                background: isMenuOpen ? "rgba(0, 0, 0, 0.06)" : "transparent",
-                color: "var(--text-secondary)",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                cursor: "pointer",
-                outline: "none",
-              }}
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="5" r="1.8" />
-                <circle cx="12" cy="12" r="1.8" />
-                <circle cx="12" cy="19" r="1.8" />
-              </svg>
-            </button>
+            />
             {isMenuOpen ? (
               <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 6px)",
-                  right: 0,
-                  minWidth: "176px",
-                  padding: "6px",
-                  borderRadius: "10px",
-                  border: "1px solid var(--border-color)",
-                  background: "var(--menu-bg)",
-                  boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
-                  zIndex: 20,
-                }}
+                style={moreMenuPopoverStyle}
               >
                 <button
                   type="button"
@@ -869,6 +844,7 @@ export function DefaultListView({
                     margin: "6px 4px",
                   }}
                 />
+                {!isRootView && root && path && <FileOperationItems key={`${root}:${path}`} root={root} path={path} onMove={() => { setIsMenuOpen(false); setMoveOpen(true); }} onComplete={async () => { await onFileOperationComplete?.(); setIsMenuOpen(false); }} />}
                 {isRootView ? (
                   <>
                     {isGitRepo && enableGitHistoryToggle ? (
@@ -1144,6 +1120,21 @@ export function DefaultListView({
                 ) : null}
                 <button
                   type="button"
+                  disabled={!root || !onCreateBlankFile}
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    void onCreateBlankFile?.();
+                  }}
+                  style={{ width: "100%", border: "none", background: "transparent", color: "var(--text-primary)", borderRadius: "8px", padding: "8px 10px", display: "flex", alignItems: "center", gap: "8px", textAlign: "left", cursor: root ? "pointer" : "not-allowed", fontSize: "12px", opacity: root ? 1 : 0.45 }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <path d="M14 2v6h6M12 12v6M9 15h6" />
+                  </svg>
+                  <span>{t("directory.createBlankFile")}</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     inputRef.current?.click();
                     setIsMenuOpen(false);
@@ -1183,14 +1174,10 @@ export function DefaultListView({
                 </button>
               </div>
             ) : null}
+            {moveOpen && root && path ? <div style={menuOverlayStyle}><MoveFilePopover root={root} rootPath={rootPath} path={path} onComplete={async () => { setMoveOpen(false); await onFileOperationComplete?.(); }} /></div> : null}
             {menuOverlay ? (
               <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 6px)",
-                  right: 0,
-                  zIndex: 30,
-                }}
+                style={menuOverlayStyle}
               >
                 {menuOverlay}
               </div>

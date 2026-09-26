@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"mindfs/server/internal/preferences"
+	"mindfs/server/internal/testutil"
 )
 
 // setupAgentConfigTest isolates every path the agent-config code touches
@@ -16,10 +17,7 @@ import (
 func setupAgentConfigTest(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t, home)
 
 	agentsPath := filepath.Join(home, "agents.json")
 	payload := `{"agents":[{"name":"claude","command":"claude"},{"name":"codex","command":"codex"}]}`

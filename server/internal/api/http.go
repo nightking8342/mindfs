@@ -235,6 +235,21 @@ func isLocalCLIPath(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}
+	if strings.HasSuffix(r.URL.Path, "/approve-plan") {
+		return false
+	}
+	if r.URL.Path == "/api/task-groups" || strings.HasPrefix(r.URL.Path, "/api/task-groups/") {
+		return r.Method == http.MethodGet || r.Method == http.MethodPost
+	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/api/agents" || r.URL.Path == "/api/task-templates" || r.URL.Path == "/api/tasks") {
+		return true
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/tasks" {
+		return true
+	}
+	if (r.Method == http.MethodPatch || r.Method == http.MethodDelete) && isLocalCLITaskPath(r.URL.Path) {
+		return true
+	}
 	switch r.Method {
 	case http.MethodPost:
 		return r.URL.Path == "/api/dirs" || r.URL.Path == "/api/relay/bind/start" || isLocalCLITaskPath(r.URL.Path)
@@ -283,6 +298,9 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/health", h.handleHealth)
 	r.Get("/api/tree", h.protectedEndpoint(h.handleTree))
 	r.Get("/api/file", h.handleFile)
+	r.Put("/api/file", h.protectedEndpoint(h.handleFileSave))
+	r.Post("/api/file", h.protectedEndpoint(h.handleFileCreate))
+	r.Post("/api/file/operation", h.protectedEndpoint(h.handleFileOperation))
 	r.Get("/api/git/status", h.protectedEndpoint(h.handleGitStatus))
 	r.Get("/api/git/diff", h.protectedEndpoint(h.handleGitDiff))
 	r.Get("/api/git/history", h.protectedEndpoint(h.handleGitHistory))
@@ -341,8 +359,18 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/task-templates", h.protectedEndpoint(h.handleTaskTemplateSave))
 	r.Put("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateSave))
 	r.Delete("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateDelete))
+	r.Get("/api/task-groups", h.protectedEndpoint(h.handleTaskGroups))
+	r.Post("/api/task-groups", h.protectedEndpoint(h.handleTaskGroups))
+	r.Get("/api/task-groups/{id}", h.protectedEndpoint(h.handleTaskGroup))
+	r.Patch("/api/task-groups/{id}/context", h.protectedEndpoint(h.handleTaskGroupContext))
+	r.Post("/api/task-groups/{id}/{operation}", h.protectedEndpoint(h.handleTaskGroupAction))
 	r.Get("/api/tasks", h.protectedEndpoint(h.handleKanbanTasksList))
 	r.Post("/api/tasks", h.protectedEndpoint(h.handleKanbanTaskCreate))
+	r.Get("/api/tasks/{id}", h.protectedEndpoint(h.handleTaskDetail))
+	r.Patch("/api/tasks/{id}", h.protectedEndpoint(h.handleTaskPatch))
+	r.Delete("/api/tasks/{id}", h.protectedEndpoint(h.handleTaskDelete))
+	r.Get("/api/tasks/{id}/read/{resource}", h.protectedEndpoint(h.handleTaskRead))
+	r.Post("/api/tasks/{id}/orchestration/{operation}", h.protectedEndpoint(h.handleTaskOrchestration))
 	r.Post("/api/tasks/{id}/input", h.protectedEndpoint(h.handleKanbanTaskInputUpdate))
 	r.Post("/api/tasks/{id}/next", h.protectedEndpoint(h.handleKanbanTaskNext))
 	r.Post("/api/tasks/{id}/run-now", h.protectedEndpoint(h.handleKanbanTaskRunNow))
@@ -393,6 +421,8 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProvidersList))
 	r.Post("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProviderCreate))
 	r.Post("/api/agent-api-providers/sync", h.protectedEndpoint(h.handleAgentAPIProvidersSync))
+	r.Post("/api/agent-api-providers/sync-all", h.protectedEndpoint(h.handleAgentAPIProvidersSyncAll))
+	r.Post("/api/agent-api-providers/test", h.protectedEndpoint(h.handleAgentAPIProviderTest))
 	r.Delete("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProviderDelete))
 	r.Post("/api/agent-api-providers/switch", h.protectedEndpoint(h.handleAgentAPIProviderSwitch))
 	r.NotFound(h.handleNotFound)
@@ -1721,6 +1751,10 @@ func (h *HTTPHandler) handleTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("edit") == "1" {
+		h.protectedEndpoint(h.handleEditableFile)(w, r)
+		return
+	}
 	rootID := r.URL.Query().Get("root")
 	uc := h.service()
 	path := r.URL.Query().Get("path")

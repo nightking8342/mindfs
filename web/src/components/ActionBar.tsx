@@ -27,6 +27,7 @@ import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
 import { AgentMemoryIndicator } from "./AgentMemoryIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
 import { matchesSendShortcut, type SendShortcut } from "../services/sendShortcut";
+import { SessionQuickActions, type SessionQuickActionsProps } from "./SessionQuickActions";
 
 type SessionInfo = {
   key: string;
@@ -76,6 +77,10 @@ function getSelectionPreview(text?: string): string {
 }
 
 type ActionBarProps = {
+  onNewSession: SessionQuickActionsProps["onNewSession"];
+  onSelectProject: SessionQuickActionsProps["onSelectProject"];
+  onSelectSession: SessionQuickActionsProps["onSelectSession"];
+  taskGroupBadge?: React.ReactNode;
   status?: WSStatus;
   agentsVersion?: number;
   codexRateLimitsRefreshToken?: number;
@@ -90,9 +95,6 @@ type ActionBarProps = {
   currentSession?: SessionInfo | null;
   pendingPlanMode?: boolean;
   attachedFileContext?: AttachedFileContext | null;
-  canOpenSessionDrawer?: boolean;
-  sessionDrawerOpen?: boolean;
-  detachedBoundSession?: boolean;
   editDraftRequest?: {
     id: number;
     content: string;
@@ -127,10 +129,8 @@ type ActionBarProps = {
   onRemoveQueuedMessage?: (queueId: string) => void | Promise<void>;
   onUpdateQueuedMessage?: (queueId: string, content: string) => void | Promise<void>;
   onSendQueuedMessageNow?: (queueId: string) => void | Promise<void>;
-  onNewSession?: () => void;
   onRequestFileContext?: () => void;
   onClearFileContext?: () => void;
-  onSessionClick?: () => void;
   onToggleLeftSidebar?: () => void;
   onToggleRightSidebar?: () => void;
   sidebarsSwapped?: boolean;
@@ -169,17 +169,6 @@ function wsStatusMeta(status: WSStatus, t: (key: MessageKey) => string): {
       };
   }
 }
-
-const modePlaceholderKeys: Record<SessionMode, MessageKey> = {
-  chat: "action.placeholder.chat",
-  plugin: "action.placeholder.plugin",
-  command: "action.placeholder.command",
-};
-
-const chatBlurPlaceholderKeys: MessageKey[] = [
-  "action.placeholder.chat",
-  "action.placeholder.tip",
-];
 
 const MOBILE_BREAKPOINT = 768;
 const IME_ENTER_GUARD_MS = 120;
@@ -423,6 +412,10 @@ function stripPlanCommandPrefix(input: string): string {
 }
 
 export function ActionBar({
+  onNewSession,
+  onSelectProject,
+  onSelectSession,
+  taskGroupBadge,
   status = "disconnected",
   agentsVersion = 0,
   codexRateLimitsRefreshToken = 0,
@@ -432,9 +425,6 @@ export function ActionBar({
   currentSession,
   pendingPlanMode = false,
   attachedFileContext,
-  canOpenSessionDrawer = false,
-  sessionDrawerOpen = false,
-  detachedBoundSession = false,
   editDraftRequest = null,
   queuedMessages = [],
   inputHistory = [],
@@ -444,10 +434,8 @@ export function ActionBar({
   onRemoveQueuedMessage,
   onUpdateQueuedMessage,
   onSendQueuedMessageNow,
-  onNewSession,
   onRequestFileContext,
   onClearFileContext,
-  onSessionClick,
   onToggleLeftSidebar,
   onToggleRightSidebar,
   mobileEnterKeySends = false,
@@ -468,8 +456,6 @@ export function ActionBar({
   const [serializedInput, setSerializedInput] = useState("");
   const [inputHistoryIndex, setInputHistoryIndex] = useState<number | null>(null);
   const [activeToken, setActiveToken] = useState<{ type: "file" | "slash" | "prompt" | "command"; query: string } | null>(null);
-  const [dragX, setDragX] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -477,10 +463,8 @@ export function ActionBar({
   const [editingQueueText, setEditingQueueText] = useState("");
   const [isMultiLine, setIsMultiLine] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
+  const [placeholderVariant, setPlaceholderVariant] = useState(0);
   const [isDark, setIsDark] = useState(() => getEffectiveAppearanceMode() === "dark");
-  const [blurPlaceholderKey, setBlurPlaceholderKey] = useState<MessageKey>(
-    () => chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
-  );
   const [candidates, setCandidates] = useState<CandidateItem[]>([]);
   const [activeCandidateIndex, setActiveCandidateIndex] = useState(0);
   const [addingPrompt, setAddingPrompt] = useState(false);
@@ -502,7 +486,6 @@ export function ActionBar({
   // Distinguishes "the root is deliberately selected" from "nothing picked yet".
   // Only reachable when the root is not a repository and several candidates exist.
   const [worktreeRepoChosen, setWorktreeRepoChosen] = useState(false);
-  const dragStartRef = useRef(0);
   const syncedSessionSignatureRef = useRef<string>("");
   const editorRef = useRef<TokenEditorHandle>(null);
   const candidateAbortRef = useRef<AbortController | null>(null);
@@ -519,12 +502,6 @@ export function ActionBar({
   const [displayStatus, setDisplayStatus] = useState<WSStatus>(status);
   const reconnectDisplayTimerRef = useRef<number | null>(null);
   const connectionMeta = wsStatusMeta(displayStatus, t);
-  const DRAG_THRESHOLD = -40;
-  const boundRingColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
-  const boundRingShadow = detachedBoundSession
-    ? "0 0 0 1px rgba(245,158,11,0.18)"
-    : "0 0 0 1px rgba(37,99,235,0.08)";
-  const boundArrowColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
 
   useEffect(() => {
     if (reconnectDisplayTimerRef.current) {
@@ -571,9 +548,24 @@ export function ActionBar({
     };
   }, []);
 
+  const resetForNewSession = useCallback(() => {
+    const nextAgent = agents.find((item) => item.name === agent)
+      || agents.find((item) => item.available) || agents[0];
+    if (nextAgent) {
+      const defaults = getAgentDefaults(nextAgent);
+      setAgent(nextAgent.name);
+      setModel(defaults.model);
+      setAgentMode("");
+      setEffort(defaults.effort);
+      setFastService(defaults.fastService);
+    }
+    syncedSessionSignatureRef.current = "";
+  }, [agent, agents]);
+
   useEffect(() => {
     const sessionKey = currentSession?.key || currentSession?.session_key || null;
     if (!currentSession) {
+      if (syncedSessionSignatureRef.current) resetForNewSession();
       syncedSessionSignatureRef.current = "";
       return;
     }
@@ -596,7 +588,7 @@ export function ActionBar({
     setAgentMode(nextAgentMode);
     setEffort(nextEffort);
     setFastService(nextFastService);
-  }, [currentSession]);
+  }, [currentSession, resetForNewSession]);
 
   // Repositories a worktree can be created in: the root itself when it is a
   // repository, plus any independent repositories discovered beneath it.
@@ -1064,6 +1056,7 @@ export function ActionBar({
   }, [deletingPrompt, t]);
 
   const handleSend = useCallback(async () => {
+    if (currentSession?.key?.startsWith("pending-")) return;
     const messageText = serializedInput.trim();
     if ((!messageText && pendingAttachments.length === 0) || !isConnected || sending || (mode !== "command" && !agent)) return;
     const planCommand = pendingAttachments.length === 0 ? parsePlanCommand(messageText) : null;
@@ -1319,59 +1312,8 @@ export function ActionBar({
     appendPendingAttachments(imageFiles);
   }, [appendPendingAttachments, currentRootId, sending]);
 
-  const resetForNewSession = useCallback(() => {
-    const nextAgent = agents.find((item) => item.name === agent)
-      || agents.find((item) => item.available)
-      || agents[0];
-    if (!nextAgent) {
-      return;
-    }
-    const defaults = getAgentDefaults(nextAgent);
-    setAgent(nextAgent.name);
-    setModel(defaults.model);
-    setAgentMode("");
-    setEffort(defaults.effort);
-    setFastService(defaults.fastService);
-    syncedSessionSignatureRef.current = "";
-  }, [agent, agents]);
-
-  const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
-    const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-    dragStartRef.current = clientX;
-    setIsDragging(true);
-  };
-
-  const handleDragEnd = useCallback(() => {
-    if (!isDragging) return;
-    if (dragX <= DRAG_THRESHOLD) {
-      resetForNewSession();
-      onNewSession?.();
-    }
-    setDragX(0);
-    setIsDragging(false);
-  }, [isDragging, dragX, onNewSession, resetForNewSession]);
-
-  useEffect(() => {
-    if (!isDragging) return;
-    const move = (e: MouseEvent | TouchEvent) => {
-      const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-      setDragX(Math.min(0, clientX - dragStartRef.current));
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", handleDragEnd);
-    window.addEventListener("touchmove", move);
-    window.addEventListener("touchend", handleDragEnd);
-    return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", handleDragEnd);
-      window.removeEventListener("touchmove", move);
-      window.removeEventListener("touchend", handleDragEnd);
-    };
-  }, [isDragging, handleDragEnd]);
-
   const isSelectedAgentUnavailable = agents.length > 0 ? agents.find((a) => a.name === agent)?.available === false : false;
-  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && (mode === "command" || !!agent);
-  const hasBoundSession = !!currentSession;
+  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && !currentSession?.key?.startsWith("pending-") && (mode === "command" || !!agent);
   const hasDraft = !!serializedInput.trim() || pendingAttachments.length > 0;
   const showCancel = !!currentSession?.pending && !!currentSession?.key && !hasDraft;
   const isModeLocked = !!currentSession;
@@ -1391,12 +1333,12 @@ export function ActionBar({
     return () => window.removeEventListener("keydown", cancelOnEscape);
   }, [handleCancel, isCompositionActive, isMobile, showCancel]);
 
-  const inputPlaceholder = currentSession && !currentSession.pending
-    ? t("action.placeholder.newSessionSwipe")
-    : mode === "chat" && !isFocused
-      ? t(blurPlaceholderKey)
-      : t(modePlaceholderKeys[mode]);
-  const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 92 : 116) : isMobile ? 124 : 148;
+  const inputPlaceholder = mode === "chat"
+    ? !isFocused && placeholderVariant !== 0
+      ? t(placeholderVariant === 1 ? "action.placeholder.tip" : "action.placeholder.quickSwitch")
+      : t(currentSession ? "action.placeholder.continueSession" : "action.placeholder.newSession")
+    : t(mode === "command" ? "action.placeholder.command" : "action.placeholder.plugin");
+  const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 84 : 108) : isMobile ? 116 : 140;
   const editorBottomInset = isMultiLine ? 44 : 12;
   const editorMinHeight = 44;
   const mobileFileSidebarButton = isMobile ? (
@@ -1450,12 +1392,13 @@ export function ActionBar({
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
+                alignItems: "flex-end",
                 gap: "6px",
                 minWidth: 0,
                 pointerEvents: "auto",
               }}
             >
+              {taskGroupBadge}
               {planModeActive ? (
                 <div style={{ display: "inline-flex", alignItems: "center", gap: "5px", height: "20px", padding: "0 5px 0 8px", borderRadius: "999px", border: "1px solid rgba(37, 99, 235, 0.22)", background: "linear-gradient(rgba(37, 99, 235, 0.10), rgba(37, 99, 235, 0.10)), var(--mobile-overlay-bg)", color: "#2563eb", fontSize: "11px", fontWeight: 700, lineHeight: 1, flexShrink: 0 }}>
                   <span>Plan</span>
@@ -1489,7 +1432,7 @@ export function ActionBar({
                 </>
               ) : null}
             </div>
-            <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+            <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "flex-end", gap: "6px" }}>
               <AgentMemoryIndicator refreshToken={agentsVersion + codexRateLimitsRefreshToken} />
               <CodexRateLimitIndicator agent={agent} refreshToken={codexRateLimitsRefreshToken} />
             </div>
@@ -1682,7 +1625,7 @@ export function ActionBar({
                 display: "flex",
                 alignItems: "center",
                 position: "relative",
-                transition: isDragging ? "none" : "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
                 minHeight: `${editorMinHeight}px`,
                 minWidth: 0,
                 width: "100%",
@@ -1701,9 +1644,7 @@ export function ActionBar({
               onFocusChange={(focused) => {
                 setIsFocused(focused);
                 if (!focused && mode === "chat") {
-                  setBlurPlaceholderKey(
-                    chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
-                  );
+                  setPlaceholderVariant((previous) => (previous + 1) % 3);
                 }
                 if (focused) {
                   if (mode === "command" && serializedInput.trim()) {
@@ -1968,84 +1909,7 @@ export function ActionBar({
             />
 
             <div data-onboarding="input-controls" style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
-              <div
-                data-onboarding="session-ring"
-                onMouseDown={handleDragStart}
-                onTouchStart={handleDragStart}
-                onClick={() => {
-                  if (Math.abs(dragX) < 5) {
-                    onSessionClick?.();
-                  }
-                }}
-                style={{
-                  width: "32px",
-                  height: "32px",
-                  cursor: "pointer",
-                  transform: `translateX(${dragX}px)`,
-                  transition: isDragging ? "none" : "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                  position: "relative",
-                  zIndex: 10,
-                  opacity: 1,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  touchAction: "none",
-                }}
-                title={t("action.swipeNewSession")}
-              >
-                {!hasBoundSession ? (
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "transparent",
-                      border: "2px solid #94a3b8",
-                    }}
-                  />
-                ) : (
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "transparent",
-                      border: `2px solid ${boundRingColor}`,
-                      boxShadow: boundRingShadow,
-                    }}
-                  />
-                )}
-                {canOpenSessionDrawer ? (
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      margin: "auto",
-                      color: boundArrowColor,
-                      pointerEvents: "none",
-                    }}
-                    aria-hidden="true"
-                  >
-                    <path
-                      d={sessionDrawerOpen ? "M3.25 4.75 6 7.5l2.75-2.75" : "M3.25 7.25 6 4.5l2.75 2.75"}
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : null}
-                {isDragging && dragX < -10 ? (
-                  <div style={{ position: "absolute", right: "100%", top: "50%", transform: "translateY(-50%)", marginRight: "8px", fontSize: "10px", fontWeight: 600, color: dragX <= DRAG_THRESHOLD ? "var(--accent-color)" : "#9ca3af", whiteSpace: "nowrap", opacity: Math.min(1, Math.abs(dragX) / 20), pointerEvents: "none" }}>
-                    {dragX <= DRAG_THRESHOLD ? t("action.releaseNewSession") : t("action.swipeNewSession")}
-                  </div>
-                ) : null}
-              </div>
-
+              <SessionQuickActions currentRootId={currentRootId} currentSessionKey={currentSession?.key || currentSession?.session_key} onNewSession={() => { resetForNewSession(); onNewSession(); }} onSelectProject={onSelectProject} onSelectSession={onSelectSession} />
               <>
                 <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" viewportMenu />
                 {mode !== "command" ? (
@@ -2102,6 +1966,7 @@ export function ActionBar({
                 onClick={() => attachmentInputRef.current?.click()}
                 disabled={!currentRootId || sending}
                 style={{
+                  marginLeft: "-4px",
                   width: "28px",
                   height: "28px",
                   borderRadius: "8px",

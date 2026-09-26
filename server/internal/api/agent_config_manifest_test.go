@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"mindfs/server/internal/agent"
+	"mindfs/server/internal/testutil"
 )
 
 // isolateAgentConfigDir points MindFSConfigDir at a temp directory on both
@@ -16,10 +17,7 @@ import (
 func isolateAgentConfigDir(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t, home)
 
 	configPath := filepath.Join(home, "agents.json")
 	t.Setenv("MINDFS_AGENTS_CONFIG", configPath)

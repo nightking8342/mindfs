@@ -8,16 +8,12 @@ import (
 	"testing"
 
 	"mindfs/server/internal/agent"
+	"mindfs/server/internal/testutil"
 )
 
 func TestSwitchAgentConfigClearsExistingEnvWhenBackupHasNoEnv(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	// Windows resolves the config dir from %AppData%, so without this the test
-	// would read and rewrite the real user's agent config backups.
-	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t, home)
 	configPath := filepath.Join(home, "agents.json")
 	t.Setenv("MINDFS_AGENTS_CONFIG", configPath)
 
@@ -85,12 +81,7 @@ func TestSwitchAgentConfigClearsExistingEnvWhenBackupHasNoEnv(t *testing.T) {
 
 func TestSwitchAgentConfigPreservesProviderForCustomNamedCodexAgent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	// Windows resolves the config dir from %AppData%, so without this the test
-	// would read and rewrite the real user's agent config backups.
-	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t, home)
 	configPath := filepath.Join(home, "agents.json")
 	t.Setenv("MINDFS_AGENTS_CONFIG", configPath)
 	writeJSON(t, configPath, agent.Config{Agents: []agent.Definition{{Name: "codex-custom", Command: "codex", Protocol: agent.ProtocolCodexSDK}}})
@@ -135,12 +126,7 @@ func TestSwitchAgentConfigPreservesProviderForCustomNamedCodexAgent(t *testing.T
 
 func TestSwitchAgentConfigDoesNotRewriteOtherConfigTomlFiles(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	// Windows resolves the config dir from %AppData%, so without this the test
-	// would read and rewrite the real user's agent config backups.
-	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t, home)
 	configPath := filepath.Join(home, "agents.json")
 	t.Setenv("MINDFS_AGENTS_CONFIG", configPath)
 	writeJSON(t, configPath, agent.Config{Agents: []agent.Definition{{Name: "codex", Command: "codex", Protocol: agent.ProtocolCodexSDK}}})

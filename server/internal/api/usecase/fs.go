@@ -90,6 +90,21 @@ func parentDir(path string) string {
 	return clean[:idx]
 }
 
+// resolveFileReadTarget keeps project paths (including virtual metadata) on the
+// managed root and supports explicit external absolute paths for file reads only.
+func resolveFileReadTarget(root fs.RootInfo, input string) (fs.RootInfo, string, bool, error) {
+	path, err := root.NormalizePath(input)
+	if err == nil {
+		return root, path, false, nil
+	}
+	if !filepath.IsAbs(input) {
+		return root, "", false, err
+	}
+	absolute := filepath.Clean(input)
+	target := fs.NewRootInfo(root.ID, root.Name, filepath.Dir(absolute))
+	return target, filepath.Base(absolute), true, nil
+}
+
 func (s *Service) OpenFileRaw(_ context.Context, in OpenFileRawInput) (OpenFileRawOutput, error) {
 	if err := s.ensureRegistry(); err != nil {
 		return OpenFileRawOutput{}, err
@@ -101,13 +116,16 @@ func (s *Service) OpenFileRaw(_ context.Context, in OpenFileRawInput) (OpenFileR
 	if in.Path == "" {
 		return OpenFileRawOutput{}, errors.New("path required")
 	}
-	path, err := root.NormalizePath(in.Path)
+	target, path, external, err := resolveFileReadTarget(root, in.Path)
 	if err != nil {
 		return OpenFileRawOutput{}, err
 	}
-	file, info, relPath, err := root.OpenFile(path)
+	file, info, relPath, err := target.OpenFile(path)
 	if err != nil {
 		return OpenFileRawOutput{}, err
+	}
+	if external {
+		relPath = filepath.ToSlash(filepath.Clean(in.Path))
 	}
 	return OpenFileRawOutput{File: file, Info: info, RelPath: relPath}, nil
 }
@@ -123,13 +141,16 @@ func (s *Service) GetFileInfo(_ context.Context, in GetFileInfoInput) (GetFileIn
 	if in.Path == "" {
 		return GetFileInfoOutput{}, errors.New("path required")
 	}
-	path, err := root.NormalizePath(in.Path)
+	target, path, external, err := resolveFileReadTarget(root, in.Path)
 	if err != nil {
 		return GetFileInfoOutput{}, err
 	}
-	info, relPath, err := root.StatFile(path)
+	info, relPath, err := target.StatFile(path)
 	if err != nil {
 		return GetFileInfoOutput{}, err
+	}
+	if external {
+		relPath = filepath.ToSlash(filepath.Clean(in.Path))
 	}
 	return GetFileInfoOutput{
 		Path:  relPath,
@@ -290,14 +311,21 @@ func (s *Service) ReadFile(ctx context.Context, in ReadFileInput) (ReadFileOutpu
 	if in.Path == "" {
 		return ReadFileOutput{}, errors.New("path required")
 	}
-	path, err := root.NormalizePath(in.Path)
+	target, path, external, err := resolveFileReadTarget(root, in.Path)
 	if err != nil {
 		return ReadFileOutput{}, err
 	}
-	s.ensureFileWatcher(in.RootID, parentDir(path))
-	result, err := root.ReadFile(path, in.MaxBytes, in.Cursor, in.ReadMode)
+	if !external {
+		s.ensureFileWatcher(in.RootID, parentDir(path))
+	}
+	result, err := target.ReadFile(path, in.MaxBytes, in.Cursor, in.ReadMode)
 	if err != nil {
 		return ReadFileOutput{}, err
+	}
+	if external {
+		result.Root = root.ID
+		result.Path = filepath.ToSlash(filepath.Clean(in.Path))
+		return ReadFileOutput{File: result}, nil
 	}
 	meta, err := root.GetFileMeta(path)
 	if err != nil {

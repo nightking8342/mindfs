@@ -36,6 +36,8 @@ type Process struct {
 	conn      *acp.ClientSideConnection
 	client    *mindfsClient
 	waitCh    chan error
+	tree      processTree
+	closeMu   sync.Mutex
 
 	shells    []commandexec.ShellSpec
 	terminals *terminalManager
@@ -53,6 +55,13 @@ type Process struct {
 
 	elicitation   *elicitationRegistry
 	activeSession activeSessionState
+}
+
+// processTree owns platform resources for one ACP process and its descendants.
+// Kill and Close must be safe to call concurrently with context cancellation.
+type processTree interface {
+	Kill() error
+	Close() error
 }
 
 type CapabilitySnapshot struct {
@@ -87,15 +96,16 @@ type activeSessionState struct {
 var stderrMessagePattern = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 
 type sessionState struct {
-	ID            acp.SessionId
-	models        *acp.SessionModelState
-	modes         *acp.SessionModeState
-	configOptions []acp.SessionConfigOption
-	commands      []acp.AvailableCommand
-	contextWindow types.ContextWindow
-	lastUsage     cumulativeTokenUsage
-	onUpdate      func(SessionUpdate)
-	mu            sync.RWMutex
+	ID                     acp.SessionId
+	models                 *acp.SessionModelState
+	modes                  *acp.SessionModeState
+	configOptions          []acp.SessionConfigOption
+	commands               []acp.AvailableCommand
+	contextWindow          types.ContextWindow
+	contextUsageUpdateSeen bool
+	lastUsage              cumulativeTokenUsage
+	onUpdate               func(SessionUpdate)
+	mu                     sync.RWMutex
 
 	// emitMu serializes handler invocations. The SDK drains notifications on a
 	// single goroutine but dispatches each id-bearing request (elicitation,
@@ -222,7 +232,23 @@ func (s *sessionState) getContextWindow() types.ContextWindow {
 	return s.contextWindow
 }
 
-func (s *sessionState) tokenUsageDelta(usage *acp.Usage) *types.TokenUsage {
+func (s *sessionState) setUsageUpdate(used, size int) {
+	s.mu.Lock()
+	if size > 0 {
+		s.contextWindow.ModelContextWindow = size
+	}
+	s.contextWindow.TotalTokens = max(0, used)
+	s.contextUsageUpdateSeen = true
+	s.mu.Unlock()
+}
+
+func (s *sessionState) hasContextUsageUpdate() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contextUsageUpdateSeen
+}
+
+func (s *sessionState) tokenUsageForPrompt(agentName string, usage *acp.Usage) *types.TokenUsage {
 	if usage == nil {
 		return nil
 	}
@@ -237,10 +263,15 @@ func (s *sessionState) tokenUsageDelta(usage *acp.Usage) *types.TokenUsage {
 		current.cacheWriteTokens = max(0, *usage.CachedWriteTokens)
 	}
 
-	s.mu.Lock()
-	previous := s.lastUsage
-	s.lastUsage = current
-	s.mu.Unlock()
+	// DSH's ACP adapter resets usage for every prompt. Other agents retain
+	// the existing cumulative-counter behavior until their semantics are verified.
+	var previous cumulativeTokenUsage
+	if agentName != "dsh" {
+		s.mu.Lock()
+		previous = s.lastUsage
+		s.lastUsage = current
+		s.mu.Unlock()
+	}
 
 	inputTokens := cumulativeCounterDelta(current.inputTokens, previous.inputTokens)
 	outputTokens := cumulativeCounterDelta(current.outputTokens, previous.outputTokens)
@@ -358,12 +389,10 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 		c.proc.mu.Unlock()
 	}
 	if params.Update.UsageUpdate != nil {
-		current := session.getContextWindow()
-		current.ModelContextWindow = params.Update.UsageUpdate.Size
-		if current.TotalTokens == 0 {
-			current.TotalTokens = params.Update.UsageUpdate.Used
-		}
-		session.setContextWindow(current)
+		session.setUsageUpdate(
+			params.Update.UsageUpdate.Used,
+			params.Update.UsageUpdate.Size,
+		)
 	}
 
 	if internalUpdate.Type != "" {
@@ -589,7 +618,18 @@ func Start(ctx context.Context, agentName, command string, args []string, cwd st
 		return nil, err
 	}
 
-	if err := cmd.Start(); err != nil {
+	tree, err := startProcessCommand(cmd)
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		// Platform setup can fail before cmd.Start gets a chance to close the
+		// child ends of the pipes it owns.
+		for _, stream := range []any{cmd.Stdin, cmd.Stdout, cmd.Stderr} {
+			if closer, ok := stream.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}
 		return nil, err
 	}
 
@@ -599,14 +639,23 @@ func Start(ctx context.Context, agentName, command string, args []string, cwd st
 		sessions:     make(map[string]*sessionState),
 		sessionsByID: make(map[string]*sessionState),
 		waitCh:       make(chan error, 1),
+		tree:         tree,
 		shells:       shells,
 		terminals:    newTerminalManager(),
 		elicitation:  newElicitationRegistry(),
 	}
 	proc.client = &mindfsClient{proc: proc}
 	go streamProcessStderr(proc, stderr)
+	waitCh := proc.waitCh
 	go func() {
-		proc.waitCh <- cmd.Wait()
+		err := cmd.Wait()
+		// A wrapper may exit before its descendants. Release the job even when
+		// nobody explicitly closes the ACP connection after that exit.
+		if closeErr := tree.Close(); closeErr != nil {
+			log.Printf("[agent/acp] process.cleanup_error agent=%s err=%v", agentName, closeErr)
+		}
+		waitCh <- err
+		close(waitCh)
 	}()
 
 	proc.conn = acp.NewClientSideConnection(proc.client, stdin, stdout)
@@ -777,10 +826,15 @@ func (p *Process) SendMessage(ctx context.Context, sessionKey, content string) e
 	}
 	var tokenUsage *types.TokenUsage
 	if resp.Usage != nil {
-		current := sess.getContextWindow()
-		current.TotalTokens = resp.Usage.TotalTokens
-		sess.setContextWindow(current)
-		tokenUsage = sess.tokenUsageDelta(resp.Usage)
+		// Some older ACP agents expose no usage_update notification. Keep a
+		// compatibility fallback for those agents, but never let prompt-level
+		// accounting overwrite an authoritative session context update.
+		if !sess.hasContextUsageUpdate() {
+			current := sess.getContextWindow()
+			current.TotalTokens = max(0, resp.Usage.TotalTokens)
+			sess.setContextWindow(current)
+		}
+		tokenUsage = sess.tokenUsageForPrompt(p.agentName, resp.Usage)
 	}
 
 	// Signal completion
@@ -869,12 +923,13 @@ func (p *Process) Close() error {
 	if p.terminals != nil {
 		p.terminals.closeAll()
 	}
-	p.mu.Lock()
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	p.mu.RLock()
 	cmd := p.cmd
 	waitCh := p.waitCh
-	p.cmd = nil
-	p.waitCh = nil
-	p.mu.Unlock()
+	tree := p.tree
+	p.mu.RUnlock()
 
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -882,14 +937,24 @@ func (p *Process) Close() error {
 
 	pid := cmd.Process.Pid
 	log.Printf("[agent/acp] process.close.begin agent=%s pid=%d", p.agentLabel(), pid)
-	if err := killProcess(cmd.Process); err != nil && !strings.Contains(strings.ToLower(err.Error()), "process already finished") {
+	if err := tree.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		log.Printf("[agent/acp] process.close.kill_error agent=%s pid=%d err=%v", p.agentLabel(), pid, err)
 		return err
 	}
 
 	select {
 	case err := <-waitCh:
-		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "signal: killed") {
+		if closeErr := tree.Close(); closeErr != nil {
+			return closeErr
+		}
+		p.mu.Lock()
+		p.cmd = nil
+		p.waitCh = nil
+		p.tree = nil
+		p.mu.Unlock()
+		// Forced termination is expected on both Unix and Windows.
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("[agent/acp] process.close.wait_error agent=%s pid=%d err=%v", p.agentLabel(), pid, err)
 			return err
 		}
@@ -918,13 +983,6 @@ func processDiagnostic(pid int) string {
 	}
 	parts = append(parts, platformProcessDiagnostic(pid))
 	return strings.Join(parts, " ")
-}
-
-func killProcess(proc *os.Process) error {
-	if proc == nil {
-		return nil
-	}
-	return killProcessTree(proc)
 }
 
 // SessionID returns the ACP session ID for a MindFS session key.
