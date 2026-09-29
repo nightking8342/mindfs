@@ -116,7 +116,23 @@ func main() {
 		return
 	}
 	explicitFlags := visitedFlags(flag.CommandLine)
-	startupCfg, err := loadStartupConfig(*configFlag)
+	configPath := strings.TrimSpace(*configFlag)
+	if configPath == "" {
+		// fork: -config 未显式指定时，回落到用户配置目录下的 config.json
+		// （%AppData%\mindfs\config.json / ~/.config/mindfs/config.json）。
+		//
+		// 上游的启动参数没有默认路径，导致「用 -config 起的服务」与「不带
+		// -config 调 CLI 的进程」看到不同的 addr：CLI 会退回硬编码的
+		// 127.0.0.1:7331，探测不到服务后还会自行启动一个新实例（任务 agent
+		// 用 -from-task 汇报时必踩，实见于 vFlow 项目）。加默认路径后，
+		// agent 不带 -config 也能连到正确的服务。
+		//
+		// 优先级不变：显式 -config > 默认路径 > 硬编码默认值。
+		if candidate, ok := app.DefaultStartupConfigPath(); ok {
+			configPath = candidate
+		}
+	}
+	startupCfg, err := loadStartupConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
