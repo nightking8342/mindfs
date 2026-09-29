@@ -149,13 +149,9 @@ function assistantSegmentItem(
     return null;
   }
   return {
-    id: stableTimelineID(
-      "assistant",
-      index * 1000 + segmentIndex,
-      content,
-      ex.timestamp,
-      ex.agent,
-    ),
+    // Content and timestamps change during streaming. Identity belongs to the
+    // exchange/segment, so React and virtual measurements survive each chunk.
+    id: `assistant:${index}:${segmentIndex}`,
     type: "assistant_text",
     content,
     timestamp: ex.timestamp,
@@ -525,8 +521,12 @@ export function useSessionStream(
     };
   }, [sessionKey, sessionPending]);
 
+  // Viewport-only rerenders must not look like new session content to the
+  // viewer's tail-following effect.
+  const timeline = useMemo(() => settleRunningTools(baseTimeline), [baseTimeline]);
+
   return {
-    timeline: settleRunningTools(baseTimeline),
+    timeline,
     isStreaming,
     streamVersion,
     streamStatusText,

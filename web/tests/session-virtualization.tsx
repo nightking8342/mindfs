@@ -19,7 +19,8 @@ function Check() {
   const [shown,setShown]=useState(true);
   Object.assign(window,{check:{requests:()=>requests,jump:(seq:number)=>setTarget(seq),toggle:()=>setShown(x=>!x),append:()=>setSession((s:any)=>({...s,exchanges:[...s.exchanges,{seq:s.exchanges.length+1,role:'agent',content:'APPENDED '+s.exchanges.length,timestamp:'2026-09-28T00:00:02Z'}]}))}});
   Object.assign((window as any).check, {
-    question: () => setSession((s: any) => ({...s, exchanges: [...s.exchanges, {
+    replaceSession: (next: any) => { setTarget(0); setSession(next); },
+    question: () => setSession((s: any) => ({...s, pending: true, exchanges: [...s.exchanges, {
       role: 'tool', content: '', toolCall: {
         callId: 'question', kind: 'ask_user', status: 'running',
         meta: {questions: [{question: 'Draft retention check'}]},
@@ -33,6 +34,74 @@ function Check() {
   return <I18nProvider><div style={{height:'100vh',display:'flex',flexDirection:'column'}}>{shown && <SessionViewer session={session} rootId="test" targetSeq={target}/>}</div></I18nProvider>;
 }
 createRoot(document.getElementById('root')!).render(<Check/>);
+
+Object.assign(window, { runStreamingTextChecks: async () => {
+  const settle = () => new Promise(resolve => setTimeout(resolve, 80));
+  for (const long of [false, true]) {
+    const prefix = long ? exchanges : exchanges.slice(0, 1);
+    let content = 'Stable paragraph\n\n```js\nconst answer = 42;\n```\n\nStreaming';
+    const update = (step: number) => (window as any).check.replaceSession({
+      key: `streaming-${long}`, exchange_aux: long ? exchange_aux : {},
+      exchanges: [...prefix, {seq: 999, role: 'agent', content, timestamp: `2026-09-29T00:00:${String(step).padStart(2, '0')}Z`}],
+    });
+    update(0);
+    await settle();
+    const row = document.querySelector('[data-session-seq="999"]')!;
+    const markdown = row?.querySelector('.markdown-viewer');
+    const paragraph = markdown?.querySelector('p');
+    const code = markdown?.querySelector('pre');
+    if (!row || !markdown || !paragraph || !code) throw new Error('Missing streaming fixture nodes');
+    for (let step = 1; step <= 16; step++) {
+      content += ` chunk ${step}`;
+      update(step);
+      await settle();
+      if (document.querySelector('[data-session-seq="999"]') !== row) throw new Error(`Streaming row remounted (virtual=${long})`);
+      if (row.querySelector('.markdown-viewer') !== markdown || markdown.querySelector('p') !== paragraph || markdown.querySelector('pre') !== code) {
+        throw new Error(`Unchanged Markdown nodes remounted (virtual=${long})`);
+      }
+      if (!markdown.textContent?.includes(`chunk ${step}`)) throw new Error('Streaming content did not update');
+    }
+  }
+  return {passed: true, modes: ['short', 'virtual'], updatesPerMode: 16};
+}});
+
+Object.assign(window, { runScrollIntentChecks: async () => {
+  const settle = (ms = 250) => new Promise(resolve => setTimeout(resolve, ms));
+  const assert = (condition: boolean, message: string) => { if (!condition) throw new Error(message); };
+  const el = [...document.querySelectorAll('div')].find(node => getComputedStyle(node).overflowY === 'auto')!;
+  const gap = () => el.scrollHeight - el.clientHeight - el.scrollTop;
+  await settle();
+  for (const input of ['wheel', 'touch']) {
+    el.scrollTop = el.scrollHeight;
+    await settle();
+    if (input === 'touch') {
+      el.dispatchEvent(new TouchEvent('touchstart', {bubbles: true, touches: [new Touch({identifier: 1, target: el, clientY: 200})]}));
+    }
+    for (let step = 1; step <= 12; step++) {
+      if (input === 'wheel') {
+        el.dispatchEvent(new WheelEvent('wheel', {bubbles: true, deltaY: -5}));
+      } else {
+        el.dispatchEvent(new TouchEvent('touchmove', {bubbles: true, touches: [new Touch({identifier: 1, target: el, clientY: 200 + step * 5})]}));
+      }
+      el.scrollTop -= 5;
+      await settle(40);
+      assert(gap() >= 4, `${input}: small upward scroll snapped back to bottom`);
+    }
+    if (input === 'touch') el.dispatchEvent(new TouchEvent('touchend', {bubbles: true, touches: []}));
+    assert(gap() >= 45, `${input}: slow upward scrolling made no progress`);
+    const top = el.scrollTop;
+    (window as any).check.append();
+    window.dispatchEvent(new Event('mindfs:safe-area-updated'));
+    await settle();
+    assert(Math.abs(el.scrollTop - top) < 2, `${input}: append/viewport change stole reading position`);
+    el.scrollTop = el.scrollHeight;
+    await settle();
+    (window as any).check.append();
+    await settle();
+    assert(gap() < 2, `${input}: returning to bottom did not resume following`);
+  }
+  return {passed: true, inputs: ['wheel', 'touch'], upwardSteps: 12};
+}});
 
 // Run via a browser console or agent-browser eval. No server/agent data is used.
 Object.assign(window, { runVirtualizationChecks: async () => {

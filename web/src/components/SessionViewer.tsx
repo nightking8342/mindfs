@@ -1448,6 +1448,31 @@ function SessionViewerInner({
       return;
     }
     let lastScrollTop = el.scrollTop;
+    let lastScrollHeight = el.scrollHeight;
+    let lastClientHeight = el.clientHeight;
+    let touchY: number | null = null;
+    const pauseFollowing = () => {
+      shouldStickToBottomRef.current = false;
+      setShowJumpToLatest(true);
+      cancelTargetSeqScroll();
+      if (viewportStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportStickFrameRef.current);
+        viewportStickFrameRef.current = null;
+      }
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) pauseFollowing();
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const nextY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      // Moving the finger down scrolls toward older messages.
+      if (touchY !== null && nextY !== null && nextY > touchY) pauseFollowing();
+      touchY = nextY;
+    };
+    const onTouchEnd = () => { touchY = null; };
     const updateStickiness = () => {
       const viewportGap = window.visualViewport
         ? window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop
@@ -1457,21 +1482,38 @@ function SessionViewerInner({
       const isNearBottom = distanceFromBottom < 40;
       const movedUp = el.scrollTop < lastScrollTop;
       const movedDown = el.scrollTop > lastScrollTop;
-      if (isNearBottom) {
-        shouldStickToBottomRef.current = true;
-      } else if (movedUp) {
+      const geometryChanged = el.scrollHeight !== lastScrollHeight || el.clientHeight !== lastClientHeight;
+      // Upward motion wins even inside the bottom threshold. Stationary
+      // measurements must not resume following after a wheel/touch gesture.
+      // Measuring a virtual row can shrink the document and clamp scrollTop;
+      // that is not an upward reading gesture.
+      if (movedUp && !geometryChanged) {
         shouldStickToBottomRef.current = false;
-      } else if (movedDown && distanceFromBottom < 200) {
+      } else if (movedDown && isNearBottom) {
         shouldStickToBottomRef.current = true;
       }
       setShowJumpToLatest(!shouldStickToBottomRef.current);
       refreshCurrentUserMessageIndex();
       lastScrollTop = el.scrollTop;
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
     };
     updateStickiness();
-    el.addEventListener("scroll", updateStickiness, { passive: true });
+    // Observe intent and position before virtualizer scroll callbacks rerender.
+    const options = { passive: true, capture: true };
+    el.addEventListener("scroll", updateStickiness, options);
+    el.addEventListener("wheel", onWheel, options);
+    el.addEventListener("touchstart", onTouchStart, options);
+    el.addEventListener("touchmove", onTouchMove, options);
+    el.addEventListener("touchend", onTouchEnd, options);
+    el.addEventListener("touchcancel", onTouchEnd, options);
     return () => {
-      el.removeEventListener("scroll", updateStickiness);
+      el.removeEventListener("scroll", updateStickiness, true);
+      el.removeEventListener("wheel", onWheel, true);
+      el.removeEventListener("touchstart", onTouchStart, true);
+      el.removeEventListener("touchmove", onTouchMove, true);
+      el.removeEventListener("touchend", onTouchEnd, true);
+      el.removeEventListener("touchcancel", onTouchEnd, true);
     };
   }, [refreshCurrentUserMessageIndex, sessionKey]);
 
@@ -1737,7 +1779,7 @@ function SessionViewerInner({
     idx: number,
     spacing: string = "0",
   ) => {
-    const timelineItemKey = item.id || `${item.type}-${idx}`;
+    const timelineItemKey = `${rootId}:${sessionKey}:${item.id || `${item.type}-${idx}`}`;
     if (item.type === "thought") {
       return (
         <div key={timelineItemKey} style={{ marginTop: spacing }}>

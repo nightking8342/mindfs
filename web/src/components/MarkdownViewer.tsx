@@ -12,6 +12,8 @@ import { openExternalURL } from "../services/platformNavigation";
 import { useI18n } from "../i18n";
 import { buildDiffCodeRows, type DiffCodeRow } from "./gitDiffModel";
 import { extractMarkdownOutline } from "./markdownOutline";
+
+const EMPTY_OUTLINE: ReturnType<typeof extractMarkdownOutline> = [];
 import { DiagramPreview } from "./DiagramPreview";
 import "prismjs/themes/prism.css";
 import "katex/dist/katex.min.css";
@@ -635,7 +637,7 @@ function MarkdownViewerInner({
   }, [targetLine]);
   const normalizedContent = useMemo(() => normalizeMarkdownMathDelimiters(content), [content]);
   const outline = useMemo(
-    () => (showOutline ? extractMarkdownOutline(normalizedContent) : []),
+    () => (showOutline ? extractMarkdownOutline(normalizedContent) : EMPTY_OUTLINE),
     [normalizedContent, showOutline],
   );
   const headingsByLine = useMemo(
@@ -770,12 +772,10 @@ function MarkdownViewerInner({
       : sourceProps;
   };
 
-  const renderedMarkdown = useMemo(() => (
-    <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        remarkRehypeOptions={{ allowDangerousHtml: true }}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
-        components={{
+  const hasFileClick = Boolean(onFileClick);
+  // Component types must not change with each streamed chunk: that remounts
+  // unchanged paragraphs, images, and code blocks instead of updating them.
+  const markdownComponents = useMemo<NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>>(() => ({
           h1: ({ node, ...props }: any) => (
             <h1 style={{ fontSize: "24px", marginTop: 0 }} {...getHeadingProps(node)} {...props} />
           ),
@@ -811,7 +811,7 @@ function MarkdownViewerInner({
             />
           ),
           a: ({ href = "", children, ...props }) => {
-            if (!href || href.startsWith("#") || isExternalHref(href) || !onFileClick) {
+            if (!href || href.startsWith("#") || isExternalHref(href) || !hasFileClick) {
               const shouldOpenExternally = isExternalHref(href);
               return (
                 <a
@@ -965,11 +965,18 @@ function MarkdownViewerInner({
               />
             );
           },
-        }}
+  }), [currentPath, headingsByLine, hasFileClick, root]);
+
+  const renderedMarkdown = useMemo(() => (
+    <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkRehypeOptions={{ allowDangerousHtml: true }}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
+        components={markdownComponents}
       >
         {normalizedContent}
     </ReactMarkdown>
-  ), [currentPath, headingsByLine, normalizedContent, onFileClick, root]);
+  ), [markdownComponents, normalizedContent]);
 
   const viewer = (
     <div
