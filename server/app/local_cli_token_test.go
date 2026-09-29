@@ -11,11 +11,11 @@ import (
 func TestLocalCLITokenStoreKeepsTokensByAddress(t *testing.T) {
 	setTestConfigHome(t, t.TempDir())
 
-	first, err := EnsureLocalCLIToken("127.0.0.1:7331")
+	first, err := EnsureLocalCLIToken("127.0.0.1:7331", true)
 	if err != nil {
 		t.Fatalf("EnsureLocalCLIToken first: %v", err)
 	}
-	second, err := EnsureLocalCLIToken("127.0.0.1:9000")
+	second, err := EnsureLocalCLIToken("127.0.0.1:9000", false)
 	if err != nil {
 		t.Fatalf("EnsureLocalCLIToken second: %v", err)
 	}
@@ -37,13 +37,41 @@ func TestLocalCLITokenStoreKeepsTokensByAddress(t *testing.T) {
 	if gotSecond != second {
 		t.Fatalf("second token = %q, want %q", gotSecond, second)
 	}
+	for addr, want := range map[string]bool{":7331": true, "127.0.0.1:9000": false} {
+		if got, err := ReadLocalCLITLS(addr); err != nil || got != want {
+			t.Fatalf("TLS for %s = %v, %v; want %v", addr, got, err, want)
+		}
+	}
+	if _, err := EnsureLocalCLIToken(":7331", false); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadLocalCLITLS(":7331"); err != nil || got {
+		t.Fatalf("TLS after HTTP restart = %v, %v", got, err)
+	}
+}
+
+func TestLocalCLITLSLegacyStore(t *testing.T) {
+	setTestConfigHome(t, t.TempDir())
+	path, err := localCLITokenStorePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalCLITokenStore(path, localCLITokenStore{Tokens: map[string]string{"127.0.0.1:7331": "legacy"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadLocalCLITLS(":7331"); err != nil || got {
+		t.Fatalf("legacy TLS = %v, %v", got, err)
+	}
+	if token, err := ReadLocalCLIToken(":7331"); err != nil || token != "legacy" {
+		t.Fatalf("legacy token = %q, %v", token, err)
+	}
 }
 
 func TestLocalCLITokenStoreWritesSinglePrivateFile(t *testing.T) {
 	configRoot := t.TempDir()
 	setTestConfigHome(t, configRoot)
 
-	if _, err := EnsureLocalCLIToken(":7331"); err != nil {
+	if _, err := EnsureLocalCLIToken(":7331", false); err != nil {
 		t.Fatalf("EnsureLocalCLIToken: %v", err)
 	}
 	path, err := localCLITokenStorePath()

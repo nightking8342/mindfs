@@ -6281,7 +6281,14 @@ export function App({ onGoHome }: AppProps) {
         reportError("session.sync_failed", t("session.forkMissing"));
         return;
       }
-      const result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
+      let result: Awaited<ReturnType<typeof sessionService.forkSession>>;
+      try {
+        result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        reportError("session.sync_failed", `${t("session.forkFailed")}: ${detail}`);
+        return;
+      }
       const forked = result?.session;
       const forkedKey = String(result?.session_key || forked?.key || "").trim();
       if (!forkedKey) {

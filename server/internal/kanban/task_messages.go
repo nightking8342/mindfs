@@ -2,6 +2,8 @@ package kanban
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,13 +17,16 @@ func (s *Service) deliverTaskMessages(ctx context.Context, store *TaskStore, tas
 		return nil
 	}
 	for _, task := range tasks {
-		if task.MainSessionKey == "" || task.Status == StatusCancelled {
+		if task.Status == StatusCancelled {
 			continue
 		}
 		s.mu.Lock()
 		running := s.running[task.RootID+"/"+task.ID]
 		s.mu.Unlock()
-		if running || task.SchedulerAdmitted {
+		// Ordinary tasks retain admission while waiting for user input. It
+		// reserves a workflow slot, not an active agent turn. Managed tasks
+		// release admission after execution, so their existing guard remains.
+		if running || (task.SchedulerAdmitted && (task.GroupID != "" || task.Status == StatusRunning)) {
 			continue
 		}
 		inbox, err := store.Inbox(ctx, task.ID)
@@ -38,8 +43,19 @@ func (s *Service) deliverTaskMessages(ctx context.Context, store *TaskStore, tas
 		if !fresh {
 			continue
 		}
+		tmpl, err := s.TaskExecutionTemplate(task)
+		if err != nil {
+			return err
+		}
+		key, _, err := taskMessageTarget(ctx, store, task, tmpl)
+		if err != nil {
+			return err
+		}
+		if key == "" {
+			continue
+		}
 		// Also recover replies queued by earlier versions without task admission.
-		if task.Status == StatusPending || task.Status == StatusQueued {
+		if task.GroupID != "" && (task.Status == StatusPending || task.Status == StatusQueued) {
 			if err := store.UpdateTaskStatus(ctx, task.ID, StatusWaitingUser, nil, false); err != nil {
 				return err
 			}
@@ -54,17 +70,21 @@ func (s *Service) executeTaskMessages(ctx context.Context, root, id string) erro
 	if err != nil {
 		return err
 	}
-	if task.Status == StatusCancelled || task.MainSessionKey == "" {
+	if task.Status == StatusCancelled {
 		return nil
 	}
-	if task.CurrentStageIndex < 0 || task.CurrentStageIndex >= len(tmpl.Stages) {
-		return fmt.Errorf("current stage out of range")
+	key, stage, err := taskMessageTarget(ctx, store, task, tmpl)
+	if err != nil {
+		return err
 	}
-	if tmpl.Stages[task.CurrentStageIndex].Snapshot.Role == RoleAgent {
+	if key == "" {
+		return nil
+	}
+	if task.GroupID != "" && tmpl.Stages[task.CurrentStageIndex].Snapshot.Role == RoleAgent {
 		return s.executeManagedTurn(ctx, store, task, tmpl, true)
 	}
-	// A conversation remains reachable at a manual stage, but a message must not
-	// approve that stage or move the task to another stage.
+	// Ordinary task messages and managed manual-stage messages only continue
+	// the conversation; they do not approve, reopen, or advance a task stage.
 	s.opMu.Lock()
 	inbox, err := store.Inbox(ctx, id)
 	if err != nil {
@@ -83,14 +103,7 @@ func (s *Service) executeTaskMessages(ctx context.Context, root, id string) erro
 	if len(inbox) == 0 {
 		return nil
 	}
-	stage := tmpl.Stages[task.CurrentStageIndex].Snapshot
-	for i := task.CurrentStageIndex - 1; i >= 0; i-- {
-		if tmpl.Stages[i].Snapshot.Role == RoleAgent {
-			stage = tmpl.Stages[i].Snapshot
-			break
-		}
-	}
-	err = s.Runner.RunAgentStage(ctx, AgentStageExecution{RootID: root, RuntimeRootPath: task.WorktreePath, Task: task, Stage: stage, Run: StageRun{SessionKey: task.MainSessionKey}, Prompt: strings.TrimSpace(prompt)})
+	err = s.Runner.RunAgentStage(ctx, AgentStageExecution{RootID: root, RuntimeRootPath: task.WorktreePath, Task: task, Stage: stage, Run: StageRun{SessionKey: key}, Prompt: strings.TrimSpace(prompt)})
 	if err != nil {
 		return err
 	}
@@ -100,6 +113,34 @@ func (s *Service) executeTaskMessages(ctx context.Context, root, id string) erro
 		}
 	}
 	return nil
+}
+
+// Ordinary stages using same_stage or always_new keep their conversation on
+// the stage run rather than on the task. A message continues that conversation;
+// it must not call EnsureAgentSession and create a new always_new session.
+// At a manual stage, use the nearest preceding agent stage's conversation.
+func taskMessageTarget(ctx context.Context, store *TaskStore, task Task, tmpl TaskTemplate) (string, StageTemplate, error) {
+	if task.CurrentStageIndex < 0 || task.CurrentStageIndex >= len(tmpl.Stages) {
+		return "", StageTemplate{}, fmt.Errorf("current stage out of range")
+	}
+	stage := tmpl.Stages[task.CurrentStageIndex].Snapshot
+	for i := task.CurrentStageIndex; i >= 0; i-- {
+		if tmpl.Stages[i].Snapshot.Role != RoleAgent {
+			continue
+		}
+		stage = tmpl.Stages[i].Snapshot
+		if task.GroupID == "" {
+			run, err := store.LatestStageRun(ctx, task.ID, i)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return "", stage, err
+			}
+			if err == nil && strings.TrimSpace(run.SessionKey) != "" {
+				return strings.TrimSpace(run.SessionKey), stage, nil
+			}
+		}
+		break
+	}
+	return strings.TrimSpace(task.MainSessionKey), stage, nil
 }
 
 // Existing conversations already contain execution identity and project context.

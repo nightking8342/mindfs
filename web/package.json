@@ -33,6 +33,7 @@
     "@lexical/selection": "^0.41.0",
     "@lexical/utils": "^0.41.0",
     "@lezer/highlight": "^1.2.3",
+    "@tanstack/react-virtual": "^3.14.13",
     "diff": "^9.0.0",
     "docx-preview": "^0.4.0",
     "katex": "^0.16.47",

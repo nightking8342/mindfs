@@ -1464,7 +1464,7 @@ class SessionService {
       );
     } catch (err) {
       console.error("[Session] Failed to fork session:", err);
-      return null;
+      throw err;
     }
   }
 

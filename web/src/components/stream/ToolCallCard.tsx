@@ -16,6 +16,14 @@ type ToolCallCardProps = {
   rootId?: string | null;
   sessionKey?: string | null;
   defaultExpanded?: boolean;
+  viewCache?: ToolCallViewCache;
+  viewCacheKey?: string;
+  getFallbackResult?: (toolCall: Partial<ToolCall>) => string;
+};
+
+export type ToolCallViewCache = {
+  expanded: Map<string, boolean>;
+  details: Map<string, { source: unknown; content: unknown; status: string; tool: ToolCall }>;
 };
 
 type DetailSection =
@@ -444,22 +452,35 @@ export const ToolCallCard = memo(function ToolCallCard({
   callId: _callId,
   status,
   content,
-  result,
+  result: suppliedResult,
   locations,
   meta,
   rootPath,
   rootId,
   sessionKey,
   defaultExpanded = false,
+  viewCache,
+  viewCacheKey,
+  getFallbackResult,
 }: ToolCallCardProps) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(defaultExpanded);
+  const expansionKey = viewCacheKey || _callId;
+  const [expanded, setExpandedState] = useState(() => viewCache?.expanded.get(expansionKey) ?? defaultExpanded);
+  const setExpanded = (value: boolean) => {
+    viewCache?.expanded.set(expansionKey, value);
+    setExpandedState(value);
+  };
+  const result = useMemo(
+    () => expanded ? (getFallbackResult?.({ kind, meta }) ?? suppliedResult) : undefined,
+    [expanded, getFallbackResult, kind, meta, suppliedResult],
+  );
   const [loadedToolCall, setLoadedToolCall] = useState<ToolCall | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [detailLoadFailed, setDetailLoadFailed] = useState(false);
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
   const loadingDetailKeyRef = useRef("");
   const loadedDetailKeyRef = useRef("");
+  const detailGenerationRef = useRef(0);
   const shouldStickDetailsToBottomRef = useRef(true);
   const effectiveKind = loadedToolCall?.kind || kind;
   const effectiveTitle = loadedToolCall?.title || title;
@@ -484,22 +505,23 @@ export const ToolCallCard = memo(function ToolCallCard({
   const isUserShell = isExecute && effectiveMeta?.source === "userShell";
   const executeCommand = isExecute ? extractExecuteCommand(effectiveMeta, labelTitle) : "";
   const userShellText = useMemo(
-    () => (effectiveContent || []).map((item) => ("text" in item ? item.text || "" : "")).join("") || result || "",
-    [effectiveContent, result],
+    () => expanded ? (effectiveContent || []).map((item) => ("text" in item ? item.text || "" : "")).join("") || result || "" : "",
+    [expanded, effectiveContent, result],
   );
   const executeOutputText = useMemo(
     () => {
+      if (!expanded) return "";
       const contentText = (effectiveContent || []).map((item) => ("text" in item ? item.text || "" : "")).join("");
       if (contentText) return contentText;
       if (!result) return "";
       const rawInput = stringMeta(effectiveMeta, "input");
       return result === rawInput || result === executeCommand ? "" : result;
     },
-    [effectiveContent, effectiveMeta, executeCommand, result],
+    [expanded, effectiveContent, effectiveMeta, executeCommand, result],
   );
   const hasContent = !!(effectiveContent && effectiveContent.length > 0);
   const hasLocations = !!(effectiveLocations && effectiveLocations.length > 0);
-  const hasResult = !!result;
+  const hasResult = !!suppliedResult || (!!getFallbackResult && Boolean(meta?.input || meta?.output));
   const hasExecuteCommand = executeCommand.length > 0;
   const hasExecuteOutput = executeOutputText.trim().length > 0;
   const hasUserShellOutput = userShellText.trim().length > 0;
@@ -508,13 +530,14 @@ export const ToolCallCard = memo(function ToolCallCard({
   const needsRemoteDetails = canLoadDetails && (isUserShell ? !hasUserShellOutput : isExecute ? !hasExecuteOutput : !hasContent);
   const hasDetails =
     (isUserShell
-      ? hasUserShellOutput
+      ? hasUserShellOutput || hasContent
       : isExecute
-      ? hasExecuteCommand || hasExecuteOutput
+      ? hasExecuteCommand || hasExecuteOutput || hasContent
       : hasContent || hasLocations || hasResult || hasCollabDetails) || canLoadDetails;
   const icon = renderToolIcon(normalizedKind);
   const normalizedStatus = (effectiveStatus || "").toLowerCase();
   const detailSections = useMemo(() => {
+    if (!expanded) return [];
     const sections = buildDetailSections(effectiveContent, effectiveLocations, rootPath);
     if (sections.length > 0 || !result || !isDiffLikeText(result)) {
       return sections;
@@ -527,22 +550,21 @@ export const ToolCallCard = memo(function ToolCallCard({
         markdown: `~~~diff\n${result.trim()}\n~~~`,
       },
     ];
-  }, [effectiveContent, effectiveLocations, result, rootPath]);
+  }, [expanded, effectiveContent, effectiveLocations, result, rootPath]);
   const isFileChange =
     normalizedKind === "edit" ||
     normalizedKind === "delete" ||
     normalizedKind === "move" ||
     detailSections.some((section) => section.type === "diff");
   const fileNames = useMemo(() => {
-    const diffNames = detailSections
-      .filter((section): section is Extract<DetailSection, { type: "diff" }> => section.type === "diff")
-      .map((section) => basename(section.path))
+    const diffNames = (effectiveContent || [])
+      .map((item) => basename(normalizeDisplayPath(item.path || "", rootPath)))
       .filter(Boolean);
     const locationNames = (effectiveLocations || [])
       .map((loc) => basename(normalizeDisplayPath(loc.path, rootPath)))
       .filter(Boolean);
     return Array.from(new Set([...diffNames, ...locationNames]));
-  }, [detailSections, effectiveLocations, rootPath]);
+  }, [effectiveContent, effectiveLocations, rootPath]);
   const displayTitle = isFileChange && labelTitle.toLowerCase() === "file_change" ? "" : labelTitle;
   const displayFileNames = fileNames.filter((name) => name !== displayTitle && name !== basename(displayTitle));
   const label = isUserShell
@@ -563,31 +585,46 @@ export const ToolCallCard = memo(function ToolCallCard({
       setExpanded(false);
       return;
     }
-    if (defaultExpanded) {
+    if (defaultExpanded && !viewCache?.expanded.has(expansionKey)) {
       setExpanded(true);
     }
   }, [defaultExpanded, hasDetails]);
 
   useEffect(() => {
-    setLoadedToolCall(null);
+    const cached = viewCache?.details.get(_callId);
+    const valid = cached?.source === meta && cached?.content === content && cached?.status === status;
+    detailGenerationRef.current += 1;
+    setLoadedToolCall(valid && cached ? cached.tool : null);
     setDetailLoadFailed(false);
     setLoadingDetails(false);
     loadingDetailKeyRef.current = "";
-    loadedDetailKeyRef.current = "";
-  }, [_callId, rootId, sessionKey]);
+    loadedDetailKeyRef.current = valid ? `${rootId || ""}::${sessionKey || ""}::${_callId}` : "";
+    return () => { detailGenerationRef.current += 1; };
+  }, [_callId, rootId, sessionKey, meta, content, status, viewCache]);
 
   useEffect(() => {
     if (!expanded || !needsRemoteDetails) return;
     const detailKey = `${rootId || ""}::${sessionKey || ""}::${_callId}`;
     if (loadedDetailKeyRef.current === detailKey || loadingDetailKeyRef.current === detailKey) return;
     loadingDetailKeyRef.current = detailKey;
+    const generation = detailGenerationRef.current;
     setLoadingDetails(true);
     setDetailLoadFailed(false);
     sessionService
       .getToolCall(String(rootId || ""), String(sessionKey || ""), _callId)
       .then((toolCall) => {
-        if (loadingDetailKeyRef.current !== detailKey) return;
+        if (generation !== detailGenerationRef.current || loadingDetailKeyRef.current !== detailKey) return;
         if (toolCall) {
+          if (viewCache && !isRunningStatus(status)) {
+            viewCache.details.delete(_callId);
+            // Bound retained detail payloads; oversized results stay local to the mounted card.
+            if (JSON.stringify(toolCall).length < 128 * 1024) {
+              viewCache.details.set(_callId, { source: meta, content, status, tool: toolCall });
+              while (viewCache.details.size > 32) {
+                viewCache.details.delete(viewCache.details.keys().next().value!);
+              }
+            }
+          }
           setLoadedToolCall(toolCall);
           loadedDetailKeyRef.current = detailKey;
         } else {
@@ -595,14 +632,14 @@ export const ToolCallCard = memo(function ToolCallCard({
         }
       })
       .catch(() => {
-        if (loadingDetailKeyRef.current === detailKey) setDetailLoadFailed(true);
+        if (generation === detailGenerationRef.current && loadingDetailKeyRef.current === detailKey) setDetailLoadFailed(true);
       })
       .finally(() => {
-        if (loadingDetailKeyRef.current !== detailKey) return;
+        if (generation !== detailGenerationRef.current || loadingDetailKeyRef.current !== detailKey) return;
         loadingDetailKeyRef.current = "";
         setLoadingDetails(false);
       });
-  }, [_callId, expanded, needsRemoteDetails, rootId, sessionKey]);
+  }, [_callId, expanded, needsRemoteDetails, rootId, sessionKey, meta, content, status, viewCache]);
 
   useEffect(() => {
     const container = detailScrollRef.current;

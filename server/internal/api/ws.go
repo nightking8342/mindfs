@@ -738,20 +738,27 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		ClientCtx:       clientCtx,
 		ExcludeClientID: clientID,
 	}
-	if streamHub.IsSessionReplying(key) && sessionType != session.TypeCommand {
-		queue := streamHub.EnqueueSessionMessage(rootID, key, sessionName, QueuedUserMessage{
-			ID:                 requestID,
-			PendingUserMessage: userMessage,
-			ClientCtx:          clientCtx,
+	h.submitSessionMessage(job)
+}
+
+// Both transports use the same queue and execution lifecycle. The HTTP request
+// context must not cancel the agent turn when the accepted response is sent.
+func (h *WSHandler) submitSessionMessage(job sessionMessageJob) bool {
+	streamHub := h.AppContext.GetSessionStreamHub()
+	if job.SessionType != session.TypeCommand {
+		queue, queued := streamHub.reserveOrQueueSessionMessage(job.RootID, job.Key, job.SessionName, QueuedUserMessage{
+			ID: job.RequestID, PendingUserMessage: job.User, ClientCtx: job.ClientCtx,
 		})
-		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
-		log.Printf("[ws] session.queue.enqueue root=%s session=%s request=%s queue=%d", rootID, key, requestID, len(queue))
-		return
+		if queued {
+			streamHub.BroadcastSessionQueueUpdated(job.RootID, job.Key, queue)
+			return true
+		}
 	}
-	if queue, changed := streamHub.UnfreezeQueuedSessionMessages(key); changed {
-		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
+	if queue, changed := streamHub.UnfreezeQueuedSessionMessages(job.Key); changed {
+		streamHub.BroadcastSessionQueueUpdated(job.RootID, job.Key, queue)
 	}
-	h.runSessionMessage(job)
+	go h.runSessionMessage(job)
+	return false
 }
 
 func (h *WSHandler) handleSessionSlashCommandRun(ctx context.Context, conn *websocket.Conn, clientID string, req WSRequest) {
@@ -1013,6 +1020,7 @@ func (h *WSHandler) startNextQueuedSessionMessage(rootID, key string) {
 		SessionName:     sessionName,
 		Shell:           shell,
 		User:            item.PendingUserMessage,
+		RequestID:       item.ID,
 		ClientCtx:       item.ClientCtx,
 		Queued:          true,
 	})

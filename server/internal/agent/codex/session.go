@@ -118,14 +118,10 @@ func forkCodexThread(ctx context.Context, client *codexsdk.Codex, opts codexsdk.
 	if err != nil {
 		return "", err
 	}
-	var threadID string
-	if thread != nil && thread.ID() != nil {
-		threadID = strings.TrimSpace(*thread.ID())
-	}
-	if threadID == "" {
+	if thread == nil || thread.ID() == nil || strings.TrimSpace(*thread.ID()) == "" {
 		return "", errors.New("codex thread/fork did not return thread id")
 	}
-	return threadID, nil
+	return strings.TrimSpace(*thread.ID()), nil
 }
 
 func codexCollaborationMode(enabled bool) *codexsdk.CollaborationMode {

@@ -262,14 +262,15 @@ function forkSessionDisplayName(
   sessionByKey: Map<string, SessionItem>,
   rootId?: string,
 ): string {
+  // The persisted name is authoritative, including user edits to fork titles.
+  if (storedName.trim()) return storedName;
   if (!source) return storedName;
   const parentName = String(
     sessionByKey.get(rootId ? `${rootId}:${source.sessionKey}` : source.sessionKey)?.name ||
       sessionByKey.get(source.sessionKey)?.name ||
       "",
   ).trim();
-  const fallbackName = storedName.replace(/\s+fork\s+@\d+\s*$/i, "").trim();
-  const base = parentName || fallbackName || storedName;
+  const base = parentName || "Fork";
   return source.seq > 0 ? `${base}#${source.seq}` : base;
 }
 
@@ -1244,7 +1245,7 @@ function SessionCard({
   const isForkSession = !!forkSource;
   const storedName = session.name || `Session ${session.key.slice(0, 8)}`;
   const displayName = isForkSession
-    ? forkSessionDisplayName(storedName, forkSource, sessionByKey, session.root_id)
+    ? forkSessionDisplayName(session.name || "", forkSource, sessionByKey, session.root_id)
     : storedName;
   const snippet = (session.search_snippet || "").trim();
   const isSearchResult = !!session.search_match_type;

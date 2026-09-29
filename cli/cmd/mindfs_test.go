@@ -9,6 +9,12 @@ import (
 )
 
 func TestNormalizeTaskRootFirstArgs(t *testing.T) {
+	for _, flag := range []string{"-to-session", "--to-session"} {
+		got := normalizeTaskRootFirstArgs([]string{"root", flag, "123"})
+		if !reflect.DeepEqual(got, []string{flag, "123", "root"}) {
+			t.Fatalf("session args = %v", got)
+		}
+	}
 	got := normalizeTaskRootFirstArgs([]string{"mindfs", "-task", "12", "-next"})
 	want := []string{"-task", "12", "-next", "mindfs"}
 	if !reflect.DeepEqual(got, want) {

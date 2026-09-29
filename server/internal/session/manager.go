@@ -1438,6 +1438,7 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 		return nil, 0, err
 	}
 	exchanges := make([]Exchange, 0)
+	indexBySeq := make(map[int]int)
 	total := 0
 	scanner := jsonlScanner(payload)
 	for scanner.Scan() {
@@ -1458,6 +1459,21 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 		if afterSeq > 0 && entry.Seq <= afterSeq {
 			continue
 		}
+		if index, exists := indexBySeq[entry.Seq]; exists {
+			previous := exchanges[index]
+			// Prefer a completed reply over an empty placeholder, regardless of
+			// append order. Otherwise the last record in the log wins. Keep the
+			// original position and seq so aux references and cursors stay valid.
+			if strings.TrimSpace(previous.Content) != "" && strings.TrimSpace(entry.Content) == "" {
+				continue
+			}
+			if strings.TrimSpace(previous.Content) != "" && previous.Content != entry.Content {
+				log.Printf("[session/load] conflicting duplicate seq session=%s seq=%d; using last non-empty record", key, entry.Seq)
+			}
+			exchanges[index] = entry
+			continue
+		}
+		indexBySeq[entry.Seq] = len(exchanges)
 		exchanges = append(exchanges, entry)
 	}
 	if err := scanner.Err(); err != nil {

@@ -62,7 +62,7 @@ func handleTaskOperation(addr string, tls bool, root, id, action, cursor string)
 	if e != nil {
 		return e
 	}
-	if id != "" && !strings.HasPrefix(action, "group:") {
+	if id != "" && action != "to-session" && !strings.HasPrefix(action, "group:") {
 		if _, e := strconv.Atoi(strings.TrimPrefix(id, "#")); e == nil {
 			id, _, e = fetchTaskDetailByNumber(addr, tls, token, root, mustTaskNumber(id))
 			if e != nil {
@@ -99,6 +99,8 @@ func handleTaskOperation(addr string, tls bool, root, id, action, cursor string)
 		}
 	} else {
 		switch action {
+		case "to-session":
+			path = "/api/sessions/" + url.PathEscape(id) + "/messages"
 		case "list":
 			method = http.MethodGet
 			path = "/api/tasks" + query + "&summary=1&cursor=" + url.QueryEscape(cursor)
@@ -141,7 +143,7 @@ func handleTaskOperation(addr string, tls bool, root, id, action, cursor string)
 		operation := strings.TrimPrefix(action, "group:")
 		required := false
 		switch operation {
-		case "create", "plan", "update", "to-task", "from-task", "complete":
+		case "create", "plan", "update", "to-task", "from-task", "to-session", "complete":
 			required = true
 		case "cancel":
 			required = !groupAction

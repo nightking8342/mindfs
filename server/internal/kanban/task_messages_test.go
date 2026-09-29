@@ -2,11 +2,218 @@ package kanban
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestOrdinaryTaskMessagesPreserveLifecycleAndSerialize(t *testing.T) {
+	for _, status := range []string{StatusWaitingUser, StatusPaused, StatusSuccess, StatusFail} {
+		t.Run(status, func(t *testing.T) {
+			ctx := context.Background()
+			s, store, base := orchestrationFixture(t)
+			task, err := store.GetTask(ctx, base.Task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task.CurrentStageIndex, task.MainSessionKey, task.Status = 1, "ordinary-chat", status
+			// Ordinary tasks keep their scheduler slot after an agent stage
+			// finishes and waits for user input.
+			task.SchedulerAdmitted = status == StatusWaitingUser
+			task.CompletedAt, task.BlockReason = "existing-completion", "existing-reason"
+			if err := store.UpdateTask(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			s.Runner = &orchestrationRunner{run: func(exec AgentStageExecution) error {
+				if exec.Run.SessionKey != task.MainSessionKey || exec.Task.SchedulerAdmitted != task.SchedulerAdmitted || exec.Stage.Agent != "codex" {
+					t.Error("message changed session, agent, or acquired a task slot")
+				}
+				switch calls.Add(1) {
+				case 1:
+					if exec.Prompt != "first user message" {
+						t.Error("message was wrapped in orchestration instructions")
+					}
+					_, err := s.ManagedAction(ctx, task.RootID, task.ID, "to-task", ManagedInput{Message: "second user message"})
+					return err
+				case 2:
+					if exec.Prompt != "second user message" {
+						t.Error("follow-up message lost or duplicated")
+					}
+				default:
+					t.Error("unexpected extra message turn")
+				}
+				return nil
+			}}
+			if _, err := s.ManagedAction(ctx, task.RootID, task.ID, "to-task", ManagedInput{Message: "first user message"}); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				inbox, err := store.Inbox(ctx, task.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if calls.Load() == 2 && len(inbox) == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("messages not delivered: calls=%d inbox=%+v", calls.Load(), inbox)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			current, err := store.GetTask(ctx, task.ID)
+			if err != nil || current.Status != status || current.CurrentStageIndex != task.CurrentStageIndex || current.CompletedAt != task.CompletedAt || current.BlockReason != task.BlockReason || current.SchedulerAdmitted != task.SchedulerAdmitted {
+				t.Fatalf("user messages changed task lifecycle: %+v %v", current, err)
+			}
+		})
+	}
+}
+
+func TestOrdinaryTaskMessagesReachStageSession(t *testing.T) {
+	for _, policy := range []string{SessionReuseSameStage, SessionReuseAlwaysNew} {
+		for _, tc := range []struct {
+			name, mainKey string
+			manual        bool
+		}{
+			{name: "no_main_session"},
+			{name: "prefer_stage_session", mainKey: "older-main-chat"},
+			{name: "manual_stage", manual: true},
+		} {
+			t.Run(policy+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				s, store, base := orchestrationFixture(t)
+				task, err := store.GetTask(ctx, base.Task.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tmpl, err := s.TaskExecutionTemplate(task)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tmpl.Stages[1].Snapshot.SessionReusePolicy = policy
+				tmpl.Stages[1].Snapshot.Model = "stage-model"
+				if tc.manual {
+					tmpl.Stages = append(tmpl.Stages, TaskTemplateStage{Position: 2, Snapshot: StageTemplate{Name: "Review", Role: RoleUser}})
+				}
+				if _, err := s.Templates.SaveTaskTemplate(tmpl); err != nil {
+					t.Fatal(err)
+				}
+				task.MainSessionKey, task.CurrentStageIndex = tc.mainKey, 1
+				if tc.manual {
+					task.CurrentStageIndex = 2
+				}
+				task.Status, task.SchedulerAdmitted = StatusWaitingUser, true
+				now := time.Now().UTC()
+				for i, key := range []string{"old-stage-chat", "latest-stage-chat"} {
+					created := now.Add(time.Duration(i) * time.Second)
+					run := StageRun{ID: newID("run"), TaskID: task.ID, StageIndex: 1, StageName: "Coordinate", Role: RoleAgent, Status: StageStatusSuccess, SessionKey: key, CreatedAt: created, UpdatedAt: created}
+					if err := store.MoveTask(ctx, task, run, TaskEvent{ID: newID("event"), TaskID: task.ID, Type: "test", Payload: "{}", CreatedAt: created}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var calls atomic.Int32
+				s.Runner = &orchestrationRunner{run: func(exec AgentStageExecution) error {
+					calls.Add(1)
+					if exec.Run.SessionKey != "latest-stage-chat" || exec.Prompt != "follow-up" || exec.Stage.SessionReusePolicy != policy || exec.Stage.Model != "stage-model" {
+						t.Errorf("wrong message target or configuration: %+v", exec)
+					}
+					return nil
+				}}
+				if _, err := s.ManagedAction(ctx, task.RootID, task.ID, "to-task", ManagedInput{Message: "follow-up"}); err != nil {
+					t.Fatal(err)
+				}
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					inbox, err := store.Inbox(ctx, task.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if calls.Load() == 1 && len(inbox) == 0 {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("stage message not delivered: calls=%d inbox=%+v", calls.Load(), inbox)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				current, err := store.GetTask(ctx, task.ID)
+				if err != nil || current.MainSessionKey != tc.mainKey || current.CurrentStageIndex != task.CurrentStageIndex || current.Status != task.Status || !current.SchedulerAdmitted {
+					t.Fatalf("message changed task lifecycle or main session: %+v %v", current, err)
+				}
+			})
+		}
+	}
+}
+
+func TestOrdinaryTaskMessageWaitsForSessionAndRetainsFailedMessage(t *testing.T) {
+	ctx := context.Background()
+	s, store, base := orchestrationFixture(t)
+	task, err := store.GetTask(ctx, base.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ManagedAction(ctx, task.RootID, task.ID, "to-task", ManagedInput{Message: "queued user message"}); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	wantErr := errors.New("session unavailable")
+	s.Runner = &orchestrationRunner{run: func(exec AgentStageExecution) error {
+		calls++
+		if exec.Prompt != "queued user message" {
+			t.Error("queued content changed")
+		}
+		return wantErr
+	}}
+	if err := s.executeTaskMessages(ctx, task.RootID, task.ID); err != nil || calls != 0 {
+		t.Fatalf("message started task without a session: %v calls=%d", err, calls)
+	}
+	task.CurrentStageIndex, task.MainSessionKey = 1, "created-chat"
+	if err := store.UpdateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.executeTaskMessages(ctx, task.RootID, task.ID); !errors.Is(err, wantErr) || calls != 1 {
+		t.Fatalf("message did not reach created session: %v calls=%d", err, calls)
+	}
+	inbox, err := store.Inbox(ctx, task.ID)
+	if err != nil || len(inbox) != 1 || inbox[0].StageRunID == "" {
+		t.Fatalf("failed message was lost or left eligible for an endless retry: %+v %v", inbox, err)
+	}
+}
+
+func TestOrdinaryTaskMessageValidation(t *testing.T) {
+	ctx := context.Background()
+	s, store, base := orchestrationFixture(t)
+	for _, tc := range []struct {
+		action string
+		input  ManagedInput
+	}{
+		{"to-task", ManagedInput{Message: " "}},
+		{"to-task", ManagedInput{Message: "done", Completed: true}},
+		{"from-task", ManagedInput{Message: "no parent"}},
+	} {
+		if _, err := s.ManagedAction(ctx, base.Task.RootID, base.Task.ID, tc.action, tc.input); err == nil {
+			t.Fatalf("accepted invalid ordinary task message: %+v", tc)
+		}
+	}
+	task, err := store.GetTask(ctx, base.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = StatusCancelled
+	if err := store.UpdateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ManagedAction(ctx, task.RootID, task.ID, "to-task", ManagedInput{Message: "cancelled"}); err == nil {
+		t.Fatal("cancelled task accepted message")
+	}
+	inbox, err := store.Inbox(ctx, task.ID)
+	if err != nil || len(inbox) != 0 {
+		t.Fatalf("rejected messages persisted: %+v %v", inbox, err)
+	}
+}
 
 func TestTaskMessagesIgnoreSchedulingAndSerializeReplies(t *testing.T) {
 	ctx := context.Background()

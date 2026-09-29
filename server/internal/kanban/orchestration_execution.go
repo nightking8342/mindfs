@@ -30,7 +30,7 @@ func (s *Service) ManagedAction(ctx context.Context, root, id, action string, in
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	if t.GroupID == "" {
+	if t.GroupID == "" && action != "to-task" {
 		return TaskDetail{}, errors.New("not an orchestrated task")
 	}
 	if t.GroupID != "" && action != "cancel" {
@@ -56,6 +56,16 @@ func (s *Service) ManagedAction(ctx context.Context, root, id, action string, in
 		if action == "to-task" {
 			if t.Status == StatusCancelled {
 				return TaskDetail{}, errors.New("recipient task is cancelled")
+			}
+			if owner == "" {
+				// Ordinary tasks receive user messages without changing their
+				// stage, completion state, or scheduler admission.
+				event.ReceiverTaskID = t.ID
+				if err = store.AddEvent(ctx, event); err != nil {
+					return TaskDetail{}, err
+				}
+				s.Schedule(root)
+				return s.changed(ctx, store, id)
 			}
 			if !t.SchedulerAdmitted && t.Status != StatusRunning {
 				if t.Status == StatusSuccess {

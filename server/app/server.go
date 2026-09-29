@@ -175,7 +175,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 		return err
 	}
 	defer listener.Close()
-	localCLIToken, err := EnsureLocalCLIToken(addr)
+	localCLIToken, err := EnsureLocalCLIToken(addr, opts.UseTLS)
 	if err != nil {
 		return err
 	}

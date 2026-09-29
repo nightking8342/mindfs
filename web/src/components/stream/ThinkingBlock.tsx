@@ -4,9 +4,10 @@ import { useI18n } from "../../i18n";
 type ThinkingBlockProps = {
   content: string;
   defaultExpanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
-export const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: ThinkingBlockProps) {
+export const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false, onExpandedChange }: ThinkingBlockProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(defaultExpanded);
   useEffect(() => {
@@ -28,7 +29,10 @@ export const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpan
     >
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          onExpandedChange?.(!expanded);
+          setExpanded(!expanded);
+        }}
         style={{
           width: "100%",
           display: "flex",

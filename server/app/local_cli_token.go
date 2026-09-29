@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,10 @@ const localCLITokenBytes = 32
 
 type localCLITokenStore struct {
 	Tokens map[string]string `json:"tokens"`
+	TLS    map[string]bool   `json:"tls,omitempty"`
 }
 
-func EnsureLocalCLIToken(addr string) (string, error) {
+func EnsureLocalCLIToken(addr string, useTLS bool) (string, error) {
 	token, err := newLocalCLIToken()
 	if err != nil {
 		return "", err
@@ -33,10 +35,28 @@ func EnsureLocalCLIToken(addr string) (string, error) {
 		return "", err
 	}
 	store.Tokens[localCLITokenKey(addr)] = token
+	if store.TLS == nil {
+		store.TLS = make(map[string]bool)
+	}
+	store.TLS[localCLITokenKey(addr)] = useTLS
 	if err := writeLocalCLITokenStore(path, store); err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// ReadLocalCLITLS returns the running service's transport. Older token stores
+// have no transport metadata and retain the HTTP default.
+func ReadLocalCLITLS(addr string) (bool, error) {
+	path, err := localCLITokenStorePath()
+	if err != nil {
+		return false, err
+	}
+	store, err := readLocalCLITokenStore(path)
+	if err != nil {
+		return false, err
+	}
+	return store.TLS[localCLITokenKey(addr)], nil
 }
 
 func ReadLocalCLIToken(addr string) (string, error) {
@@ -112,6 +132,9 @@ func localCLITokenStorePath() (string, error) {
 
 func localCLITokenKey(addr string) string {
 	addr = strings.TrimSpace(addr)
+	if u, err := url.Parse(addr); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		addr = net.JoinHostPort(u.Hostname(), u.Port())
+	}
 	if addr == "" {
 		return "127.0.0.1:7331"
 	}
