@@ -759,6 +759,36 @@ if previousInput == "" && run.StageIndex > 0 {
 **仍未覆盖的场景**：`auto_advance=false` 的多阶段模板（靠人工逐步推进）——
 此时下游 `{previous_input}` 确实会回落到更早的人工输入，方案正文不可达。这是该配置下的固有限制。
 
+**【2026-09-30 实机更正与补全】** 上段的「回落到更早的人工输入」表述**不准确**，实际规律更简单也更危险：
+
+> **`{previous_input}` 取的值 = 「上一阶段 `Input` 字段当前的内容」，而 `Input` 是单字段、可被用户写入覆写。
+> 因此下游拿到的是「谁最后写了那个 `Input`」，既可能是上游交付，也可能是**用户在该阶段填的审核意见**。**
+
+实测证据（任务组 `group_933ca20bdac2911f` / 任务 `#7`，蓝图模板原样，五阶段完整链路）：
+
+| stage | 名称 | 角色 | 状态 | 会话 | input | result | rendered_prompt |
+|---|---|---|---|---|---|---|---|
+| 0 | 需求 | user | waiting_user | — | 290 | 0 | 0 |
+| 1 | 方案 | agent | success | `...29378` | 0 | **1810** | 464 |
+| 2 | 审核 | user | waiting_user | — | **276** | 0 | 0 |
+| 3 | 实现 | agent | success | `...29378` | 0 | **2612** | 1042 |
+| 4 | 验收 | agent | success | `...db70b` | 2612 | **2952** | 3317 |
+
+关键过程：
+
+1. 方案阶段（`auto_advance=true`）交付 1810 字方案 → `advanceManagedStage` 把交付正文写入**审核阶段的 `Input`**（1810 字，与 `stage1.result` 逐字节相同）
+2. **用户向审核阶段写入 276 字审阅意见** → 经 `POST /api/tasks/{id}/input` → `UpdateStageRunInput` → `UPDATE stage_runs SET input=?`，**整体替换**，1810 → 276
+3. `-next` 推进到实现阶段，其 `rendered_prompt` 的 `## 方案` 段落 = **276 字审阅意见**；
+   检索方案原文特征串（「经 -from-task 消息正文提交报告」「基准数据表」）**均为 False**
+
+**结论修正**：`auto_advance=false` 本身不是问题所在，**真正的风险是「用户与上游交付抢同一个 `Input` 字段」**。
+即使前序 agent 阶段 `auto_advance=true`（蓝图即如此），只要中间夹一个会被用户写内容的 user 阶段，
+**上游交付就会被静默覆盖**——而蓝图模板的实现阶段 prompt 明明写着 `## 方案 {previous_input}`，
+预期「按已批准的方案实现」，实际却拿不到方案。
+
+**配套**：`docs/blueprint-template-requirements.md` §五 Q4 与 §七 记录了同一结论。
+**根治方向**：让 `promptValues` 在 `Input` 为空时回落到上一阶段的 `Result`，或不要让用户内容与交付共用 `Input` 字段。
+
 **已被测试固化的部分**：`upstream_result_injection_test.go` 验证的是**任务组**场景（上游任务 → 下游任务），走的是 `## 前置任务` 里的 `Result`，与 `{previous_input}` 是两条独立通路：
 
 ```go
@@ -1132,7 +1162,7 @@ if err := s.admitTask(ctx, store, task, tmpl); err != nil { return TaskDetail{},
 
 | 动作 | `event.TaskID`（"发送者"） | `event.ReceiverTaskID`（inbox 归属） | 副作用 |
 |---|---|---|---|
-| `-to-task <task>` | 事件默认 `TaskID = <task>`，随后被改成 `owner`（组 ID）→ 视为**父会话发的** | 目标任务 ID | `bumpGroup`（plan_version+1）、重开已 success 的目标任务（回退到最后一个 agent 阶段）、`Status=Pending`（有主会话则 `WaitingUser`）、清 BlockReason/CompletedAt/AuxFlags（`51-84`、`143-147`） |
+| `-to-task <task>` | 事件默认 `TaskID = <task>`，随后被改成 `owner`（组 ID）→ 视为**父会话发的** | 目标任务 ID | `bumpGroup`（plan_version+1）、**仅当目标任务已 `success` 时**回退到最后一个 agent 阶段、`Status=Pending`（有主会话则 `WaitingUser`）、清 BlockReason/CompletedAt/AuxFlags（`51-84`、`143-147`） |
 | `-from-task <task>` | 发送任务 ID | 组 ID（`owner`） | 若 `completed:true` 则 **ReceiverTaskID 置空**、payload 带 `execution_id`（`85-103`） |
 | `completed:true` 但当前无执行 | — | — | 报错 `completion requires an active task execution`（`92-94`） |
 | `cancel` | — | — | 写 `intent_cancel` 事件；若在执行中则**先把 task 置 cancelled 但不释放调度位**，等执行退出（`104-130`） |
@@ -1159,6 +1189,18 @@ if err := s.admitTask(ctx, store, task, tmpl); err != nil { return TaskDetail{},
 ```
 
 `taskReport` 的 `ExecutionID` 是把「报告」绑定到「哪一次执行」的关键（人工不能伪造，注释明确「This is internal metadata, not a CLI parameter」，`orchestration_execution.go:20-24`）。
+
+**【2026-09-30 实机补充】`-to-task` 的实际效果取决于目标阶段角色**（详见「已知坑」第 17 条）：
+
+| 目标阶段角色 | 实际行为 |
+|---|---|
+| **agent** | 走 `executeManagedTurn(messageTurn=true)`，**重跑一轮**（跳过调度门槛、复用主会话、prompt 整体替换为消息文本） |
+| **user** | 只延续对话，**不批准、不重开、不推进阶段**（`task_messages.go:86-87`） |
+
+上表中「重开已 success 的目标任务」的回退逻辑，**仅对已 `success` 的任务生效**
+（`t.Status == StatusSuccess` 守卫，`orchestration_execution.go:72-80`）——
+停在 `waiting_user` 的任务不会走该回退分支。实测复现：对停在验收阶段（agent，`waiting_user`）的任务
+发 `-to-task` 催补交付，成功重跑并补交了 `completed: true`。
 
 **inbox 读取**（源码确证）：
 
@@ -1846,6 +1888,101 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
 
 15. **`web/src/App.tsx` 完全不知道 `group_id`**（§E24），所以看板上组内任务与独立任务混排，唯一的分组视图是 `TaskGroupPanel`。
 
+16. **组内任务无回退手段：`-prev` / `-jump` 被静默拒绝**（2026-09-30 实测确认）。
+    `Prev`（`service.go:449-458`）与 `Jump`（`service.go:460-476`）对 `GroupID != ""` 的任务**一律转成
+    `ManagedAction(..., "invalid", ...)`**，而 `ManagedAction` 的 switch 只处理 `to-task` / `from-task` / `cancel`，
+    `"invalid"` 落到 `default` 分支返回 `unsupported task operation; use to-task, from-task or cancel`（`orchestration_execution.go:141-142`）。
+    后果：**任务一旦推进过某个阶段，就无法退回重做**。对「人工卡点」型模板（如蓝图）尤其致命——
+    审核阶段不认可方案时，既不能打回方案阶段重跑，`-to-task` 也因目标是 user 阶段而只延续对话（见第 17 条），
+    唯一出路是取消整个任务重来。
+    对比：独立任务（无组）的 `-prev` / `-jump` 走 `moveRelative(-1)` / `moveTo`，**正常工作**。
+    **注意**：`action="invalid"` 本身不带错误信息，最终报错来自 `default` 分支，从错误文本看不出是「组内任务不允许回退」这一原因。
+
+17. **`-to-task` 对 user 阶段与 agent 阶段行为不同**（2026-09-30 实测确认）。
+    - **agent 阶段**：走 `executeManagedTurn(messageTurn=true)`（`task_messages.go:83-85`），**真的重跑一轮**——
+      跳过调度门槛、不建新会话（复用主会话）、prompt 整体替换为消息内容（`orchestration_execution.go:226-236`、`:332-334`）。
+    - **user 阶段**：落到 `task_messages.go:86-87` 的分支，注释明确「**只延续对话，不批准、不重开、不推进阶段**」。
+    - 触发者不是调度器（`waiting_user` + `SchedulerAdmitted=false` 会被 `schedule()` 挡住），
+      而是 `deliverTaskMessages` 挑中「inbox 里有 `StageRunID==""` 的新消息」后走 `runTask(id, true)`。
+
+18. **最终阶段漏设 `completed: true` 会导致交付不落盘、任务卡住**（2026-09-30 实测确认）。
+    `run.Result` 只在 `action` 为 `complete` / `followup` 时被赋值（`orchestration_execution.go:403`、`:440`、`:445`）。
+    若 agent 跑完完整工作、发了 `-from-task` 报告但**忘了设 `completed: true`**，则落到 `execution_waiting` 分支：
+    - `stage_runs.result` 保持为空
+    - 任务停在 `waiting_user`（而非 `success`），`completed_at` 为空
+    - 但 `from-task` 的消息**已送达父会话**（内容完整），所以父会话能看到结果、系统状态却没完成
+    系统提示词里明明写了 `set completed: true when the current stage is complete`，**agent 仍可能漏**，
+    且**无任何兜底**。**自救路径**（已实测有效）：发一条 `-to-task` 催其补交，
+    事件流为 `execution_waiting` → `execution_queued` → `from-task` → `execution_complete`，任务转 `success`。
+    **副作用**：补交会**新建一条 stage_run**（该 run 的 `input` 为空，丢失该轮原始输入），
+    但 `result` 正确落盘，且 `LatestStageRun`（`ORDER BY created_at DESC`）能取到最新那条。
+
+19. **agent `ask_user` 提问不通知父会话**（2026-09-30 源码确证）。
+    `updateTaskAuxFlagsFromEvent`（`appcontext.go:1030-1074`）对 `ToolKindAskUser` 只做两件事：
+    置 `patch.AskUserWaiting = true`、写看板事件 `aux_ask_user_waiting`。**不产生组 inbox 事件**
+    （无 `ReceiverTaskID = GroupID` 的写入）。对比：`finishManagedRun` 只在 `stage_done` / `fail` / `waiting`
+    时才写组 inbox（`orchestration_execution.go:495-506`）。
+    后果：方案 agent 中途停下提问等决策时，任务仍显示 `running`，**父会话完全无从感知**，
+    只能靠人去任务看板逐个查看。
+
+20. **`auto_advance=true` 的 agent 阶段「停机报错」不会通知父会话**（2026-09-30 实测确认）。
+    通知条件（`orchestration_execution.go:495`）为
+    `action == "fail" || (action == "waiting" && !reported) || (action == "stage_done" && t.Status == StatusWaitingUser)`。
+    agent 阶段交付（无论成功还是「失败说明」）都会走 `action == "stage_done"`，
+    而 `auto_advance=true` 时 `advanceManagedStage` 把任务置为 `queued`（非 `waiting_user`）→ **条件不成立 → 不通知**。
+    实测：实现阶段因方案文件缺失而停机并交付失败说明，父会话**未收到任何通知**，
+    要等下一阶段（验收）结束才被唤醒——而验收阶段只能看到「没有交付物」，判不出根因。
+    **推论**：`role:user` 阶段（如旧的审核阶段）是唯一能让父会话在中途被通知的结构。
+
+21. **组内任务不能主动置为 `fail`**（2026-09-30 实测确认）。
+    `Service.Fail`（`service.go:509-513`）开头即判断：
+    ```go
+    if t, e := s.GetTask(ctx, in.RootID, in.TaskID); e == nil && t.Task.GroupID != "" {
+        return TaskDetail{}, errors.New("report task problems with -from-task")
+    }
+    ```
+    组内任务**只能**用 `-from-task` 报告，无法自报失败。
+
+22. **阶段内多条 `from-task completed:true` 会互相覆盖 `result`**（2026-09-30 实测确认）。
+    `finishManagedRun` 遍历该 run 的**全部** events，`message` 被**最后一条** `completed:true` 覆盖：
+    ```go
+    for _, ev := range events {
+        if ev.Type == "from-task" && action != "cancel" {
+            if report.ExecutionID == run.ID && report.Completed {
+                action = "complete"; message = report.Message   // 每条都覆盖
+            }
+        }
+    }
+    ```
+    实测：方案 agent 因误判「提交失败」而重发 3 条（第 1 条为完整方案、第 3 条为一句澄清），
+    最终 `stage_runs.result` 只剩**第 3 条**，方案正文丢失。
+    **含义**：`result` 是「最后一次写入者胜出」，不适合承载需要保真的交付；
+    落成文件（幂等覆写）是更稳的载体。
+
+23. **`-to-task` 的 messageTurn 会整体替换 prompt，但会话历史完整可见**（2026-09-30 实测更正）。
+    机制：`orchestration_execution.go:332-334`
+    ```go
+    if len(inbox) > 0 && (messageTurn || (key == t.MainSessionKey && run.Trigger == "events")) {
+        prompt = taskMessagesPrompt(inbox)     // 整体替换，阶段模板不在本轮 prompt 内
+    }
+    ```
+    **但**：`-to-task` 复用既有会话，agent 的完整上下文 = 会话历史，**阶段模板在历史里仍可见**
+    （实测：会话第 1 条即含完整模板与交付纪律）。
+    **易误判点**：`stage_runs.rendered_prompt` 只记录**本轮注入的 prompt**（可能只有几十到几百字符），
+    **不代表 agent 的完整上下文**。据它判断「模板丢了」是错的——
+    这与坑 ⑨「`-status` 在自身阶段恒为 running」同属「用间接证据下过强结论」。
+
+24. **重跑会新建 stage_run，同阶段可有多条**（2026-09-30 实测确认）。
+    `LatestStageRun`（`task_store.go:487`）按 `created_at DESC LIMIT 1` 取最新。
+    因此查阶段状态时若不按此排序，会读到**旧的**那条（本次实测中曾因此误判 `result` 为空）。
+    另注：补交付产生的新 run 其 `input` 为空，会丢失该轮原始 input。
+
+25. **子代理（Task 工具）在任务阶段内可正常使用**（2026-09-30 实测确认）。
+    claude 的 `PermissionMode` 为 `Default`（非 plan 模式），Task 工具可用；
+    子代理只是同一会话内的执行分支，**不会**被 `claudeSubagentRouter` 当成 kanban 子任务。
+    实测：方案阶段派子代理评审方案、返回结构化报告、主 agent 据此修订方案，全程正常。
+    注意先读「已知坑 ②」——fork 曾修复过两个子代理路由缺陷（bash 误判、重进翻倍）。
+
 ---
 
 ## 待确认清单
@@ -1859,6 +1996,13 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
    - 仅当产生交付的阶段 `auto_advance=false`（人工推进）时，新 run 的 `Input` 为空，
      下游才会回落。**这是该配置下的固有限制，不是「蓝图」模板的问题**（其阶段 1、3 均为 auto）。
    - 无需改 `moveTo`。
+
+   **【2026-09-30 补充更正】** 上条最后一句「不是『蓝图』模板的问题」**在用户实际写审核意见时不成立**。
+   `TestBlueprintTemplateChain` 未覆盖「用户在中间 user 阶段填写内容」这一情形，而真实使用必然发生：
+   用户写入审核意见会**整体覆盖**自动带入的方案正文（`Input` 是单字段），
+   下游实现阶段因此拿不到方案。实测见本文 §B10 的「实机更正与补全」与
+   `docs/blueprint-template-requirements.md` §五 Q4、§七。
+   → **该问题的真正触发条件是「用户内容与上游交付共用 `Input` 字段」，与 `auto_advance` 无关**。
 
 2. **`user` 阶段 `auto_advance` 的语义是否有意为之。**
    源码显示除首阶段外无效果（A3 推论），但 UI 允许为任意阶段勾选、i18n 也没有说明。需向上游确认是否为设计缺陷。

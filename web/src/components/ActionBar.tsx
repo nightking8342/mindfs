@@ -1437,6 +1437,14 @@ export function ActionBar({
               <CodexRateLimitIndicator agent={agent} refreshToken={codexRateLimitsRefreshToken} />
             </div>
           </div>
+        ) : mode !== "command" && taskGroupBadge ? (
+          // fork: 任务组徽章是「状态入口」而非「发送前配置项」，只要该会话有任务组就应可见。
+          // 上面那个浮层是按 composer 选项（plan 模式 / worktree / codex）把关的，
+          // 非 codex 且非 plan 模式下会连它一起隐藏；故此处为其补一个独立的兜底层。
+          // 只在上面那个浮层不渲染时出现，互斥，不影响其内其它元素的行为。
+          <div style={{ position: "absolute", left: "2px", right: isMobile ? "2px" : "8px", bottom: "100%", zIndex: 7, minWidth: 0, display: "flex", alignItems: "flex-end", gap: "6px", pointerEvents: "none" }}>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: "6px", minWidth: 0, pointerEvents: "auto" }}>{taskGroupBadge}</div>
+          </div>
         ) : null}
         {queuedMessages.length > 0 ? (
           <div
