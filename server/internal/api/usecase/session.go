@@ -2273,6 +2273,18 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 			if claudeSubagents.Handle(context.Background(), update) {
 				return
 			}
+			// fork: 带子代理标识却未被路由消费的 update 会走下面的主会话分支，
+			// 最终以**主会话 key** 广播 —— 前端按 session_key 渲染，表现就是
+			// 「子代理输出串进主会话窗口」。已知的两条路径（bash 误判、closed
+			// 兜底）都已修掉，这里只做观测：若日志仍出现，说明还有第三条漏网路径，
+			// 且它携带的 ref 就是定位线索。
+			//
+			// 刻意**不丢弃**这类 update：真正属于主会话的事件（如任务卡
+			// isClaudeParentTaskLifecycle）也会走到这里，丢弃会破坏父会话的任务卡显示。
+			if ref := claudeSubagentRefFromUpdate(update); ref.hasRef() {
+				log.Printf("[subagent/claude] unclaimed.ref root=%s parent=%s type=%s ref=%s — 该事件将按主会话广播，可能串台",
+					in.RootID, current.Key, update.Type, ref.key())
+			}
 			switch update.Type {
 			case agenttypes.EventTypeThoughtChunk:
 				if chunk, ok := update.Data.(agenttypes.ThoughtChunk); ok && chunk.Content != "" {
@@ -2641,9 +2653,28 @@ func (r *claudeSubagentRouter) Handle(ctx context.Context, update agenttypes.Eve
 		log.Printf("[subagent/claude] session.ensure.error root=%s parent=%s ref=%s err=%v", r.in.RootID, r.in.Parent.Key, ref.key(), err)
 		return false
 	}
-	if child == nil || child.closed {
+	if child == nil {
 		return false
 	}
+	// fork: `closed` 只表示「这一轮已经收过尾」，**不再表示「拒绝后续事件」**。
+	//
+	// 上游把两者混为一谈：主 turn 结束时 FinishAll 把**所有** child 标成 closed
+	// （不区分前台/后台），而 claude 的**后台** Task 子代理并不随主 turn 结束而停止
+	// —— 它的终态 MessageDone 在主 turn 的 ResultMessage 之后才到。此时上游的
+	// `child.closed → return false` 会让这些事件落回主会话分支，最终以主会话 key
+	// 广播，前端按 session_key 渲染就成了「子代理输出串进主会话窗口」（实测确认，
+	// 见 subagent_late_route_test.go 的 TestClaudeSubagentLateChunkStillRoutesToChild；
+	// 且它在主 turn 结束后还会以主 key 污染 pendingSessions/ReplyingList，被重连回放
+	// 放大成持久脏数据）。
+	//
+	// 子代理自身有正规的结束路径：收到 MessageDone 时 finish(false) 落库并转发
+	// MessageDone 事件；FinishAll 只是给「主 turn 已结束、但子代理仍未发 MessageDone」
+	// 兜底收尾（它内部有 doneSent 守卫，重复调用不会重复落库）。因此收尾与路由应当
+	// 分离：`closed` 只影响**是否还需要收尾**，不影响**事件归属哪个会话**。
+	//
+	// 于是这里不再因 closed 而 return false，事件照样进子会话。这既消除了串台，
+	// 又保留了「后台子代理跨主 turn 存活」——这是 claude 的正常行为，其输出本就该
+	// 进子会话，而不是被丢弃、更不该串进主会话。
 	child.runtime.emit(update)
 	if update.Type == agenttypes.EventTypeMessageDone {
 		child.closed = true

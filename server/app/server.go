@@ -45,6 +45,10 @@ type StartOptions struct {
 	UseTLS          bool
 	CertFile        string
 	KeyFile         string
+	// PprofAddr 非空时在**独立的 loopback 端口**上开启 pprof 诊断端点
+	// （goroutine/heap/block 等），见 pprof.go。为空则完全不启动。
+	// 刻意与主监听地址分离：主地址常绑 0.0.0.0，诊断端点只允许本机访问。
+	PprofAddr string
 }
 
 type E2EEConfig struct {
@@ -193,6 +197,11 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 	services.RelayTips.Start(ctx)
 	for _, root := range services.ListRoots() {
 		services.Kanban.Schedule(root.ID)
+	}
+
+	// fork: 可选诊断端点（默认关闭）。启动失败只记日志，绝不影响主服务。
+	if pprofAddr := strings.TrimSpace(opts.PprofAddr); pprofAddr != "" {
+		StartPprofServer(ctx, pprofAddr)
 	}
 
 	go func() {

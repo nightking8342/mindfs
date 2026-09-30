@@ -110,6 +110,7 @@ func main() {
 	tlsFlag := flag.Bool("tls", false, "enable HTTPS (auto-generates self-signed cert if -cert/-key not provided)")
 	certFlag := flag.String("cert", "", "TLS certificate file (PEM); auto-generated if empty with -tls")
 	keyFlag := flag.String("key", "", "TLS private key file (PEM); auto-generated if empty with -tls")
+	pprofFlag := flag.String("pprof-addr", "", "enable the pprof diagnostic endpoint on this loopback-only address (e.g. 127.0.0.1:7767); empty disables it. Exposes Go runtime internals - never bind to a non-loopback host")
 	_ = flag.CommandLine.Parse(normalizeTaskRootFirstArgs(os.Args[1:]))
 	if *orchestrationHelp {
 		fmt.Print(taskCLIHelp)
@@ -137,7 +138,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
-	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, webPushFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag, notifyScriptFlag)
+	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, webPushFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag, notifyScriptFlag, pprofFlag)
 	internalAutoStart := autoStartBoot || *internalAutoStartFlag
 	if internalAutoStart {
 		*foreground = true
@@ -429,6 +430,7 @@ func main() {
 			UseTLS:          *tlsFlag,
 			CertFile:        resolvedCert,
 			KeyFile:         resolvedKey,
+			PprofAddr:       *pprofFlag,
 		})
 	}()
 	if err := waitForServer(*addr, *tlsFlag, 8*time.Second); err != nil {
@@ -548,6 +550,7 @@ type startupConfig struct {
 	Key           *string `json:"key"`
 	AgentConfig   *string `json:"agent-config"`
 	NotifyScript  *string `json:"notify-script"`
+	PprofAddr     *string `json:"pprof-addr"`
 }
 
 func loadStartupConfig(path string) (startupConfig, error) {
@@ -588,6 +591,7 @@ func applyStartupConfig(
 	key *string,
 	agentConfig *string,
 	notifyScript *string,
+	pprofAddr *string,
 ) {
 	if cfg.Addr != nil && !explicit["addr"] {
 		*addr = strings.TrimSpace(*cfg.Addr)
@@ -621,6 +625,9 @@ func applyStartupConfig(
 	}
 	if cfg.NotifyScript != nil && !explicit["notify-script"] {
 		*notifyScript = strings.TrimSpace(*cfg.NotifyScript)
+	}
+	if cfg.PprofAddr != nil && !explicit["pprof-addr"] {
+		*pprofAddr = strings.TrimSpace(*cfg.PprofAddr)
 	}
 }
 
