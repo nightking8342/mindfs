@@ -66,6 +66,11 @@ type SharedFileWatcher struct {
 	worktreeResolver  WorktreeResolver
 
 	done chan struct{}
+	// watchQueue hands directory-watch requests to a dedicated goroutine.
+	// fsnotify.Add blocks until the reader goroutine replies, and that reader
+	// writes into watcher.Events — so calling Add from run() (the only
+	// consumer of Events) deadlocks. WatchDir must never run on run().
+	watchQueue chan string
 }
 
 type SessionFileRecorder interface {
@@ -138,6 +143,7 @@ func NewSharedFileWatcher(root RootInfo, sessions SessionFileRecorder, worktreeR
 		pendingChanges:    make(map[string]FileChangeEvent),
 		pendingChangeDirs: make(map[string]struct{}),
 		done:              make(chan struct{}),
+		watchQueue:        make(chan string, maxWatchDirs),
 	}
 	if err := sw.WatchDir("."); err != nil {
 		if closeErr := w.Close(); closeErr != nil {
@@ -145,7 +151,34 @@ func NewSharedFileWatcher(root RootInfo, sessions SessionFileRecorder, worktreeR
 		return nil, err
 	}
 	go sw.run()
+	go sw.runWatchQueue()
 	return sw, nil
+}
+
+// runWatchQueue performs directory watches off the event-consumer goroutine.
+// WatchDir reaches fsnotify.Add, which only completes once the fsnotify reader
+// has written into watcher.Events; run() is that channel's sole consumer, so
+// watching from run() would wait on itself forever.
+func (sw *SharedFileWatcher) runWatchQueue() {
+	for {
+		select {
+		case dir := <-sw.watchQueue:
+			sw.watchNearestExistingDir(dir)
+		case <-sw.done:
+			return
+		}
+	}
+}
+
+// queueWatchDir schedules a directory watch without blocking the caller.
+// Bounded by the queue capacity; dropping a request only costs an unwatched
+// subdirectory, never a stuck scheduler.
+func (sw *SharedFileWatcher) queueWatchDir(dirRel string) {
+	select {
+	case sw.watchQueue <- dirRel:
+	case <-sw.done:
+	default:
+	}
 }
 
 func (sw *SharedFileWatcher) RegisterSession(sessionKey string) {
@@ -179,7 +212,10 @@ func (sw *SharedFileWatcher) RecordPendingWrite(sessionKey, filePath string) {
 	watchDir = parentDir(filePath)
 	sw.mu.Unlock()
 	if watchDir != "" {
-		sw.watchNearestExistingDir(watchDir)
+		// Same reason as run(): never reach fsnotify.Add on a caller that may
+		// hold up session progress. The queue goroutine walks up to an
+		// existing ancestor without blocking anyone.
+		sw.queueWatchDir(watchDir)
 	}
 }
 
@@ -393,7 +429,10 @@ func (sw *SharedFileWatcher) run() {
 					Op:     event.Op.String(),
 					IsDir:  true,
 				})
-				_ = sw.WatchDir(rel)
+				// Never call WatchDir synchronously here: it reaches
+				// fsnotify.Add, which needs this very loop to drain
+				// sw.watcher.Events before it can reply — a self-deadlock.
+				sw.queueWatchDir(rel)
 				continue
 			}
 			sw.emitFileChange(FileChangeEvent{
@@ -557,23 +596,33 @@ func (sw *SharedFileWatcher) WatchDir(dirRel string) error {
 		return nil
 	}
 	clean := filepath.Clean(dirAbs)
+	// Claim the path under the lock, but call fsnotify.Add outside it: on Windows
+	// AddWith blocks on an IOCP completion, and holding sw.mu across that call
+	// deadlocks every other user of the watcher (RegisterSession, flush, ...).
 	sw.mu.Lock()
-	defer sw.mu.Unlock()
 	select {
 	case <-sw.done:
+		sw.mu.Unlock()
 		return nil
 	default:
 	}
 	if _, ok := sw.watchedDirs[clean]; ok {
+		sw.mu.Unlock()
 		return nil
 	}
 	if len(sw.watchedDirs) >= maxWatchDirs {
+		sw.mu.Unlock()
 		return nil
 	}
+	sw.watchedDirs[clean] = struct{}{} // provisional claim; released on failure
+	sw.mu.Unlock()
+
 	if err := sw.watcher.Add(clean); err != nil {
+		sw.mu.Lock()
+		delete(sw.watchedDirs, clean)
+		sw.mu.Unlock()
 		return err
 	}
-	sw.watchedDirs[clean] = struct{}{}
 	return nil
 }
 

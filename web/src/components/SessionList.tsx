@@ -3,6 +3,8 @@ import { AgentIcon } from "./AgentIcon";
 import { ModeIcon } from "./ModeIcon";
 import { rootBadgeButtonStyle, rootBadgeStyle } from "./rootBadgeStyle";
 import { useI18n, type Locale } from "../i18n";
+// 临时诊断探针（pending），排查结束后连同调用点一起删除。
+import { logPendingValue, pendingProbeEnabled } from "../services/pendingProbe";
 
 export type SessionType = "chat" | "plugin" | "command";
 
@@ -1223,7 +1225,10 @@ function SessionCard({
   onPin,
   onRename,
   onDelete,
+  __probeSource = "list",
 }: {
+  /** 临时诊断探针（pending）：标记这个卡片的数据来自哪套列表。 */
+  __probeSource?: string;
   session: SessionItem;
   sessionByKey: Map<string, SessionItem>;
   selected: boolean;
@@ -1240,6 +1245,16 @@ function SessionCard({
   const { locale, t } = useI18n();
   const isClosed = !!session.closed_at;
   const isPinned = !!session.pinned_at;
+  // 临时诊断探针（pending）：第三处状态（会话列表呼吸灯）的取值与数据来源。
+  // 排查结束后连同 services/pendingProbe.ts 一起删除。
+  if (pendingProbeEnabled()) {
+    logPendingValue(
+      "sessionlist.dot",
+      `${session.root_id || ""}::${session.key}`,
+      { pending: session.pending, source: __probeSource },
+      { dot: !!session.pending },
+    );
+  }
   const isSubagent = !!session.parent_session_key;
   const forkSource = parseForkSessionSource(session.source);
   const isForkSession = !!forkSource;

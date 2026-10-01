@@ -378,6 +378,26 @@ func (s *TaskStore) ListTaskDetails(ctx context.Context, opts ListTasksOptions) 
 	return items, nil
 }
 
+// ListTaskIDs returns every task id in the store, unfiltered and unpaginated.
+// Clients use it to reconcile their local cache: the incremental `after` filter
+// only reports tasks that still exist, so a deletion is otherwise invisible.
+func (s *TaskStore) ListTaskIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM tasks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	return items, rows.Err()
+}
+
 func (s *TaskStore) ListQueuedTasks(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+taskSelectColumns+` FROM tasks WHERE status = ? ORDER BY created_at ASC`, StatusQueued)
 	if err != nil {

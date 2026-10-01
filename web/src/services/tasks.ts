@@ -212,6 +212,15 @@ export async function getCachedTaskDetails(rootId: string): Promise<TaskDetail[]
   }
 }
 
+// fetchTaskIds returns every task id the server currently holds for rootId.
+// The incremental `after` filter only reports tasks that still exist, so a
+// deletion is invisible to it; this is what makes reconciliation possible.
+export async function fetchTaskIds(rootId: string): Promise<string[]> {
+  const params = new URLSearchParams({ root: rootId, ids: "1" });
+  const payload = await protectedJSON<any>(appURL("/api/tasks", params));
+  return Array.isArray(payload?.ids) ? payload.ids.filter((id: unknown) => typeof id === "string") : [];
+}
+
 export async function getCachedTaskMeta(rootId: string): Promise<CachedTaskMeta | null> {
   try {
     return await withTaskStore("readonly", async ({ meta }) => {
@@ -373,6 +382,37 @@ export async function patchTask(root: string, id: string, patch: Record<string,u
 
 export async function fetchTaskDetail(root: string,id: string): Promise<TaskDetail> {
  return protectedJSON<TaskDetail>(appURL(`/api/tasks/${encodeURIComponent(id)}`,new URLSearchParams({root})));
+}
+
+// dropCachedTasksExcept removes every cached task of rootId whose id is not in
+// `keep`. Reconciliation has to delete by key with a fresh read: the cursor is
+// created before any await, so a concurrent write would otherwise mutate the
+// result set while it is being iterated.
+export async function dropCachedTasksExcept(rootId: string, keep: ReadonlySet<string>): Promise<void> {
+  try {
+    await withTaskStore("readwrite", async ({ tasks }) => {
+      const keys: string[] = [];
+      const index = tasks.index("rootId");
+      await new Promise<void>((resolve, reject) => {
+        const cursor = index.openCursor(rootId);
+        cursor.onsuccess = () => {
+          const entry = cursor.result;
+          if (!entry) {
+            resolve();
+            return;
+          }
+          if (!keep.has(String(entry.value?.taskId ?? ""))) {
+            keys.push(String(entry.value?.cacheKey ?? ""));
+          }
+          entry.continue();
+        };
+        cursor.onerror = () => reject(cursor.error || new Error("indexeddb cursor failed"));
+      });
+      for (const key of keys) {
+        if (key) await taskRequest(tasks.delete(key));
+      }
+    });
+  } catch {}
 }
 
 export async function deleteCachedTask(root:string,id:string):Promise<void> {

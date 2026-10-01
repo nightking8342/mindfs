@@ -164,6 +164,18 @@ func (h *HTTPHandler) handleKanbanTasksList(w http.ResponseWriter, r *http.Reque
 			opts.CursorTaskNumber = cursor
 		}
 	}
+	// ids=1 returns the complete id list so a client can reconcile its cache:
+	// the `after` filter below only reports tasks that still exist, so a task
+	// deleted while the client was disconnected is otherwise never noticed.
+	if r.URL.Query().Get("ids") == "1" {
+		ids, err := svc.ListTaskIDs(r.Context(), rootID)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"ids": ids})
+		return
+	}
 	items, err := svc.ListTaskDetails(r.Context(), rootID, opts)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)

@@ -295,6 +295,15 @@ func (s *Service) ListTaskDetails(ctx context.Context, rootID string, opts ListT
 	return store.ListTaskDetails(ctx, opts)
 }
 
+// ListTaskIDs returns the ids of every task under rootID.
+func (s *Service) ListTaskIDs(ctx context.Context, rootID string) ([]string, error) {
+	store, err := s.taskStore(rootID)
+	if err != nil {
+		return nil, err
+	}
+	return store.ListTaskIDs(ctx)
+}
+
 func (s *Service) GetTask(ctx context.Context, rootID, taskID string) (TaskDetail, error) {
 	store, err := s.taskStore(rootID)
 	if err != nil {

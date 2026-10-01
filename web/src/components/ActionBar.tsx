@@ -18,6 +18,8 @@ import TokenEditor, {
 } from "./editor/TokenEditor";
 import { renderToolIcon } from "./stream/ToolCallCard";
 import { useI18n, type MessageKey } from "../i18n";
+// 临时诊断探针（pending），排查结束后连同调用点一起删除。
+import { logPendingValue, pendingProbeEnabled } from "../services/pendingProbe";
 import { CompactUploadProgress } from "./CompactUploadProgress";
 import { fetchGitBranches, type GitBranchesPayload } from "../services/git";
 import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
@@ -1316,6 +1318,21 @@ export function ActionBar({
   const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && !currentSession?.key?.startsWith("pending-") && (mode === "command" || !!agent);
   const hasDraft = !!serializedInput.trim() || pendingAttachments.length > 0;
   const showCancel = !!currentSession?.pending && !!currentSession?.key && !hasDraft;
+  // 临时诊断探针（pending）：输入框右侧按钮读的是 actionBarSession，
+  // 与左下角（getSessionSnapshot）是两条独立的取值链。
+  if (pendingProbeEnabled()) {
+    logPendingValue(
+      "actionbar.button",
+      `${(currentSession as any)?.root_id || ""}::${currentSession?.key || ""}`,
+      {
+        showCancel,
+        canSend,
+        sessionPending: currentSession?.pending,
+        hasDraft,
+      },
+      { mode: showCancel ? "stop" : canSend ? "send" : "disabled" },
+    );
+  }
   const isModeLocked = !!currentSession;
 
   useEffect(() => {

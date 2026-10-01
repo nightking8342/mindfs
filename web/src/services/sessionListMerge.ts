@@ -30,7 +30,23 @@ export function mergeSessionItems<T extends PinAwareSessionItem>(
     if (!key) {
       continue;
     }
-    byKey.set(key, { ...(byKey.get(key) || ({} as T)), ...item });
+    const previous = byKey.get(key) as Record<string, unknown> | undefined;
+    // 临时诊断探针（pending）：toSessionItem 会对服务端不返回的字段显式写
+    // undefined，展开时就覆盖掉了上一轮合并进来的值。这里把「被覆盖掉 true」
+    // 的情形上报给探针——它就是「列表呼吸灯消失」的直接证据。
+    // 刻意不走 import：本文件被测试用 vm 沙箱以 CJS 方式加载，import 会让
+    // session-list-merge.test.mjs 直接报 require is not defined。
+    // 排查结束后连同 services/pendingProbe.ts 一起删除。
+    if (
+      (previous as any)?.pending === true &&
+      (item as any)?.pending === undefined
+    ) {
+      const hook = (globalThis as any).__mindfsPendingWipeHook;
+      if (typeof hook === "function") {
+        hook(`${(item as any)?.root_id || ""}::${key}`);
+      }
+    }
+    byKey.set(key, { ...(previous || ({} as T)), ...item } as T);
   }
   return Array.from(byKey.values()).sort(compareSessionItems);
 }

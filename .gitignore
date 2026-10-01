@@ -31,3 +31,6 @@ harmony/entry/src/main/resources/rawfile/public/
 # 本地部署辅助产物（见 memory: mindfs-redeploy-detached）
 /redeploy-status.txt
 /verify-deploy.ps1
+
+# 临时诊断探针的落盘目录（排查结束后删除）
+.probe-logs/

@@ -1,7 +1,7 @@
 import { TaskGroupPanel } from "./components/TaskGroupPanel";
 import { TaskCardText } from "./components/TaskCardText";
 import { AgentSelector } from "./components/AgentSelector";
-import { patchTask, fetchTaskDetail, deleteCachedTask } from "./services/tasks";
+import { patchTask, fetchTaskDetail, fetchTaskIds, deleteCachedTask, dropCachedTasksExcept } from "./services/tasks";
 import React, {
   useCallback,
   useEffect,
@@ -12,6 +12,14 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { resolveInputSession } from "./services/inputSession";
+// 临时诊断探针（pending），排查结束后连同调用点一起删除。
+import { ProbePanel } from "./components/ProbePanel";
+import {
+  logPending,
+  logPendingValue,
+  pendingProbeEnabled,
+  registerProbeSources,
+} from "./services/pendingProbe";
 import { FileEditStore, fileEditKey } from "./services/fileEditing";
 import { normalizePathForRoot, shouldRedirectToRelayNodes } from "./services/fileNavigation";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
@@ -1583,6 +1591,100 @@ export function App({ onGoHome }: AppProps) {
     Record<string, "session" | "file" | "directory" | "git-diff">
   >({});
   const drawerOpenByRootRef = useRef<Record<string, boolean>>({});
+  // 临时诊断探针（pending）：把上面几份 state 副本的即时取值暴露给采样器。
+  // 排查结束后连同 services/pendingProbe.ts 一起删除。
+  useEffect(() => {
+    if (!pendingProbeEnabled()) return;
+    registerProbeSources({
+      fetchServerView: async () => {
+        const payload = await apiProtectedJSON<any>(appPath("/api/replying-sessions"));
+        return payload?.sessions ?? payload;
+      },
+      enumerateKeys: () => {
+        const keys = new Set<string>();
+        for (const rootId of managedRootIdsRef.current) {
+          for (const key of Object.keys(sessionCacheRef.current)) {
+            if (key.startsWith(`${rootId}::`)) {
+              keys.add(key);
+            }
+          }
+          for (const sessionKey of Object.keys(pendingBySessionRef.current)) {
+            if (sessionKey.startsWith(`${rootId}::`)) {
+              keys.add(sessionKey);
+            }
+          }
+          for (const [root, session] of Object.entries(drawerSessionByRootRef.current)) {
+            const drawerKey = (session as any)?.key || (session as any)?.session_key;
+            if (root === rootId && drawerKey) {
+              keys.add(`${rootId}::${drawerKey}`);
+            }
+          }
+        }
+        const selected = selectedSessionRef.current as any;
+        const selectedKey = selected?.key || selected?.session_key;
+        if (selectedKey) {
+          const selectedRoot =
+            (selected?.root_id as string | undefined) || currentRootIdRef.current;
+          if (selectedRoot) {
+            keys.add(`${selectedRoot}::${selectedKey}`);
+          }
+        }
+        for (const item of sessionsRef.current) {
+          const itemKey = item.key || item.session_key;
+          const itemRoot =
+            (item.root_id as string | undefined) || currentRootIdRef.current;
+          if (itemKey && itemRoot) {
+            keys.add(`${itemRoot}::${itemKey}`);
+          }
+        }
+        for (const key of Object.keys(multiProjectPendingRef.current)) {
+          keys.add(key);
+        }
+        return Array.from(keys);
+      },
+      snapshot: (cacheKey) => {
+      const separator = cacheKey.indexOf("::");
+      const rootId = separator > 0 ? cacheKey.slice(0, separator) : "";
+      const sessionKey = separator > 0 ? cacheKey.slice(separator + 2) : "";
+      const cached = sessionCacheRef.current[cacheKey] as any;
+      const drawer = drawerSessionByRootRef.current[rootId] as any;
+      const selected = selectedSessionRef.current as any;
+      const selectedKey = selected?.key || selected?.session_key || "";
+      const selectedRoot =
+        (selected?.root_id as string | undefined) || currentRootIdRef.current;
+      const listItem = sessionsRef.current.find(
+        (item) => (item.key || item.session_key) === sessionKey,
+      ) as any;
+      return {
+        cache: typeof cached?.pending === "boolean" ? cached.pending : undefined,
+        drawer:
+          drawer && (drawer.key || drawer.session_key) === sessionKey
+            ? drawer.pending
+            : undefined,
+        selected:
+          selectedKey === sessionKey && selectedRoot === rootId
+            ? selected.pending
+            : undefined,
+        list: typeof listItem?.pending === "boolean" ? listItem.pending : undefined,
+        multiProject:
+          multiProjectPendingRef.current[cacheKey] === true ? true : undefined,
+        refPending: pendingBySessionRef.current[cacheKey] ? true : undefined,
+        requestPending: Object.values(pendingRequestRef.current).some(
+          (item) => item.rootId === rootId && item.sessionKey === sessionKey,
+        )
+          ? true
+          : undefined,
+        draftPending: pendingDraftRef.current
+          ? pendingDraftRef.current.rootId === rootId
+          : undefined,
+        queuedCount: (queuedMessagesBySessionRef.current[cacheKey] || []).length,
+        queueFrozen: queueFrozenBySessionRef.current[cacheKey] === true,
+        streamActive: sessionService.isSessionStreaming(sessionKey),
+        bound: boundSessionByRootRef.current[rootId] || "",
+        };
+      },
+    });
+  }, []);
   const fileCursorRef = useRef<number>(0);
   const fileScrollPositionsRef = useRef<Record<string, number>>(
     loadPersistedFileScrollPositions(),
@@ -1985,6 +2087,49 @@ export function App({ onGoHome }: AppProps) {
     }
   }, []);
 
+  // fork: 任务删除对增量同步是不可见的 —— 服务端 `after` 只返回「仍然存在」的任务，
+  // 删除既不在结果里也没有墓碑，于是「页面没连着时发生的删除」会在看板上永久残留。
+  // 这里按服务端的全量 id 列表对账，剔除本地多出来的任务；id 拉取失败时保持原样，
+  // 宁可残留也不能误删（与上游的增量语义兼容，仅当拿到确定的列表才动手）。
+  const reconcileKanbanTasks = useCallback(async (rootId: string, ids: string[]) => {
+    const keep = new Set(ids);
+    const snapshot = taskDetailsByIdRef.current;
+    const removed = Object.keys(snapshot).filter(
+      (id) => snapshot[id]?.task?.root_id === rootId && !keep.has(id),
+    );
+    if (removed.length === 0) return;
+    const removedIds = new Set(removed);
+    // 重读 ref 再删：期间可能刚有事件 apply 进来新任务，直接用上面的快照会把它抹掉。
+    const nextSnapshot = { ...taskDetailsByIdRef.current };
+    removed.forEach((id) => {
+      delete nextSnapshot[id];
+    });
+    taskDetailsByIdRef.current = nextSnapshot;
+    setTaskDetailsById((prev) => {
+      const next = { ...prev };
+      removed.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+    setKanbanTaskCountItems((prev) => prev.filter((task) => !removedIds.has(task.id)));
+    setTaskFirstInputById((prev) => {
+      const next = { ...prev };
+      removed.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+    setTaskSessionKeysById((prev) => {
+      const next = { ...prev };
+      removed.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+    void dropCachedTasksExcept(rootId, keep);
+  }, []);
+
   const loadKanbanTasks = useCallback(async (rootId?: string | null, force = false) => {
     if (!protectedAPIReady()) {
       return;
@@ -2018,12 +2163,17 @@ export function App({ onGoHome }: AppProps) {
       if (recent.length > 0) {
         applyTaskDetails(targetRoot, recent);
       }
+      try {
+        await reconcileKanbanTasks(targetRoot, await fetchTaskIds(targetRoot));
+      } catch (err) {
+        console.error("Failed to reconcile task ids:", err);
+      }
     } catch (err) {
       reportError("file.write_failed", String((err as Error)?.message || t("task.loadFailed")));
     } finally {
       setKanbanTasksLoading(false);
     }
-  }, [applyTaskDetails, t]);
+  }, [applyTaskDetails, reconcileKanbanTasks, t]);
 
   const kanbanRefreshSpin = useRefreshSpin(() => loadKanbanTasks(currentRootId));
 
@@ -5782,6 +5932,17 @@ export function App({ onGoHome }: AppProps) {
           serverPending !== undefined
             ? serverPending
             : resolvePendingForSession(targetRoot, key, preservePending);
+        // 临时诊断探针（pending）：fullSession 来自 syncSession，而 syncSession
+        // 会把 IndexedDB 里的旧 session 展开进来（withSessionMeta 是
+        // {...base, ...incoming}），所以服务端不返回 pending 时，这里仍可能
+        // 拿到缓存里残留的 true——它才是「刷新后仍显示正在生成」的关键。
+        logPending("restoreActiveSession", cacheKey, {
+          serverPending,
+          preservePending,
+          resolvedPending: pending,
+          pendingSource:
+            serverPending === undefined ? "not-from-server" : "from-server",
+        });
         const normalized = {
           ...(fullSession as any),
           key,
@@ -6606,6 +6767,15 @@ export function App({ onGoHome }: AppProps) {
         (((session as any).pending === true) ||
           (currentSessionRef.current?.key === sendSessionKey &&
             currentSessionRef.current?.pending === true));
+      // 临时诊断探针（pending）：isQueueSend 用的是发送「之前」的本地 pending，
+      // 若它误判为 true，用户刚发的这条既不会落本地 exchanges，服务端广播
+      // 又因 ExcludeClientID 排除发起方，两边都不显示。
+      logPending("send.isQueueSend", rootSessionKey(activeRoot, sendSessionKey || ""), {
+        isQueueSend,
+        sessionPending: (session as any)?.pending,
+        currentSessionPending: currentSessionRef.current?.pending,
+        hasSession: !!session,
+      });
       if (sendSessionKey && session) {
         const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";
@@ -7135,6 +7305,8 @@ export function App({ onGoHome }: AppProps) {
   const markSessionPending = useCallback(
     (rootID: string, sessionKey: string) => {
       if (!rootID || !sessionKey) return;
+      // 临时诊断探针（pending）：pending=true 的最大写入方。
+      logPending("mark.pending", rootSessionKey(rootID, sessionKey));
       const now = new Date().toISOString();
       const cacheKey = rootSessionKey(rootID, sessionKey);
       const cached = sessionCacheRef.current[cacheKey];
@@ -9453,6 +9625,15 @@ export function App({ onGoHome }: AppProps) {
       const hasQueuedContinuation =
         (queued.length > 0 && !queueFrozen) ||
         !!(hiddenQueued && hiddenQueued.size > 0);
+      // 临时诊断探针（pending）：这个早退分支是「结束了仍显示正在生成」的嫌疑点。
+      logPending("stream.done", cacheKey, {
+        wasCanceled,
+        queuedLength: queued.length,
+        queueFrozen,
+        hiddenQueued: hiddenQueued ? hiddenQueued.size : 0,
+        hasQueuedContinuation,
+        earlyReturn: hasQueuedContinuation && !wasCanceled,
+      });
       if (hasQueuedContinuation && !wasCanceled) {
         markSessionPending(rootID, sessionKey);
         return;
@@ -9617,6 +9798,12 @@ export function App({ onGoHome }: AppProps) {
       }
       const event = payload.event;
       if (!event?.type) return;
+      // 临时诊断探针（pending）：streamKey 从未被登记过 pending 时，
+      // clientside 四份副本整轮都会是空，只剩服务端权威在驱动呼吸灯。
+      logPending("stream.first", rootSessionKey(activeRoot, streamKey), {
+        eventType: event.type,
+        hasPendingDraft: !!pending,
+      });
       const markStreamPending = () => {
         if (event.type === "message_done" || event.type === "error") return;
         markSessionPending(activeRoot, streamKey);
@@ -14984,6 +15171,8 @@ export function App({ onGoHome }: AppProps) {
 
   return (
     <>
+      {/* 临时诊断面板（pending 探针），排查结束后删除这一行。 */}
+      <ProbePanel />
       <AppShell
         leftOpen={isLeftOpen}
         rightOpen={isRightOpen}

@@ -1,6 +1,8 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
+// 临时诊断探针（pending），排查结束后连同调用点一起删除。
+import { logPendingValue, pendingProbeEnabled } from "../services/pendingProbe";
 import type { TodoUpdate } from "../services/session";
 import { ThinkingBlock } from "./stream/ThinkingBlock";
 import { ToolCallCard, renderToolIcon, type ToolCallViewCache } from "./stream/ToolCallCard";
@@ -1100,6 +1102,16 @@ function SessionViewerInner({
     session?.context_window,
     isAwaiting,
   );
+  // 临时诊断探针（pending）：左下角「正在生成」区块的渲染条件。
+  // 排查结束后连同 services/pendingProbe.ts 一起删除。
+  if (pendingProbeEnabled()) {
+    logPendingValue(
+      "viewer.indicator",
+      `${(session as any)?.root_id || ""}::${sessionKey || ""}`,
+      { isAwaiting, isStreaming },
+      { visible: isAwaiting || isStreaming },
+    );
+  }
   const shouldStickToBottomRef = useRef(true);
   const lastSessionKeyRef = useRef<string | null>(null);
   const targetSeqScrollKeyRef = useRef("");
