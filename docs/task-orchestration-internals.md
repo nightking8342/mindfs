@@ -1904,6 +1904,9 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
     - **user 阶段**：落到 `task_messages.go:86-87` 的分支，注释明确「**只延续对话，不批准、不重开、不推进阶段**」。
     - 触发者不是调度器（`waiting_user` + `SchedulerAdmitted=false` 会被 `schedule()` 挡住），
       而是 `deliverTaskMessages` 挑中「inbox 里有 `StageRunID==""` 的新消息」后走 `runTask(id, true)`。
+    - ⚠️ **这里还漏记了两个后果**（`always_new` 不生效、阶段不推进详见坑 26）：
+      `-to-task` 发给 agent 阶段**不是**推进阶段的手段，误用会让任务**再也推不动**。
+      **编排查错时先看坑 26 的「可观测症状」一节。**
 
 18. **最终阶段漏设 `completed: true` 会导致交付不落盘、任务卡住**（2026-09-30 实测确认）。
     `run.Result` 只在 `action` 为 `complete` / `followup` 时被赋值（`orchestration_execution.go:403`、`:440`、`:445`）。
@@ -1982,6 +1985,612 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
     子代理只是同一会话内的执行分支，**不会**被 `claudeSubagentRouter` 当成 kanban 子任务。
     实测：方案阶段派子代理评审方案、返回结构化报告、主 agent 据此修订方案，全程正常。
     注意先读「已知坑 ②」——fork 曾修复过两个子代理路由缺陷（bash 误判、重进翻倍）。
+
+26. ⚠️⚠️ **`-to-task` 发给 agent 阶段 ≠ 推进阶段；编排者误用它会让 agent「带着上一阶段的职责」干活，且任务再也推不动**（2026-09-30 实测确认）。
+    **可观测症状（编排查错时唯一能察觉的线索）**：
+    > **agent 正在写实现代码，看板却显示它还在「方案」阶段。**
+    这是坑 17/23 叠加后的实际使用形态——**光看坑 17/23 的机制描述看不出这个症状**，所以单列一条。
+
+    **机制（三重叠加，缺一不成立）**：
+    1. `-to-task` 对 agent 阶段走 `messageTurn=true`（坑 17）。
+    2. ⚠️ **`messageTurn` 时根本不调 `EnsureAgentSession`**（`orchestration_execution.go:325-327`）：
+       ```go
+       key := t.MainSessionKey
+       if !messageTurn {
+           key, e = s.Runner.EnsureAgentSession(ctx, exec)
+       }
+       ```
+       ⇒ 坑 17 记的「复用主会话」还有两个**未被记下的后果**：
+       **① 阶段不推进**（状态机一步没动）；**② `session_reuse_policy: always_new` 不生效**
+       （`always_new` 只在 `EnsureAgentSession` 里落地，`appcontext.go` 的 `reusable(...)` 分支）。
+    3. `-next` 有守卫要求该 agent run **已交付**（`orchestration_execution.go:589-590`）：
+       ```go
+       if run.Role == RoleAgent && run.Status != StageStatusSuccess {
+           return TaskDetail{}, errors.New("agent stage has not delivered")
+       }
+       ```
+
+    **死锁形态**（本次实测踩到）：发消息 → run 变 `running` → `-next` 被拒 →
+    以为「该补充说明一下」**再发一条** → run 仍是 `running` → `-next` 永远被拒。
+    而组内任务**无回退手段**（坑 16）⇒ **该任务再也无法推进阶段**，阶段标签与实际工作量永久对不上。
+
+    **agent 为什么会真的越界写代码**：`messageTurn` 把本轮 prompt **整体替换**为消息文本（`:332`），
+    但**会话历史里阶段模板仍在**（坑 23）——于是 agent 同时看到两条冲突指令：
+    模板说「只输出方案，不要修改业务代码」，最新消息说「按方案实施」。
+    实测结果是它**按最新消息执行**：方案阶段的会话产出了 11 个新增文件 + 6 个修改文件（含 2877 行实现代码），
+    而 `current_stage_index` 仍为 1（方案）、同一 `session_key` 上堆了 3 条 `trigger: events` 的 run。
+
+    **自查清单**（判断自己是否已误用）：
+    | 检查 | 误用时的样子 |
+    |---|---|
+    | `task.current_stage_index` / `current_stage_name` | 与 agent 实际在做的事不符（如「方案」阶段在写实现） |
+    | 同一 `session_key` 上的 run 数 | **多条** `trigger: events`（正常每阶段一条） |
+    | `stage_runs.rendered_prompt` | 是**消息文本**而非阶段模板（注意坑 23：它不代表完整上下文） |
+
+    **正确用法**：**推进阶段只有 `-next` 一条路**，且必须等 `completed: true` 交付、
+    `run.Status` 变 `success` **之后**。`-to-task` 只用于「给**已在执行**的当前阶段补充/修正要求」——
+    若你**还需要推进这个阶段**，就不要用 `-to-task`。
+    **编排者纪律**：**看到 `-next` 返回 `agent stage has not delivered` 就要停下**——
+    那个报错的准确含义是「该阶段还没交付」，正确反应是**等交付**，不是换个命令继续。
+
+    **已经误用后的补救**（本次采用）：让当前轮如实交付 → `-next` 推进 →
+    **立刻** `-to-task` 把「工作区已有改动清单」交给新阶段的会话，让其**核对后补齐而非重写**。
+    ⚠️ 此时 `-to-task` 是安全的：`-next` 之后当前阶段已经变了，而你的目的本就是
+    「给**新**当前阶段补充说明」，不再需要推进它。
+    ⚠️ 代价：未实装 `auto_advance` 的阶段（如方案阶段，蓝图模板 `auto_advance=false`）
+    交付后会停在 `waiting_user`，且新阶段的 `always_new` 会话只拿到 `{previous_input}` +
+    `plan-{n}.md`（坑 10/26），**不知道代码已写了一半** ⇒ 不交接就是白白重做。
+
+    **与相邻坑的分工**：坑 17 讲「`-to-task` 对两个角色行为不同」、坑 23 讲「prompt 被替换但历史仍在」、
+    坑 16 讲「无回退手段」——**本条讲的是三者叠加后编排者会看到的症状与自救路径**。
+
+27. ⚠️⚠️ **`agent_session_error` 会让调度器【永久跳过】该任务，而清除它没有 CLI 入口**（2026-09-30 实测确认）。
+    **可观测症状**：
+    > 任务 `status='fail'`（或 `waiting_user` 但 `aux_session_error` 非空）⇒ **`-run-now`、`-to-task` 全都无效**，
+    > 任务像"死"了一样，看板上状态也不再变化。
+
+    **写入路径**（`service.go:1039-1057`，`markManagedFailure`）：agent 会话**抛出任何错误**时
+    ```go
+    task.Status = StatusWaitingUser          // ← 注意不是 fail
+    task.AuxFlags.SessionError = message     // ← 真正的锁
+    run.Status = StageStatusFail
+    ```
+    ⚠️ 两个来源：**模型 API 错误**（如 `400 ... invalid_request_error`）与**会话启动失败**。
+    服务端把它广播成 `agent_session_error` 事件，且**不区分**「外部 API 挂了」与「agent 写错了」——
+    编排者看任务 `fail` 时，**先分辨是哪种**（`block_reason` / `aux_session_error` 的内容是线索）。
+
+    **为什么它是硬锁**（`service.go:776`，`schedule()` 核心循环里那一行）：
+    ```go
+    if task.SchedulerAdmitted || isTerminalStatus(task.Status) || task.Status != StatusQueued ||
+       strings.TrimSpace(task.AuxFlags.SessionError) != "" {
+        continue                              // ← SessionError 非空 ⇒ 永久跳过，且【无重试】
+    }
+    ```
+    这是**唯一**用 `SessionError` 做判据的地方，也是它成为硬锁的原因：清不掉它，任务永远不会被重新调度。
+
+    **清除路径只有两条**：
+    | # | 路径 | 触发条件 | 可用性 |
+    |---|---|---|---|
+    | 1 | `UpdateCurrentInput`（`service.go:372-375`） | 需**传新的 `Input`**（`stage_input_updated`） | ⚠️ HTTP 有路由 `POST /api/tasks/{id}/input`，但 **CLI 没封装**（`cli/cmd/task_operations.go` 只实现了 `GET /api/tasks/{id}`）⇒ **命令行不可用** |
+    | 2 | 直接改库 `tasks.aux_session_error=''` | —— | ✅ 实测可行 |
+
+    ⚠️ **字段是 `NOT NULL`** —— 必须写**空串**，写 `NULL` 会 `IntegrityError: NOT NULL constraint failed`（实测踩过）。
+
+    **实测恢复步骤**（本次两个任务都靠它救回；备份 `task-kanban.db.bak-*` 后再动）：
+    ```sql
+    -- 1) 若最新 run 是 fail、而【上一条 run 已 success】，把那条多余的 fail 标回 success
+    --    ⚠️ 前提：fail 那条是"重复触发"造成的、零产出。若它真的干了活，先读 result。
+    UPDATE stage_runs SET status='success' WHERE id='<fail 的 run id>';
+    -- 2) 清锁
+    UPDATE tasks SET status='running', scheduler_admitted=0,
+                     aux_session_error='', block_reason='' WHERE id='<task id>';
+    -- 3) 标记会重放的旧消息为已处理（否则重跑时原样重放，可能再撞一次同样的错误）
+    UPDATE task_events SET handled_at='<now>' WHERE receiver_task_id='<task id>' AND handled_at='';
+    ```
+    之后 `-next` 即可推进。⚠️ **第 3 步易漏**：`Inbox` 只取
+    `receiver_task_id=<task id> AND handled_at=''`（`orchestration_store.go:140`），
+    而 `-messages` 看到的是**另一组**（`task_id` 匹配、`receiver_task_id<>''`）——
+    **两者不重合**，用 `-messages` 判断"有没有待重放的消息"会得出错误结论。
+
+    **编排者纪律**：看到 `agent_session_error` 时，**不要**急着 `-to-task` 催它重跑 ——
+    若 `SessionError` 没清，重跑同样会被调度器跳过。**先确认它是否为空。**
+    另外：**API 错误不代表 agent 的判断有错**，不要把这类失败归因到任务内容上
+    （本次两个任务的方案/实现/验收产出**全部完好**，坏的只有调度状态）。
+
+---
+
+## G. 一次真实编排的实操记录（2026-09-30 ~ 10-01）
+
+> **素材**：用「蓝图」模板跑一个真实任务组 —— 4 个任务 / 2 层依赖 /
+> 每个任务独立 worktree + 分支，主题是给一个 Android 项目的 Xposed 通道加「能力调用」执行侧。
+> 最终 **3 个任务 `success`、1 个仍在跑**，共产出 ~15 个提交、~5000 行改动、**28 处真机暴露的缺陷修复**。
+>
+> ⚠️ **本章的定位**：前六章是**源码考证**（读代码得出的机制），本章是**实操复盘**
+> （跑出来的问题）。两者的价值不同 —— 前者告诉你「机制是什么」，
+> 后者告诉你「**按文档正确地用，仍然会撞上什么**」。
+> 本章的每一条都附**具体现象 + 根因 + 最小改法**，可直接排期。
+
+---
+
+### G1. ⚠️⚠️ 模板问题：`auto_advance` 的三值分布，让「谁该推进」变成必须先查的事
+
+**蓝图模板的四个阶段，`auto_advance` 是 `false/true/false` 混合的**：
+
+| 位置 | 阶段 | role | `auto_advance` | 推进者 |
+|---|---|---|---|---|
+| 0 | 需求 | user | — | 发布时自动（`moveTo(1)`） |
+| 1 | 方案 | agent | **false** | ⚠️ **父会话 `-next`** |
+| 2 | 实现 | agent | **true** | ✅ 系统自动（agent 交付即推） |
+| 3 | 验收 | agent | **false** | 终态，无需推 |
+
+⇒ **同一个模板里，「推进」这件事有三种不同的承担者**，而**模板描述里看不到** ——
+`-task-templates` 的输出只给 `name` 与 `prompt_template`，**不给 `auto_advance`**
+（它在 `stages[].snapshot.auto_advance` 里，要自己读 JSON）。
+
+**实测代价**：本次任务组里，T1/T2/T3 的「实现→验收」是自动推的（没管就过去了），
+而「方案→实现」**必须人工推** —— 我连续 10 轮都在方案阶段打转，**正是因为没意识到这一格**。
+
+**最小改法（两条，任一即可）**：
+1. `-task-templates` 的输出**在每个阶段旁标注 `auto_advance`**（它是「谁负责推进」的唯一依据）；
+2. 或在 `-orchestration` 的父会话流程里补一句：
+   **「推进 agent 阶段的 `auto_advance=false` 时要自己 `-next`；`=true` 时不要动」**。
+
+> 本次出错后才意识到：**`-from-task completed:true` 是 agent 的动作（「我干完了」），
+> `-next` 是父会话的动作（「往下走」）** —— 两者是**两步**，缺一不可。
+> 而 `auto_advance=true` 时服务端替你做了第二步（`orchestration_execution.go:466`
+> 在 `action == "stage_done"` 且 `AutoAdvance` 时调 `advanceManagedStage`）。
+
+---
+
+### G2. ⚠️⚠️ 模板问题：「蓝图」的方案阶段要求「只输出方案」，但**父会话一发消息它就会做实现**
+
+**这不是 agent 越权，是模板与前文坑 26 的交互**：
+
+方案阶段的 `prompt_template` 里写着「**只输出方案，不要修改业务代码**」，
+而 `-to-task` 的消息会**整体替换本轮 prompt**（坑 23/26）——
+于是 agent 的上下文里同时有两条冲突指令：
+
+```
+① 模板（还在会话历史里）：「只输出方案，不要改代码」
+② 最新消息（此刻的 prompt）：「按方案实施」        ← 父会话说的
+```
+
+**实测结果**：它**按最新消息执行**。本次方案阶段的会话产出了
+**5 个 commit 的完整实现**（含新 capability + 选择器换源 + 缺陷修复），
+而 `current_stage_index` 仍是 **1（方案）**。
+
+⚠️ 而**父会话的措辞往往是「顺手」写的** —— 我写「接下来请按方案实施」时，
+本意是「**方案**里描述的实施步骤要注意什么」，它读成「**现在**去实施」。
+
+**最小改法（两条）**：
+1. **父会话纪律**：给**方案阶段**发消息时，**不要出现「实施/实现/开始做」这类动词** ——
+   它们在方案阶段是**歧义**的。要它改方案就写「改方案」。
+2. **模板可考虑加一句**：方案阶段结尾提示「本阶段结束前**不要**修改业务代码；
+   若收到含『实施』字样的消息，请先确认是否已推进到实现阶段」。
+
+---
+
+### G3. ⚠️⚠️ 模板问题：「蓝图」没有「任务已存在产出」的交接机制
+
+**现象**：当任务因为任何原因（误用 `-to-task`、`agent_session_error`、人来推进）
+**跳过了某阶段的正常执行**时，新阶段的会话看不到**已存在的工作区改动**。
+
+```mermaid
+flowchart LR
+  A[方案阶段<br/>产出了实现代码] -->|父会话 -next| B[实现阶段<br/>新建会话]
+  B --> C{它知道代码<br/>已经写好了吗？}
+  C -->|不知道| D[「读 plan-4.md<br/>然后实现」<br/>⇒ 重写一遍]
+```
+
+**根因**：实现阶段的 `prompt_template` 第一句是
+「**读取 `.mindfs/tasks/plan-{n}.md`** —— 这是唯一允许的方案查找动作」，
+而它**不包含**「检查工作区已有改动」这一步。新会话（`always_new`）拿到的是
+**干净的上下文 + 一份方案文件**，对「worktree 里已有 5 个 commit」一无所知。
+
+**本次的应对**（父会话手动补）：`-next` 之后**立刻** `-to-task` 交接，
+内容为「已有 commit 清单 + 直接交付不要重跑」。
+
+⚠️ **但这个应对有两个问题**：
+1. **有时序风险** —— `-next` 后调度器**立刻**启动新会话，消息可能晚到
+   （虽然会进 inbox、下一轮读到时生效，但最坏情况是它已开始重写）；
+2. **依赖父会话记得** —— 没有机制保证。
+
+**最小改法（建议）**：实现阶段的 `prompt_template` 里**加一步前置检查**，
+类似「**在开始之前，先 `git log` / `git status` 看本 worktree 是否已有改动；
+若有，说明前一阶段已产出，请核对补齐而非重写**」。
+这与该模板已经有的一条纪律同源（交付说明必须含「与方案的偏差及原因」）——
+**它本来就在防「闷头重做」**。
+
+---
+
+### G4. ⚠️ 模板问题：验收阶段不产出提交，但**任务成功与否的判据在它手上**
+
+**现象**：验收阶段的 agent 做完独立复核后，**只交付一份「结论：通过/不通过」的报告**，
+**不产生任何 commit**（这是对的 —— 验收不该改代码）。
+
+但它带来一个**父会话视角的盲区**：任务 `success` 时，
+**工作区里是「实现阶段的产物」**，而父会话**无从得知那份产物是否已被验收认可** ——
+除非去读验收阶段的 `result` 文本。
+
+**本次的实现**：验收结论写得非常详细（逐条核对 + 独立反证），
+所以读 `-result` 足够。但这是**该 agent 写得好**，不是**机制保证的**。
+
+**最小改法**：任务的最终 `result`（验收阶段）**结构化** ——
+至少含 `{verdict: pass|fail, evidence: [...], rework_items: [...]}`，
+这样父会话可以**程序化判断**，不必读自然语言。
+
+---
+
+### G5. ⚠️⚠️ MindFS 问题：`-to-task` 用于 agent 阶段 = **重跑一轮**，且**不推进阶段**（本次最大的坑）
+
+**这是已知坑 17/23/26 的**实操形态** —— 我读过它们、还写过坑 26，**然后自己又犯了 10 次**。
+
+**现象**：
+
+```
+T4 的 stage_runs: 13 条，其中 10 条 trigger=events（全是 -to-task 触发的）
+current_stage_index: 恒为 1（方案）
+```
+
+**代价**：
+1. 每发一条消息 ⇒ **方案阶段重跑一轮**（10 轮 = 10 次完整的 agent 启动）
+2. agent 在**方案阶段**写起了实现代码（见 G2）
+3. `-next` 永远被拒（`run.Status` 是 `running` 而非 `success`）
+4. 我**从未试过 `-next`** —— 被拒一次之后就改用 `-to-task`「继续沟通」，从此再没回来
+
+**根因（源码）**：
+```go
+// task_messages.go:83-85 —— -to-task 对 agent 阶段
+return s.executeManagedTurn(ctx, store, task, tmpl, true)   // messageTurn=true
+// orchestration_execution.go:325-327 —— messageTurn 时不建新会话
+key := t.MainSessionKey
+if !messageTurn { key, e = s.Runner.EnsureAgentSession(ctx, exec) }
+```
+⇒ **阶段不推进 + `always_new` 不生效**（两者同一个根因）。
+
+**最小改法（这是**产品级**的建议，不是文档级）**：
+
+> **`-to-task` 发给「当前阶段是 agent 且该 run 尚未交付」的任务时，应当拒绝或警告。**
+
+理由：那种情况下，父会话的**真实意图**几乎不可能是「让这个还没交付的阶段再跑一轮」——
+它要么是「补要求」（那也该等交付后），要么是「推进」（那该用 `-next`）。
+**当前设计让它静默地做了一件父会话没预期的事**，而这正是本仓库最忌讳的失败形态。
+
+⚠️ **次优改法（文档级）**：在 `-orchestration` 的 CLI 用法里，
+把 `-to-task` 的说明从「向任务发送用户消息」改成
+**「向**已交付**的当前阶段补充要求；若要推进阶段请用 `-next`」**。
+
+---
+
+### G6. ⚠️⚠️ MindFS 问题：`-next` 被拒的错误信息**没告诉父会话该怎么办**
+
+**现象**：
+```bash
+$ mindfs ... -task <id> -next vflow
+task operation failed: agent stage has not delivered
+```
+
+**问题**：这句话只说「**没交付**」，没说：
+- 「**所以你该等**（而不是换个命令继续）」
+- 「**换命令继续会导致什么**」（= 重跑一轮且永不推进，即 G5）
+
+**实测后果**：我看到这个错、在总结里写了「`-next` 被拒绝是正确行为，我不再重复推进」，
+**然后紧接着就用 `-to-task` 把「进入实现」当消息发了出去** ——
+因为那个报错**只否定了我的动作，没告诉我替代动作是什么**。
+
+**最小改法**：错误信息补一句：
+```
+agent stage has not delivered —— 该阶段还在运行中。
+请等待它通过 -from-task 交付（completed: true），再用 -next 推进。
+⚠️ 不要用 -to-task 代替推进：那会让本阶段重跑一轮且状态不变。
+```
+
+---
+
+### G7. ⚠️ MindFS 问题：`agent_session_error` 造成**死锁**，而解锁手段**不在 CLI 里**
+
+**现象**：任务是 `fail` 状态，`-run-now` / `-to-task` **全都无效**。
+
+**根因（源码）**：
+```go
+// service.go:776 —— schedule() 核心循环
+if task.SchedulerAdmitted || isTerminalStatus(task.Status) || task.Status != StatusQueued ||
+   strings.TrimSpace(task.AuxFlags.SessionError) != "" {
+    continue          // ← SessionError 非空 ⇒ 永久跳过，且【无重试】
+}
+```
+
+**问题**：清 `SessionError` 的**唯一官方路径是 `UpdateCurrentInput`**
+（`service.go:372-375`，传新 `Input` 时顺带清），
+而它的 HTTP 路由 `POST /api/tasks/{id}/input` **在 CLI 里没有封装**
+（`cli/cmd/task_operations.go` 只实现了 `GET /api/tasks/{id}`）。
+⇒ **命令行用户遇到这个状态就无路可走**，只能直接改 SQLite。
+
+⚠️ 而且 `aux_session_error` 是 **`NOT NULL`** —— 写 `NULL` 会
+`IntegrityError: NOT NULL constraint failed`（本次实测踩过），必须写**空串**。
+
+**最小改法**：给 CLI 加一个 `-task <id> -clear-error`（或让 `-update --input` 可用），
+把所有「有官方路径但 CLI 没封装」的状态复位操作补上。
+
+**本次的实际恢复步骤**（供参考，已实测有效）：
+```sql
+UPDATE stage_runs SET status='success' WHERE id='<那条多余的 fail run>';
+UPDATE tasks SET status='running', scheduler_admitted=0,
+                 aux_session_error='', block_reason='' WHERE id='<task id>';
+UPDATE task_events SET handled_at='<now>' WHERE receiver_task_id='<task id>' AND handled_at='';
+```
+⚠️ **第 3 步易漏**：`Inbox` 只取 `handled_at=''` 且 `receiver_task_id=<task id>` 的事件，
+不清就会被**原样重放**（包括那条导致失败的消息）。
+
+---
+
+### G8. ⚠️ MindFS 问题：**上游产出对下游不可见**（worktree 是隔离的，但任务语义上不该隔离）
+
+**现象**：T2 的方案里写着「T1 已改 `CapabilityInvocation.kt`、本任务只使用」，
+但实测 **T2 的 worktree 里根本没有那份改动** —— T1 的产出**在它自己的分支上、未提交**。
+
+**根因**：每个任务独立 worktree + 独立分支，而**任务之间没有「上游产出可见」的机制**：
+
+```mermaid
+flowchart TB
+  A[a7c54135 基线] --> B[task-1 分支<br/>T1 产出未提交]
+  A --> C[task-2 分支<br/>看不到 T1]
+  A --> D[task-3 分支<br/>看不到 T1/T2]
+  B -.->|"父会话手动 git apply"| C
+```
+
+**任务的 `depends_on` 只管「**何时**能开始」（调度解锁），**不管「能看到什么」**。
+
+**本次的三个应对（都不理想）**：
+| 任务 | 应对 | 代价 |
+|---|---|---|
+| T2 | 自己 `git diff` + `git apply` T1 的改动 | 依赖 agent 自己发现 |
+| T3 | 把接口面**收敛到 `dev` 上已合入的契约层**，绕开上游产出 | 只能绕，不能复用 |
+| T4 | 全程「孤儿分支」，报告里专门列了一节「本 worktree 不含上游任何代码」 | 反复解释 |
+
+**最小改法**：
+- **上游任务交付后自动提交**（而不是把未提交的工作区留在那里）—— 本次 T1 的产出
+  一直未提交，是**根因**；
+- 或**下游任务创建时，从 `depends_on` 的分支拉 worktree**（而不是从主干）——
+  这样依赖关系在**文件系统层面**也成立。
+
+---
+
+### G9. ⚠️ MindFS 问题：`-to-task` 提交的**大正文会触发模型 API 错误**，且**归因不明**
+
+**现象**：T2 的一轮触发返回
+```
+API Error: 400 {"message":"a single path expansion cannot exceed 512 candidates ..."}
+```
+任务被判 `fail`（走了 G7 的死锁路径）。
+
+**观察**：那次 `-to-task` 的交付正文是 **87.9 KB**（agent 把它自己的交付说明当消息发了），
+`-from-task` 的返回里出现 `<persisted-output> Output too large (87.9KB)`。
+
+⚠️ **这条我只观察到相关性，**未**验证因果** —— 但值得记下：
+- 大正文的 `-to-task` / `-from-task` 是**可疑触发源**；
+- 而它失败后的表现是 **任务 `fail` + G7 死锁**，
+  父会话拿到的是一句**与任务内容无关的 API 错误**，**极易误判成「agent 写错了」**。
+
+**最小改法（建议）**：
+1. **CLI 侧**：`-to-task` / `-from-task` 的正文**超过某个阈值时警告**（或提示改用文件）；
+2. **服务端侧**：把「传输层/模型 API 错误」与「任务内容失败」在事件里**区分开**
+   （`agent_session_error` 目前把两者混在一个字段里）。
+
+---
+
+### G10. 不方便的地方：**没有「任务组全景」的单次查询**
+
+**要做的事**：判断「4 个任务各自在哪一阶段、谁卡住了、下一步该谁动」。
+
+**现在要跑 4~5 条命令**：
+```bash
+mindfs <root> -tasks                    # 列表（默认 20 条/页）
+mindfs <root> -task <id> -status        # 逐个查阶段
+mindfs <root> -task <id> -result        # 逐个读交付
+mindfs <root> -task-group <gid> -graph  # 依赖图
+```
+
+**痛点**：
+- `-tasks` 是**按创建时间倒序、全项目混排**的，**不按任务组聚合**；
+- `-task-group <gid> -graph` 给的是**依赖图**，不含各任务的**阶段与状态**；
+- 所以「哪些任务需要我 `-next`」这件事**必须逐个 `-status` 才知道**。
+
+**建议**：`-task-group <gid> -status` 返回一个**每任务一行**的表：
+`编号 / 标题摘要 / 阶段 / 状态 / 是否等我推进 / 最新交付摘要`。
+
+⚠️ 这条的**实际代价**：本次我因为**看不到「谁在等我 `-next`」**，
+才让 T4 在方案阶段空转了 10 轮。
+
+---
+
+### G11. 不方便的地方：**阶段推进状态与「看板」不一致时，没有诊断命令**
+
+**现象**：T4 已经产出了 5 个 commit 的实现，而看板显示「方案 / 运行中」。
+
+**排查过程**（我自己拼的）：
+```bash
+sqlite3 task-kanban.db "SELECT stage_index,status,trigger FROM stage_runs WHERE task_id='...'"
+# ⇒ 发现 13 个 run 全在 stage_index=1、trigger=events
+```
+
+⇒ 才明白「`-to-task` 重跑了 10 轮」。
+
+**建议**：加 `-task <id> -runs`（或在 `-status` 里加一段），列出**该任务的全部 stage_run**：
+`阶段 / 状态 / trigger / 起止时间 / 交付长度`。
+**「同一阶段有多条 `trigger=events` 的 run」就是误用 `-to-task` 的铁证** ——
+这是坑 26 自查清单里那条，但它**只能靠手写 SQL 看到**。
+
+---
+
+### G12. 不方便的地方：`-orchestration` 的指南**没问题，但「按它做完仍会踩坑」**
+
+**这次的实际感受**：我把 `-orchestration` 的输出读全了，
+也读了本文档的坑 17/23/26，**仍然**犯了 G5 那个错。
+
+**为什么？** 因为指南与已知坑描述的是**机制**（「`-to-task` 对 agent 阶段会重跑一轮」），
+而**父会话需要的是一句行为指令**：
+
+| 现在有的（机制） | 缺失的（行为） |
+|---|---|
+| 「`-to-task` 对 agent 阶段行为不同」 | **「要推进就用 `-next`，别用 `-to-task`」** |
+| 「messageTurn 会整体替换 prompt」 | **「阶段。补要求」** |
+| 「组内任务无回退手段」 | **「所以误用后要立刻改用 `-next`，不要继续发消息」** |
+
+**建议**：在 `-orchestration` 的「父会话：编排与验收」流程里，
+**用祈使句写那条最关键的纪律**（现在是散在「已知坑」里的描述性文字）：
+
+> **第 N 步 · 推进阶段**：agent 交付后（`completed: true`），
+> 用 `-next` 推进到下一阶段。⚠️ **`-to-task` 不能推进阶段** ——
+> 它会让当前阶段**重跑一轮**，状态不变。**若 `-next` 报 `has not delivered`，
+> 说明它还没交付 —— 继续等，不要改用 `-to-task`。**
+
+---
+
+### G13. 发现的 bug（产品级，建议排期）
+
+| # | 现象 | 根因 | 严重度 |
+|---|---|---|---|
+| 1 | **`-to-task` 静默重跑阶段，不推进** | 设计如此（坑 26），但**对父会话是陷阱**：`messageTurn=true` 时不调 `EnsureAgentSession`（`orchestration_execution.go:325-327`） | ⚠️⚠️ **高**（本次 10 轮空转） |
+| 2 | **`-next` 被拒的报错不告诉替代动作** | 错误信息只否定、不指引 | ⚠️ **中**（我因此改用了错误的命令） |
+| 3 | **`SessionError` 死锁且 CLI 无解锁入口** | `service.go:776` 是唯一判据，清除路径只在 `UpdateCurrentInput`（HTTP 有、CLI 无） | ⚠️⚠️ **高**（任务卡死） |
+| 4 | **`aux_session_error` 是 `NOT NULL`** | schema 限制；写 `NULL` 会 `IntegrityError` | ⚠️ 低（但直接改库时会绊） |
+| 5 | **进程重启把在跑任务判 `fail`** | 已知坑 8（`recovery.go:33-45`）；本次因 API 错误 + 重启叠加触发 | ⚠️ **中** |
+| 6 | **上游产出对下游不可见** | 任务独立 worktree + 无「交付即提交」约束 | ⚠️⚠️ **高**（三个任务各自绕） |
+| 7 | ⚠️⚠️ **`-to-task` 无法指定阶段** ⇒ 返工要求必然投给「当前阶段的会话」（本次落在**验收者**手里，它因此动手改代码，**损坏了验收的独立性**） | `taskMessageTarget` 从 `CurrentStageIndex` 起往回找；**组内任务更直接回落到 `MainSessionKey`**（= 最后阶段的会话）。**详见 G13b** | ⚠️⚠️ **高**（返工场景必然命中） |
+
+---
+
+### G13b. ⚠️⚠️ MindFS 缺口：`-to-task` **无法指定阶段** ⇒ 返工要求必然投给「当前阶段的会话」
+
+> ⚠️ **本条是本次实操里最后才查清的** —— 而我**先自我归因「我发错了」、查源码后才发现是机制问题**。
+> 这个「先下结论后查证据」的顺序本身就是教训（本次第三个同类错误），记在下文「五」里。
+
+#### 一、投递规则（源码 `task_messages.go:122-144`）
+
+```go
+func taskMessageTarget(ctx, store, task, tmpl) (string, StageTemplate, error) {
+    stage := tmpl.Stages[task.CurrentStageIndex].Snapshot   // ← 从【当前阶段】起
+    for i := task.CurrentStageIndex; i >= 0; i-- {         // ← 只往回找
+        if tmpl.Stages[i].Snapshot.Role != RoleAgent { continue }
+        stage = tmpl.Stages[i].Snapshot
+        if task.GroupID == "" {                            // ⚠️ 只有【独立任务】走这里
+            run, _ := store.LatestStageRun(ctx, task.ID, i)
+            if run.SessionKey != "" { return run.SessionKey, stage, nil }
+        }
+        break
+    }
+    return strings.TrimSpace(task.MainSessionKey), stage, nil  // ← 组内任务落到这里
+}
+```
+
+**两件事**：
+
+| 任务类型 | 投给谁 |
+|---|---|
+| **独立任务** | `CurrentStageIndex` **或它之前最近的一个** agent 阶段的会话 —— **无法投给更早的（已过去的）阶段** |
+| **组内任务** | ⚠️ **完全不看阶段** —— 一律投给 **`task.MainSessionKey`** |
+
+而 `MainSessionKey` 在组内任务上**会被更新成最后一个阶段的会话**。本次实测：
+
+```
+T4  current_stage_index = 3（验收）
+    main_session_key     = 1790835279-15d3c27c6105
+    而那个 key 正是【验收阶段】的 session_key    ← 逐字相同
+```
+
+⇒ **返工要求必然落到验收者手里，不管父会话怎么写。**
+
+#### 二、为什么这在**返工场景**下必然出问题
+
+**返工要求天然是「针对某个已完成阶段的产出」的**：
+
+```
+「实现阶段的产出有缺陷，请修」  ← 期望投给【实现阶段】的会话
+                              ↓ 实际
+投给【当前阶段】= 验收阶段的会话
+```
+
+而**验收阶段的本分是「独立复核、不改代码」**（这是它存在的全部意义 ——
+模板里明确写着「不要轻信交付说明，独立验证」）。
+⇒ **把改代码的指令发给验收者，职责被污染了**：它从「复核者」变成了「同为作者」。
+
+⚠️ **这与「验收独立性」这个设计目标是直接冲突的** ——
+一个已经动手改过代码的会话，**无法再对自己的改动做独立验收**。
+
+#### 三、本次的实际发生
+
+| 步骤 | 现象 |
+|---|---|
+| 整体验收 | 发现 T4 的 `itemsFromLossless` 恒返回空（③ 的无损结果进不了选择器） |
+| 父会话 | 用 `-to-task` 发返工要求 |
+| 投递结果 | ⚠️ 落到**验收阶段**的会话（`MainSessionKey`） |
+| 后果 | 验收者**开始改代码**（`CapabilityInvoker.kt` + `ShortcutPickerFallbackTest.kt` 出现未提交改动） |
+
+⇒ 用户裁决「接受现状」（它已基本改完），但**这个缺口本身要修**。
+
+#### 四、可行的改法（三选一）
+
+| # | 改法 | 评价 |
+|---|---|---|
+| **1** | **`-to-task` 加可选 `stage` 参数**（如 `-to-task <id> -stage 2`），指定投给哪个阶段的会话 | ✅ **最直接** —— 返工场景明确知道「要修哪个阶段」 |
+| **2** | **为组内任务启用「按阶段选会话」**（把 `if task.GroupID == ""` 那个条件去掉） | ⚠️ 治了「组内任务不看阶段」，但**独立任务仍无法投给更早阶段** |
+| **3** | **加一条「重开某阶段」的命令**（`-reopen <id> -stage N`）：把 `CurrentStageIndex` 移回去、复用原会话 | ✅ 语义最干净（返工本质就是「重开那个阶段」）；⚠️ 但要注意坑 16（组内任务无回退手段）—— 这条命令**恰好也是那个缺口的解法** |
+
+> ⚠️ **改法 3 同时解决另一个问题**：坑 16 记着「组内任务 `-prev`/`-jump` 被静默拒绝 ⇒ 无回退手段」。
+> 而「返工 = 重开某阶段」这个需求，与「回退到某阶段」是**同一件事** ——
+> 一个 `-reopen` 能同时覆盖两者。
+
+#### 五、⚠️ 我的归因错误（**顺序错**，值得单独记）
+
+**我的第一反应是「我发错了对象」** —— 立刻写了一段自我批评（「我犯了第二个错，而且比第一个更隐蔽」），
+**然后才去查源码**。查完发现：**按机制，我无论怎么发都会落到验收者那里**。
+
+⇒ **这是本次第三个「先下结论、后查证据」的错误**，前两个是：
+
+| # | 我的结论 | 真相 |
+|---|---|---|
+| 1 | 「T2 没救了，从 CLI 无恢复路径」 | ❌ 读反了 `deliverTaskMessages` 的守卫布尔；实际 `fail` 会被自动改回 `running` |
+| 2 | 「方案 B 可以跳过实现阶段」 | ❌ 没读 `moveTo`；实际 agent 阶段一定会被启动 |
+| 3 | **「我把返工要求发错了阶段」** | ❌ 没先读 `taskMessageTarget`；实际是**机制不支持指定阶段** |
+
+⚠️ **共同点：三个都是「现象看着像我的操作失误」⇒ 我立刻归因到操作，没先问「机制允许吗」**。
+
+**这条纪律值得写进来**（它与本文档 §2 那条「排查顺序应为先时序/状态 → 再能力/权限 → 最后平台行为」
+是同源的，只是对象从「系统行为」换成了「**我自己的操作**」）：
+
+> **当操作结果与预期不符时，先查「这个操作在机制上**能不能**做到预期」，
+> 再归因「我是不是写错了」。** —— 否则会把**机制缺口**误记成**个人失误**，
+> 而后者会让你去「更小心地做同一件事」，前者才需要**改机制/提 issue**。
+
+### G14. 一次成功的部分：**值得保留的做法**
+
+> ⚠️ 本章全是问题，容易读成「这个编排不能用」。**实际上它跑通了** ——
+> 4 个任务、2 层依赖、共产出 ~5000 行改动 + 28 处真机缺陷修复。
+> 以下几条是**做对了**、值得在别的编排里复用：
+
+| 做法 | 为什么有效 |
+|---|---|
+| **每个任务独立 worktree + 分支** | 四个任务并行改同一批文件（`CapabilityFallbacks.kt` 甚至 add/add 冲突），**没有一次互相踩**。最后合并时冲突面小且**可预测**（提前算出「哪几个文件两边都改」） |
+| **方案阶段强制「先探针再实现」** | 本次探针**推翻了方案的核心【推断】**（`LocalServices` 里没有 `ShortcutService`）—— 如果直接实现，会写完才发现路径不通 |
+| **模板自带「交付说明必须含反证记录」** | 各任务的反证做得很实（改回 bug 版本确认变红）。**真机验证**又补上了单测测不到的那一层（发现 3 处单测全绿但真机失败的缺陷） |
+| **父会话做真机端到端**（agent 无设备） | agent 交付时标「真机未验证」，父会话用 adb 补 —— 这一层**发现了 3 个真机专属缺陷**（含一个「校验对象错位」的字节口径 bug） |
+| **共享上下文写清「上游已就绪的东西」** | 各任务没有重复造已有的契约层 —— 这直接省掉了大量重复劳动 |
+
+---
+
+### G15. 本章与已知坑的对应关系
+
+| 本章条目 | 对应已知坑 | 增量价值 |
+|---|---|---|
+| G5 | 坑 17 / 23 / 26 | **10 轮空转的量化 + 产品级改法建议** |
+| G6 | 坑 26 的「编排者纪律」 | **从「该停下」推进到「报错信息该怎么写」** |
+| G7 | 坑 27 | **补「CLI 无解锁入口」这一层** |
+| G1 / G2 / G3 / G4 | **无** | 模板层的问题，此前未记录 |
+| G8 | 坑 19（worktree 相关） | **任务间可见性**，此前未记录 |
+| G9 | 无 | **大正文与 API 错误的可疑关联**，证据等级【观察】 |
+| G10 / G11 / G12 | 无 | 可观测性与文档形态的建议 |
+| **G13b** | **无**（且**同时是坑 16 的解法**） | **`-to-task` 无「指定阶段」能力** —— 返工天然要「针对某已完成阶段」，而消息只投给「此刻的阶段」；建议的 `-reopen <id> -stage N` **可同时补上坑 16 的「组内任务无回退手段」** |
 
 ---
 
