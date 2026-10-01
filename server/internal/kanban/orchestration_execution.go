@@ -586,8 +586,25 @@ func (s *Service) nextManaged(ctx context.Context, in MoveInput) (TaskDetail, er
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	if run.Role == RoleAgent && run.Status != StageStatusSuccess {
-		return TaskDetail{}, errors.New("agent stage has not delivered")
+	// fork: an empty Result means the agent never delivered. finishManagedRun
+	// records the run as `success` either way, so the status check alone let
+	// -next advance past an undelivered stage and carry that empty Result into
+	// the next stage's Input (`{previous_input}` rendered blank, silently).
+	// Observed in the vFlow task group: a run with result_len=0, followed by
+	// user_approved, followed by a stage-2 run with an empty Input.
+	// Delivery always leaves a non-empty Result, because -from-task rejects an
+	// empty message ("message required"), so this is a faithful proxy.
+	// fork: the message below used to be a bare "agent stage has not delivered",
+	// which only denied the action without saying what to do instead. In the
+	// vFlow task group the parent session read it, concluded "wrong command",
+	// and spent 10 turns on -to-task -- which re-runs the stage without ever
+	// advancing it. Error text that only negates is a documented failure mode
+	// here (see docs/task-orchestration-internals.md G6/G12).
+	if run.Role == RoleAgent && (run.Status != StageStatusSuccess || strings.TrimSpace(run.Result) == "") {
+		if run.Status == StageStatusRunning {
+			return TaskDetail{}, errors.New("agent stage has not delivered yet - the agent is still working. Wait for it to report with -from-task (completed: true), then run -next again. Do not substitute -to-task: it re-runs the current stage and never advances it.")
+		}
+		return TaskDetail{}, errors.New("agent stage has not delivered - the agent finished its turn without reporting. Send it a message with -to-task to ask for the delivery, then run -next. Do not use -to-task to advance: only -next advances a stage.")
 	}
 	d, err := s.moveTo(ctx, store, t, tmpl, t.CurrentStageIndex+1, "user_approved", StageStatusApproved, in.Reason)
 	if err == nil {

@@ -1702,33 +1702,41 @@ setKanbanTasks(allTemplatesSelected ? filtered : filtered.filter(isUnfinishedKan
 
 ### F25. 「CLI 需 `-addr` + `-tls` 且 root 必须是第一个参数；服务是否注入环境变量让 CLI 自动找到地址？」
 
+> **当前结论（2026-10-01 修订）**：`-addr` 与 `-tls` **均可省略**（同机同用户前提下）；root 位置约束仍有效（首/末均可，居中失败）；CLI 仍未从环境变量取地址。
+
 **逐项实测（源码确证 + 本机验证）**：
 
-| 说法 | 判定 | 证据 |
+> ⚠️ **本节结论已于 2026-10-01 修订**。原文的「需要 `-addr`」「需要 `-tls`」两条在上游 v0.5.4 与本 fork 的启动配置回落落地后**均已不成立**，详见下方「修订」小节。上表保留当时的判定与证据以便追溯。
+
+| 说法 | 判定（撰写时） | 证据 |
 |---|---|---|
-| 需要 `-addr` | ✅ **成立**（本机部署端口是 7766，默认 7331） | `mindfs.go:78` 默认 `127.0.0.1:7331`；实测 `mindfs -task-templates` 报 `dial tcp 127.0.0.1:7331: connectex: No connection could be made...` |
-| 需要 `-tls` | ✅ **成立**（本机 `-tls` 开启） | `$USERPROFILE/.mindfs/config.json` 里 `"tls": true`；不带 `-tls` 会走 http 而服务是 https |
+| 需要 `-addr` | ✅ 成立（本机部署端口是 7766，默认 7331） | `mindfs.go:78` 默认 `127.0.0.1:7331`；实测 `mindfs -task-templates` 报 `dial tcp 127.0.0.1:7331: connectex: No connection could be made...` |
+| 需要 `-tls` | ✅ 成立（本机 `-tls` 开启） | `$USERPROFILE/.mindfs/config.json` 里 `"tls": true`；不带 `-tls` 会走 http 而服务是 https |
 | root 必须是第一个参数 | ❌ **不成立** | `normalizeTaskRootFirstArgs` 会把开头的 root 挪到末尾（`mindfs.go:932-940`），而 **root 放末尾同样可用**（实测 `mindfs -addr 127.0.0.1:7766 -tls -task-templates` 成功；`mindfs -addr ... -tls -task-templates mindfs` 也成功）。**但 root 放中间会失败**（实测 `mindfs -addr 127.0.0.1:7766 mindfs -tls -task-templates` 被当成「启动服务 + 添加受管目录」）。 |
-| 服务注入环境变量让 CLI 自动找地址 | ❌ **没有** | 全仓 `MINDFS_*` 环境变量只有：`MINDFS_STATIC_DIR`（`server.go:32`）、`MINDFS_AGENTS_CONFIG`（`agent/config.go:14`）、`MINDFS_RELAY_BASE_URL`（`relay/manager.go:66`）、`MINDFS_DAEMON`/`MINDFS_INTERNAL_RESTART`（`mindfs.go:34-35`）、`MINDFS_SHELL`（`autostart.go:194`）。**没有任何 addr 类变量**。 |
+| 服务注入环境变量让 CLI 自动找地址 | ❌ **没有**（至今仍成立） | 全仓 `MINDFS_*` 环境变量只有：`MINDFS_STATIC_DIR`（`server.go:32`）、`MINDFS_AGENTS_CONFIG`（`agent/config.go:14`）、`MINDFS_RELAY_BASE_URL`（`relay/manager.go:66`）、`MINDFS_DAEMON`/`MINDFS_INTERNAL_RESTART`（`mindfs.go:34-35`）、`MINDFS_SHELL`（`autostart.go:194`）。**没有任何 addr 类变量**。 |
 
 **真正让 CLI 免鉴权的机制是「按 addr 索引的本地 token 文件」**（源码确证）：
 
 ```go
-// server/app/server.go:177-182
+// server/app/server.go:178-186（v0.5.4 起多带一个 useTLS 参数）
 defer listener.Close()
-localCLIToken, err := EnsureLocalCLIToken(addr)
+localCLIToken, err := EnsureLocalCLIToken(addr, opts.UseTLS)
 if err != nil { return err }
 httpHandler.LocalCLIToken = localCLIToken
 ```
 
 ```go
-// server/app/local_cli_token.go:105-130
-func localCLITokenStorePath() (string, error) {
+// server/app/local_cli_token.go
+type localCLITokenStore struct {           // :19-22
+	Tokens map[string]string `json:"tokens"`
+	TLS    map[string]bool   `json:"tls,omitempty"`   // v0.5.4 新增
+}
+func localCLITokenStorePath() (string, error) {     // :125-131
 	dir, err := config.MindFSConfigDir()
 	...
 	return filepath.Join(dir, "local-cli-tokens.json"), nil
 }
-func localCLITokenKey(addr string) string {
+func localCLITokenKey(addr string) string {          // :133-153
 	...
 	if strings.TrimSpace(host) == "" || host == "0.0.0.0" || host == "::" { host = "127.0.0.1" }
 	if strings.TrimSpace(port) == "" { port = "7331" }
@@ -1736,23 +1744,57 @@ func localCLITokenKey(addr string) string {
 }
 ```
 
-本机文件实测内容：
+本机文件实测内容（2026-10-01）：
 
 ```json
 { "tokens": {
-  "127.0.0.1:7331": "SXN2RpiVffmERo_...",
-  "127.0.0.1:7766": "-EfydgeTSD8g-_E8X...",
+  "127.0.0.1:7331": "K44Ranmte239vzmu...",
+  "127.0.0.1:7766": "nMv4LWuCHlAuzMbM...",
+  "127.0.0.1:7799": "lqzV0n2x-HijthGI..."
+}, "tls": {
+  "127.0.0.1:7331": false,
+  "127.0.0.1:7766": true,
+  "127.0.0.1:7799": true
 } }
 ```
 
-CLI 用同一个 `-addr` 查表（`task_operations.go:61-63` → `app.ReadLocalCLIToken(addr)`），再带 `X-MindFS-Local-CLI-Token`（`task_operations.go:163`）。
+CLI 用同一个 `-addr` 查表（`task_operations.go:61` → `app.ReadLocalCLIToken(addr)`），再带 `X-MindFS-Local-CLI-Token`（`task_operations.go:163`）。
 
-**一条重要补充**：`mindfs` CLI **不会**自动读 `~/.mindfs/config.json`（只有显式 `-config <path>` 才会，`mindfs.go:521-535` + `applyStartupConfig` 的 `explicit` 判断 `560`）。所以任务会话里跑的 agent 必须按文档显式写 `-addr` / `-tls`。当前仓库唯一的正确记录在 fork 文档里：
+#### 修订（2026-10-01）：`-addr` 与 `-tls` 都已可省
 
+两条路径分别覆盖了「地址」与「传输」两个信息，合起来使得 CLI 在**同机同用户**下无需任何 flag：
+
+| 曾经的必需项 | 现在靠什么免除 | 源码 |
+|---|---|---|
+| `-addr` | `-config` 未显式传时，回落到 `config.MindFSConfigDir()/config.json`，其中的 `"addr": "0.0.0.0:7766"` 由 `applyStartupConfig` 填入（受 `explicitFlags` 保护，显式 `-addr` 仍优先） | **fork 独有**：`cli/cmd/mindfs.go:120-141` + `server/app/startup_config_path.go` |
+| `-tls` | `resolveClientTLS` 第四档：从 `local-cli-tokens.json` 的 `tls` 字段读服务真实传输 | 上游 v0.5.4：`cli/cmd/mindfs.go:872-883` |
+
+`resolveClientTLS` 的四档优先级（上游 v0.5.4，`mindfs.go:872-883`）：
+
+```go
+func resolveClientTLS(addr string, useTLS, configured bool) (bool, error) {
+	if strings.HasPrefix(addr, "https://") { return true, nil }    // ① URL scheme 明示
+	if strings.HasPrefix(addr, "http://")  { return false, nil }   // ① URL scheme 明示
+	if configured { return useTLS, nil }                            // ② -tls / config.json
+	return app.ReadLocalCLITLS(addr)                                // ③ 本地 token 库记录
+}                                                                  // ④ 库中无记录 → 退化为 HTTP
 ```
-docs/blueprint-template-requirements.md:100
-5. **CLI 调用姿势**：`mindfs <root> -addr 127.0.0.1:7766 -tls -<操作>`
-```
+
+**2026-10-01 本机复测**（全部退出码 0）：
+
+| 命令 | 结果 |
+|---|---|
+| `mindfs -task-templates` | ✅ 成功（不带任何 flag） |
+| `mindfs -tasks mindfs` | ✅ 成功（鉴权路径，需 CLI token） |
+| 在 `/tmp` 下执行 `mindfs -agents` | ✅ 成功（证明回落路径不依赖 cwd） |
+| `mindfs -addr 127.0.0.1:7331 -tasks mindfs` | ❌ `connection refused` —— 反证 config.json 的 7766 确实生效 |
+
+**两个未完全解除的前提**：
+
+1. **服务必须用含新代码的版本启动过一次**。`tls` 字段由服务端在 `EnsureLocalCLIToken` 时写入；旧版写入的库里没有该字段，此时 `ReadLocalCLITLS` 返回 `false`，退化为 HTTP，仍需显式 `-tls`。
+2. **限同机同用户**。默认配置路径取决于 `config.MindFSConfigDir()`，靠的是「服务端与 CLI 共用同一个 `%AppData%\mindfs`」。跨用户、跨机器，或服务并非用该 `config.json` 启动时，仍会退回硬编码的 `127.0.0.1:7331`。
+
+因此：**本机任务模板里的 agent 提示词可以不写 `-addr` / `-tls`**；对外分发的文档仍建议带上。fork 文档 `docs/blueprint-template-requirements.md` 的「CLI 调用姿势」已按此更新。
 
 ### F26. 「`applyTaskOverrides` 的 `break` 是否意味着任务级 agent/model 覆盖只作用于第一个 agent 阶段？」
 
@@ -2109,6 +2151,10 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
 > （跑出来的问题）。两者的价值不同 —— 前者告诉你「机制是什么」，
 > 后者告诉你「**按文档正确地用，仍然会撞上什么**」。
 > 本章的每一条都附**具体现象 + 根因 + 最小改法**，可直接排期。
+>
+> 🔴 **2026-10-01 复核**：本章于当日做过一次**逐条回源码复核**，结果见 **§G16**。
+> 15 条中 **7 条完全成立、5 条需修正措辞、3 条不成立**（已就地标注，未删除原文）。
+> **排期前请先读 §G16** —— 尤其是 G13b，原稿的三个改法方向是错的。
 
 ---
 
@@ -2123,17 +2169,28 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
 | 2 | 实现 | agent | **true** | ✅ 系统自动（agent 交付即推） |
 | 3 | 验收 | agent | **false** | 终态，无需推 |
 
-⇒ **同一个模板里，「推进」这件事有三种不同的承担者**，而**模板描述里看不到** ——
-`-task-templates` 的输出只给 `name` 与 `prompt_template`，**不给 `auto_advance`**
-（它在 `stages[].snapshot.auto_advance` 里，要自己读 JSON）。
+⇒ **同一个模板里，「推进」这件事有三种不同的承担者**。
+
+> ⚠️ **2026-10-01 复核：原断言「`-task-templates` 的输出不给 `auto_advance`」不成立。**
+> 该命令的输出就是 `stages[].snapshot` 的**完整 JSON**，`auto_advance` 字面就在其中：
+> `cli/cmd/task_operations.go:165-172` 用 `io.Copy` 把服务端响应**原样**吐到 stdout，
+> CLI 侧零裁剪；`types.go:36-48` 的 `AutoAdvance` 也没有 `json:"-"`。
+> 实测 `./mindfs.exe -task-templates` 的蓝图条目里 `"auto_advance":false|true` 一览无余。
+>
+> **但本条要说的真问题仍然成立，只是定性不同**：这不是「信息缺失」，而是
+> **认知负荷** —— 数据就在输出里，但埋在一大坨原始 JSON 中，**没有任何提示告诉你「这一格要人工推」**。
+> 因此最小改法不应该是「把 `auto_advance` 加进输出」（它本来就在），
+> 而应该是「**让它显眼**」：格式化输出、或按下面第 2 条写进行为指令。
 
 **实测代价**：本次任务组里，T1/T2/T3 的「实现→验收」是自动推的（没管就过去了），
 而「方案→实现」**必须人工推** —— 我连续 10 轮都在方案阶段打转，**正是因为没意识到这一格**。
 
 **最小改法（两条，任一即可）**：
-1. `-task-templates` 的输出**在每个阶段旁标注 `auto_advance`**（它是「谁负责推进」的唯一依据）；
+1. `-task-templates` 的输出**从原始 JSON 改为格式化表格**，在每个阶段旁标注
+   `auto_advance` 与「谁负责推进」（数据已有，缺的是可读性）；
 2. 或在 `-orchestration` 的父会话流程里补一句：
-   **「推进 agent 阶段的 `auto_advance=false` 时要自己 `-next`；`=true` 时不要动」**。
+   **「推进 agent 阶段的 `auto_advance=false` 时要自己 `-next`；`=true` 时不要动」**
+   （这条更重要 —— 见 G12：指南全篇从没教过父会话「用 `-next` 推进」）。
 
 > 本次出错后才意识到：**`-from-task completed:true` 是 agent 的动作（「我干完了」），
 > `-next` 是父会话的动作（「往下走」）** —— 两者是**两步**，缺一不可。
@@ -2144,16 +2201,43 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
 
 ### G2. ⚠️⚠️ 模板问题：「蓝图」的方案阶段要求「只输出方案」，但**父会话一发消息它就会做实现**
 
-**这不是 agent 越权，是模板与前文坑 26 的交互**：
+**这不是 agent 越权，是 messageTurn 主动丢弃了阶段框架**（坑 23/26）。
 
 方案阶段的 `prompt_template` 里写着「**只输出方案，不要修改业务代码**」，
 而 `-to-task` 的消息会**整体替换本轮 prompt**（坑 23/26）——
 于是 agent 的上下文里同时有两条冲突指令：
 
 ```
-① 模板（还在会话历史里）：「只输出方案，不要改代码」
+① 模板（只在会话历史里）：「只输出方案，不要改代码」
 ② 最新消息（此刻的 prompt）：「按方案实施」        ← 父会话说的
 ```
+
+⚠️ **2026-10-01 复核：替换的语义比本文原稿描述的更激进。**
+替换发生在 `orchestration_execution.go:332-333`：
+
+```go
+if len(inbox) > 0 && (messageTurn || (key == t.MainSessionKey && run.Trigger == "events")) {
+    prompt = taskMessagesPrompt(inbox)
+}
+```
+
+而 `taskMessagesPrompt`（`task_messages.go:147-153`）**只是把 inbox 各条正文用 `\n\n` 连起来**，
+没有任何标题、来源或阶段标记。替换**前**已经拼装好的内容（`:280-321`）被**整体丢弃**：
+
+| 被丢弃的段落 | 行号 |
+|---|---|
+| 阶段模板渲染结果 `stage.PromptTemplate` | `:280` |
+| workflow 提示（`-from-task` / `completed:true`） | `:282-283` |
+| `## 本轮要求`（`run.Input`） | `:284-285` |
+| `## 共享上下文`（`g.ProjectContext`） | `:292-293` |
+| `## 前置任务 <id> (<status>)`（上游 Result） | `:300-313` |
+| **`## 父会话消息`** | `:319-321` |
+
+**注意最后一条**：父会话消息**本来就会**通过 `## 父会话消息` 进入 prompt。
+所以这个替换**没有增加任何东西**，它只做了一件事 —— **把上面六段全部删掉**。
+
+⇒ **agent 收到的不是「两条冲突指令」，而是一段没有任何来源与阶段标记的裸文本。**
+它无法从 prompt 判断「这是谁说的、我此刻在哪个阶段」，只能去会话历史里考古。
 
 **实测结果**：它**按最新消息执行**。本次方案阶段的会话产出了
 **5 个 commit 的完整实现**（含新 capability + 选择器换源 + 缺陷修复），
@@ -2162,11 +2246,24 @@ fatal: 'feat' is already used by worktree at 'C:/Users/WHY/AppData/Local/Temp/gi
 ⚠️ 而**父会话的措辞往往是「顺手」写的** —— 我写「接下来请按方案实施」时，
 本意是「**方案**里描述的实施步骤要注意什么」，它读成「**现在**去实施」。
 
-**最小改法（两条）**：
-1. **父会话纪律**：给**方案阶段**发消息时，**不要出现「实施/实现/开始做」这类动词** ——
+**为什么长会话必失效**：会话历史里**确实还有**那条模板（resume 时 agent 自己带着上下文），
+上游注释也明说了这是刻意的省 token（`task_messages.go:146`：
+*"Existing conversations already contain execution identity and project context."*）。
+但约束在最远处，`-to-task` 每开一轮讨论就把它往后推一格 ——
+「多次讨论方案」正是本条的触发条件。
+
+**最小改法（三选一，按代价排序）**：
+
+1. **模板层（零上游 diff）**：在阶段 `prompt_template` 里加一句自查 ——
+   「每轮开始先 `mindfs -task <id> -status` 确认 `current_stage_index`，再决定是否动手」。
+   把「考古」换成「查一下」。与 G12 同源。
+2. **父会话纪律**：给**方案阶段**发消息时，**不要出现「实施/实现/开始做」这类动词** ——
    它们在方案阶段是**歧义**的。要它改方案就写「改方案」。
-2. **模板可考虑加一句**：方案阶段结尾提示「本阶段结束前**不要**修改业务代码；
-   若收到含『实施』字样的消息，请先确认是否已推进到实现阶段」。
+3. **代码层（改上游，需登记 FORK.md）**：删除 `orchestration_execution.go:332-333` 的替换。
+   消息照旧走 `:319-321` 的 `## 父会话消息` 进入，**不会重复**，
+   而模板 / workflow / 上下文 / 前置任务全部保留。
+   代价：每轮 messageTurn 重发整个阶段模板（蓝图方案阶段约 1.5–2k token，
+   且不在前缀位置、吃不到 prompt cache）——**这大概正是上游当初这么写的理由**。
 
 ---
 
@@ -2234,6 +2331,16 @@ current_stage_index: 恒为 1（方案）
 
 **代价**：
 1. 每发一条消息 ⇒ **方案阶段重跑一轮**（10 轮 = 10 次完整的 agent 启动）
+
+> ⚠️ **2026-10-01 复核：重跑成立，但「⇒ 新建一条 stage_run」不是无条件的。**
+> `orchestration_execution.go:271-278`：
+> ```go
+> if run.Status != StageStatusPending {
+>     run = StageRun{ID: newID("run"), ..., Trigger: "events", ...}
+> }
+> ```
+> 只有最新 run **不是 `pending`** 时才新建；仍为 `pending` 时**复用**（此时连新 run 都不消耗）。
+> 本次 13 条 run 中 10 条是 `trigger=events`，与「已交付/在跑的 run 状态是 success/running/fail，均非 pending」一致。
 2. agent 在**方案阶段**写起了实现代码（见 G2）
 3. `-next` 永远被拒（`run.Status` 是 `running` 而非 `success`）
 4. 我**从未试过 `-next`** —— 被拒一次之后就改用 `-to-task`「继续沟通」，从此再没回来
@@ -2285,6 +2392,14 @@ agent stage has not delivered —— 该阶段还在运行中。
 ⚠️ 不要用 -to-task 代替推进：那会让本阶段重跑一轮且状态不变。
 ```
 
+> ✅ **2026-10-01 已实施（fork）**。`nextManaged` 的拒绝信息改为**按 run 状态分两种**：
+> 仍在跑 → 「等它交付后重跑 `-next`」；已结束未交付 → 「先用 `-to-task` 催交付，再 `-next`」。
+> 两种都显式警告「**不要用 `-to-task` 代替推进**」。
+> 回归测试 `undelivered_next_test.go` 里加了断言固化这一点
+> （报错必须含 `-to-task`，否则失败）——把「只否定不指引」这个毛病挡在测试层。
+> 同时 `cli/cmd/orchestration_help.md` 补上了父会话流程的推进步骤与 `-next` / `-prev` 命令项
+> （原「任务操作」表只有 `cancel` / `delete`）。详见 FORK.md。
+
 ---
 
 ### G7. ⚠️ MindFS 问题：`agent_session_error` 造成**死锁**，而解锁手段**不在 CLI 里**
@@ -2300,11 +2415,55 @@ if task.SchedulerAdmitted || isTerminalStatus(task.Status) || task.Status != Sta
 }
 ```
 
-**问题**：清 `SessionError` 的**唯一官方路径是 `UpdateCurrentInput`**
+**问题**：清 `SessionError` 的**无条件**路径只有 `UpdateCurrentInput`
 （`service.go:372-375`，传新 `Input` 时顺带清），
 而它的 HTTP 路由 `POST /api/tasks/{id}/input` **在 CLI 里没有封装**
-（`cli/cmd/task_operations.go` 只实现了 `GET /api/tasks/{id}`）。
-⇒ **命令行用户遇到这个状态就无路可走**，只能直接改 SQLite。
+（`cli/cmd/task_operations.go` 只打到 `PATCH /api/tasks/{id}`，无 `/input` 路径）。
+⇒ 命令行用户**看似**无路可走。
+
+> 🔴 **2026-10-01 二次复核：结论推翻 —— `-to-task` 就能恢复,不需要改 SQLite。**
+> 关键在 `deliverTaskMessages`（`task_messages.go:15-65`）走的是**另一条路**：
+> ```go
+> s.runTask(task.RootID, task.ID, true)   // :63
+> ```
+> 它**完全绕过** `service.go:776` 那组检查——不看 `SchedulerAdmitted`、不看终态、
+> **更不看 `SessionError`**；只挡「已在运行」(`:29`)和「消息不是 fresh」(`:43`)。
+> 再加上任何用户消息都会经 `appcontext.go:918` → `ClearTaskAuxFlagsForSession`
+> 把 `session_error` 一并清空（`appcontext.go:940-950` 清 5 个字段含 `SessionError: ""`）。
+> ⇒ **`-to-task` 发一条消息即可恢复执行。CLI 有路,只是指南没写。**
+>
+> **真正需要人工介入的是另一种情况：任务已进入终态**（`success` / `fail` / `cancelled`）。
+> `isTerminalStatus`（`task_store.go:753-759`）覆盖这三者，`RunNow` 对其直接 return、不复活。
+> 原稿描述的「死锁」更可能属于这一类，而非它归因的 `session_error`。
+>
+> ⚠️ **连带更正原稿的三步 SQL 恢复说明**：第 2 步把 `status` 改回 `running` 并清
+> `aux_session_error`，原稿解释为「清 SessionError」——**这个解释是错的**，
+> `-to-task` 本来就会清。它真正的作用是把任务**从终态拉回可调度状态**。
+>
+> **结论**：本条**不需要改代码**。vFlow 现场已被那次 SQL 恢复覆盖
+> （`aux_session_error` 全为空），无法回溯验证；修正后的判断是
+> 「`-to-task` 是官方恢复手段，缺的是文档」。改进动作应落在
+> `cli/cmd/orchestration_help.md`（补一句：报 `agent_session_error` 后用 `-to-task` 恢复）。
+
+> ⚠️ **2026-10-01 复核：「唯一」需限定为「唯一*无条件*」。**
+> 全仓清空 `AuxFlags.SessionError` 的位置至少有 5 类：
+> `service.go:344`（`UpdateCurrentInput` 的 create_worktree 分支）、
+> `service.go:372-375`（主分支）、`service.go:877`（worktree 建成后）、
+> `service.go:1256`（`moveTo` → `-next`/`-prev`/`-jump` 全部走这里）、
+> `appcontext.go:940-950`（会话侧自动清，任何用户消息 `OnStart` 触发）。
+>
+> **但这些条件路径都到不了本场景**：`-next` 要求 `run.Status == success`（正是这里卡住的地方）；
+> 而 CLI **确实有** `-update`（`task_operations.go:22` → `PATCH /api/tasks/{id}` → `PatchTask`），
+> 只是 `PatchTask` 的门槛把它挡在门外（`orchestration.go:137-140`）：
+> ```go
+> config := p.Input != nil || p.Agent != nil || ...
+> if config && (t.MainSessionKey != "" || t.SchedulerAdmitted || t.CurrentStageIndex != 0 || ...) {
+>     return errors.New("execution configuration can only change before first execution")
+> }
+> ```
+> 卡死任务恰恰满足 `MainSessionKey != ""` / `CurrentStageIndex != 0`，**必被拒绝**。
+> ⇒ **原结论成立**：CLI 无可用入口。只是准确表述应为
+> 「唯一的*无条件*清空点未封装」而非「唯一清空点」。
 
 ⚠️ 而且 `aux_session_error` 是 **`NOT NULL`** —— 写 `NULL` 会
 `IntegrityError: NOT NULL constraint failed`（本次实测踩过），必须写**空串**。
@@ -2341,6 +2500,13 @@ flowchart TB
 
 **任务的 `depends_on` 只管「**何时**能开始」（调度解锁），**不管「能看到什么」**。
 
+> ⚠️ **2026-10-01 复核：一处措辞需精确化 —— 基线不是「主干」。**
+> `gitview.go:475-498` 组出的命令是 `git worktree add [-b <branch>] <path> [<branch>]`，
+> **不传 start-point**，故基线是 `repoRoot` **当时检出的 HEAD**。
+> 实测 vflow：主工作树在 `dev` 分支，所以四个任务是**从 `dev` 拉起**的，不是从 `main`。
+> 效果上仍是「共同基线」，但**这个基线取决于主工作树当时的检出分支** ——
+> 若主树切到了别的分支再建任务，基线就会跟着变。文档原稿写作「从主干拉」不够准确。
+
 **本次的三个应对（都不理想）**：
 | 任务 | 应对 | 代价 |
 |---|---|---|
@@ -2372,10 +2538,22 @@ API Error: 400 {"message":"a single path expansion cannot exceed 512 candidates 
 - 而它失败后的表现是 **任务 `fail` + G7 死锁**，
   父会话拿到的是一句**与任务内容无关的 API 错误**，**极易误判成「agent 写错了」**。
 
-**最小改法（建议）**：
-1. **CLI 侧**：`-to-task` / `-from-task` 的正文**超过某个阈值时警告**（或提示改用文件）；
-2. **服务端侧**：把「传输层/模型 API 错误」与「任务内容失败」在事件里**区分开**
-   （`agent_session_error` 目前把两者混在一个字段里）。
+> 🔴 **2026-10-01 复核：因果已基本排除，报销本条结论（保留记录以便追溯）。**
+> 三条独立证据全部落在反方：
+> 1. **尺寸对不上**：`to-task` 的服务端正文上限是 **4 MiB**
+>    （`http_task_orchestration.go:59` 的 `io.LimitReader(r.Body, 4<<20)`），87.9 KB 差了 45 倍；
+> 2. **那句话不是 MindFS 的**：全仓搜 `persisted-output` / `Output too large`
+>    **零命中** —— 那是 **Claude Code 自己的**输出管理机制，与 MindFS 无关；
+> 3. **错误串来源不明**：`a single path expansion cannot exceed 512 candidates`
+>    在 MindFS 源码、以及 `codex-go-sdk` / `claude-agent-sdk-go` / `acp-go-sdk`
+>    三个 fork 的模块缓存里**都搜不到**，不是本仓库或其直接依赖产生的。
+>
+> **保留价值**：本条示范了一种正确的失败记录方式 ——
+> 「只观察相关性、显式标注未验证」。这个方法值得沿用；
+> **但结论必须撤回**，否则会引出一个无事可做的改进项（往 `-to-task` 加尺寸警告）。
+>
+> **仍成立的部分（转入 G13 表）**：**`agent_session_error` 把传输层错误与任务内容失败混在同一个字段里**，
+> 导致父会话拿到的错误与任务内容无关、极易误判。这一条与尺寸无关，独立成立。
 
 ---
 
@@ -2392,11 +2570,21 @@ mindfs <root> -task-group <gid> -graph  # 依赖图
 ```
 
 **痛点**：
-- `-tasks` 是**按创建时间倒序、全项目混排**的，**不按任务组聚合**；
-- `-task-group <gid> -graph` 给的是**依赖图**，不含各任务的**阶段与状态**；
-- 所以「哪些任务需要我 `-next`」这件事**必须逐个 `-status` 才知道**。
+- `-tasks` 是**按创建时间倒序、全项目混排**的，**不按任务组聚合**（`task_store.go:318-320`）；
+- 所以「哪些任务需要我 `-next`」这件事**没有一个可读的地方能看到**。
 
-**建议**：`-task-group <gid> -status` 返回一个**每任务一行**的表：
+> ⚠️ **2026-10-01 复核：原断言「`-graph` 不含各任务的阶段与状态」不成立 —— 数据在，只是没渲染。**
+> `groups.go:126-152` 的 `Tasks` 填充的是**完整 `TaskDetail`**（`types.go:148-152` = `Task` + `StageRuns` + `Events`），
+> 实测每个 task 都带着 `current_stage_index` / `status` / `current_stage_name` / `current_stage_status`
+> 以及全部 stage_run。之所以「看起来只有依赖图」，是因为 CLI 两侧都是 `io.Copy` 原样输出，
+> **一大坨原始 JSON 淹没了字段**。
+>
+> 因此「需要 4~5 条命令」也不成立：**单独一条 `-task-group <gid> -graph` 的响应里就全有了**。
+> 另注 `view=status` 与不传 view 走的是同一个 fall-through（`http_task_groups.go:45-56`
+> 只特判 `context` / `messages`），响应完全相同。
+
+**建议**：问题从「缺数据」修正为「**缺渲染**」——
+`-task-group <gid> -status` 返回一个**每任务一行**的表：
 `编号 / 标题摘要 / 阶段 / 状态 / 是否等我推进 / 最新交付摘要`。
 
 ⚠️ 这条的**实际代价**：本次我因为**看不到「谁在等我 `-next`」**，
@@ -2416,10 +2604,20 @@ sqlite3 task-kanban.db "SELECT stage_index,status,trigger FROM stage_runs WHERE 
 
 ⇒ 才明白「`-to-task` 重跑了 10 轮」。
 
-**建议**：加 `-task <id> -runs`（或在 `-status` 里加一段），列出**该任务的全部 stage_run**：
-`阶段 / 状态 / trigger / 起止时间 / 交付长度`。
+> ⚠️ **2026-10-01 复核：查询能力其实已经有，缺的只是渲染。**
+> `-task <id> -status` → `GET /api/tasks/{id}` → `GetDetail` →
+> `ListStageRuns`（`task_store.go:472-487`）**显式 SELECT 了 `trigger` 与 `result` 字段，且无 LIMIT**。
+> 实测 `-task 4 -status vflow` 返回 493 KB，`stage_runs` 15 条齐全，
+> `stage_index / role / status / trigger / result / rendered_prompt` 逐条都在
+> —— **无需 SQLite**。
+>
+> 所以本条的准确表述是「**无*人可读*的诊断输出**」，不是「无查询能力」。
+> 顺带修正原稿举例：那个任务实际是 15 条 run（非 13 条）。
+
+**建议**：加 `-task <id> -runs`（或在 `-status` 里加一段），把**已有的** stage_run 数据
+**渲染成人可读的形式**：`阶段 / 状态 / trigger / 起止时间 / 交付长度`。
 **「同一阶段有多条 `trigger=events` 的 run」就是误用 `-to-task` 的铁证** ——
-这是坑 26 自查清单里那条，但它**只能靠手写 SQL 看到**。
+这是坑 26 自查清单里那条，现在它淹没在 493 KB 的原始 JSON 里。
 
 ---
 
@@ -2436,6 +2634,18 @@ sqlite3 task-kanban.db "SELECT stage_index,status,trigger FROM stage_runs WHERE 
 | 「`-to-task` 对 agent 阶段行为不同」 | **「要推进就用 `-next`，别用 `-to-task`」** |
 | 「messageTurn 会整体替换 prompt」 | **「阶段。补要求」** |
 | 「组内任务无回退手段」 | **「所以误用后要立刻改用 `-next`，不要继续发消息」** |
+
+> 🔍 **2026-10-01 复核：本条成立，而且比原稿写的更严重。**
+> 实测 `cli/cmd/orchestration_help.md` 全文 **288 行**，搜 `-next` **只有一处命中**，
+> 且是 `-cursor` 分页的 `next_cursor`（`:33`、`:49`）——
+> **指南从来没有教过父会话「用 `-next` 推进阶段」**。
+>
+> 同时 `:230` 又**明确写了**「`same_stage` 和 `always_new` 均继续已有会话，
+> 不因发送消息而新建会话，**也不修改完成状态或推进阶段**」。
+>
+> ⇒ 父会话读到的是一句**否定**（「`-to-task` 不推进」）而**没有替代动作**。
+> **这与 G6 抱怨的错误信息是同一个毛病 —— 系统只否定、不指引**，
+> 只不过 G6 在运行时、这里在文档层。
 
 **建议**：在 `-orchestration` 的「父会话：编排与验收」流程里，
 **用祈使句写那条最关键的纪律**（现在是散在「已知坑」里的描述性文字）：
@@ -2455,9 +2665,10 @@ sqlite3 task-kanban.db "SELECT stage_index,status,trigger FROM stage_runs WHERE 
 | 2 | **`-next` 被拒的报错不告诉替代动作** | 错误信息只否定、不指引 | ⚠️ **中**（我因此改用了错误的命令） |
 | 3 | **`SessionError` 死锁且 CLI 无解锁入口** | `service.go:776` 是唯一判据，清除路径只在 `UpdateCurrentInput`（HTTP 有、CLI 无） | ⚠️⚠️ **高**（任务卡死） |
 | 4 | **`aux_session_error` 是 `NOT NULL`** | schema 限制；写 `NULL` 会 `IntegrityError` | ⚠️ 低（但直接改库时会绊） |
-| 5 | **进程重启把在跑任务判 `fail`** | 已知坑 8（`recovery.go:33-45`）；本次因 API 错误 + 重启叠加触发 | ⚠️ **中** |
+| 5 | **进程重启把在跑任务判 `fail`** | 已知坑 8（`recovery.go:33-45`）；本次因 API 错误 + 重启叠加触发。<br>⚠️ 复核：触发条件比「在跑任务」更窄 —— 仅 **`GroupID != "" && SchedulerAdmitted`**（`recovery.go:37-50`），**独立任务免疫** | ⚠️ **中** |
 | 6 | **上游产出对下游不可见** | 任务独立 worktree + 无「交付即提交」约束 | ⚠️⚠️ **高**（三个任务各自绕） |
-| 7 | ⚠️⚠️ **`-to-task` 无法指定阶段** ⇒ 返工要求必然投给「当前阶段的会话」（本次落在**验收者**手里，它因此动手改代码，**损坏了验收的独立性**） | `taskMessageTarget` 从 `CurrentStageIndex` 起往回找；**组内任务更直接回落到 `MainSessionKey`**（= 最后阶段的会话）。**详见 G13b** | ⚠️⚠️ **高**（返工场景必然命中） |
+| 7 | ⚠️⚠️ **`-to-task` 的返工消息投错阶段** ⇒ 落到**验收者**手里，它因此动手改代码，**损坏了验收的独立性** | `taskMessageTarget`（`task_messages.go:132`）对组内任务特判，直接回落到 `MainSessionKey`（= 最后阶段的会话），**无视 `:70-88` 已经回退的阶段指针**。<br>⚠️ 复核修正：**不是「无法指定阶段」的能力缺失**，而是**投递 bug** —— 回退机制已存在，只需删掉那个特判（一行）。**详见 G13b** | ⚠️⚠️ **高**（返工场景必然命中） |
+| 8 | **`agent_session_error` 把传输层错误与任务内容失败混在同一字段** ⇒ 父会话拿到的错误与任务内容无关，**极易误判成「agent 写错了」** | `AuxFlags.SessionError` 单一字段承载所有失败原因（`appcontext.go:952-958` 等）。<br>（本条由 G9 复核后**独立出来** —— G9 的「大正文触发」已排除，但这个归因混淆问题是真的） | ⚠️ **中** |
 
 ---
 
@@ -2529,17 +2740,68 @@ T4  current_stage_index = 3（验收）
 
 ⇒ 用户裁决「接受现状」（它已基本改完），但**这个缺口本身要修**。
 
-#### 四、可行的改法（三选一）
+#### 四、⚠️ 2026-10-01 复核：**这不是「能力缺失」，是投递 bug**（改法重写）
+
+> 🔴 **原稿的三个改法全部基于一个错误前提** —— 「组内任务没有回退/重开阶段的能力，
+> 所以需要加新命令」。**复核后发现：回退机制早就存在。**
+
+**（1）「打回」能力已经有了，而且语义恰好就是「退回实现阶段」**
+（`orchestration_execution.go:70-88`）：
+
+```go
+if !t.SchedulerAdmitted && t.Status != StatusRunning {
+    if t.Status == StatusSuccess {           // 任务已完成（success）
+        index := t.CurrentStageIndex
+        for index >= 0 && tmpl.Stages[index].Snapshot.Role != RoleAgent {
+            index--                           // 回溯到最近的 agent 阶段
+        }
+        t.CurrentStageIndex = index           // ← 3（验收）→ 2（实现）
+    }
+    t.BlockReason = ""
+    t.CompletedAt = ""
+    t.AuxFlags = TaskAuxFlags{}               // 清空
+}
+```
+
+任务 `success` 后收到 `-to-task`，服务端**自动**把阶段指针退到最近的 agent 阶段
+（蓝图下正是「实现」），并把任务从 `success` 拉回 `pending`/`waiting_user`。
+**「验收发现问题 → 打回实现」这个需求，上游已经支持，不需要新命令。**
+
+**（2）真正坏的是投递对象。** `:70-88` 只改了**任务**的阶段指针，
+**没改 `taskMessageTarget` 的解析顺序**。而它对组内任务有特判
+（`task_messages.go:132`）:
+
+```go
+if task.GroupID == "" {          // ← 只有独立任务按阶段找会话
+    run, _ := store.LatestStageRun(ctx, task.ID, i)
+    if run.SessionKey != "" { return run.SessionKey, stage, nil }
+}
+break
+...
+return strings.TrimSpace(task.MainSessionKey), stage, nil   // ← 组内任务落这
+```
+
+⇒ **阶段指针明明已经退到「实现」，消息却投给了 `MainSessionKey`（验收者）。**
+两个机制**互相打架**：一个把阶段往回拉，另一个固执地投给最后一个阶段。
+
+**（3）最小修复 = 一行。**
 
 | # | 改法 | 评价 |
 |---|---|---|
-| **1** | **`-to-task` 加可选 `stage` 参数**（如 `-to-task <id> -stage 2`），指定投给哪个阶段的会话 | ✅ **最直接** —— 返工场景明确知道「要修哪个阶段」 |
-| **2** | **为组内任务启用「按阶段选会话」**（把 `if task.GroupID == ""` 那个条件去掉） | ⚠️ 治了「组内任务不看阶段」，但**独立任务仍无法投给更早阶段** |
-| **3** | **加一条「重开某阶段」的命令**（`-reopen <id> -stage N`）：把 `CurrentStageIndex` 移回去、复用原会话 | ✅ 语义最干净（返工本质就是「重开那个阶段」）；⚠️ 但要注意坑 16（组内任务无回退手段）—— 这条命令**恰好也是那个缺口的解法** |
+| **1（推荐）** | 删掉 `task_messages.go:132` 的 `if task.GroupID == ""` 特判，让**组内任务也按阶段选会话**（复用 `:138` 已有的 `return run.SessionKey, ...`） | ✅ **一行修复**，直接解决返工投错人。⚠️ 需验证 `run.SessionKey` 在组内任务上是否可靠（这正是当初加特判的可能原因） |
+| 2 | `-to-task` 加可选 `stage` 参数，显式指定投给哪个阶段 | 更灵活，但**多数返工场景用不上**（自动退回最近 agent 阶段已覆盖） |
+| 3 | ~~加 `-reopen <id> -stage N` 命令~~ | ❌ **不必要** —— 回退能力已存在（见上），加它等于重复实现 |
 
-> ⚠️ **改法 3 同时解决另一个问题**：坑 16 记着「组内任务 `-prev`/`-jump` 被静默拒绝 ⇒ 无回退手段」。
-> 而「返工 = 重开某阶段」这个需求，与「回退到某阶段」是**同一件事** ——
-> 一个 `-reopen` 能同时覆盖两者。
+> ⚠️ **原稿的参照点也需修正**：坑 16 记的「组内任务 `-prev`/`-jump` 被**静默**拒绝」措辞不准。
+> 实际会返回明确错误（`orchestration_execution.go:137`）：
+> `unsupported task operation; use to-task, from-task or cancel`。
+> 它是**硬拒绝**，任务状态毫发无损 —— 问题不是「静默」，而是
+> **错误信息里没有替代方案**（与 G6 同源的毛病），且这里连可替代的操作都不存在。
+
+> **为什么上游禁用 `-prev` 是合理的**（回应「为什么不放开」）：组内任务共享同一份模板快照，
+> `-prev` 会让某个任务的阶段与模板进度脱节；而上游选的更窄入口 ——
+> 「只允许回到最近的 agent 阶段重做」—— 恰好匹配「返工的单位是*任务*，不是*阶段*」这个语义。
+> **所以该补的不是 `-prev`，是让消息跟着阶段走。**
 
 #### 五、⚠️ 我的归因错误（**顺序错**，值得单独记）
 
@@ -2588,9 +2850,72 @@ T4  current_stage_index = 3（验收）
 | G7 | 坑 27 | **补「CLI 无解锁入口」这一层** |
 | G1 / G2 / G3 / G4 | **无** | 模板层的问题，此前未记录 |
 | G8 | 坑 19（worktree 相关） | **任务间可见性**，此前未记录 |
-| G9 | 无 | **大正文与 API 错误的可疑关联**，证据等级【观察】 |
+| G9 | 无 | ~~大正文与 API 错误的可疑关联~~ **（已排除，见下）**；**保留下来的增量是「错误归因混淆」**（已移入 G13 表第 8 条） |
 | G10 / G11 / G12 | 无 | 可观测性与文档形态的建议 |
-| **G13b** | **无**（且**同时是坑 16 的解法**） | **`-to-task` 无「指定阶段」能力** —— 返工天然要「针对某已完成阶段」，而消息只投给「此刻的阶段」；建议的 `-reopen <id> -stage N` **可同时补上坑 16 的「组内任务无回退手段」** |
+| **G13b** | **无** | **返工消息投错阶段** —— 复核后定性从「无指定阶段的能力」改为「**投递 bug**」（回退机制已存在，`task_messages.go:132` 的特判让它失效） |
+
+### G16. 📌 本章的复核记录（2026-10-01）
+
+> 本节记录一次**逐条回源码复核**的结果。复核方法与结论一并留档，
+> 因为这个过程本身暴露了一个模式：**实操复盘的归因，有相当比例是错的**。
+
+**复核方式**：对每条断言回到源码逐条取证（`file:line` + 代码片段），
+不采信原稿的描述，也不采信复核者的印象 —— 凡断言必须能在代码里指出对应位置。
+
+| 条目 | 复核判定 | 修正要点 |
+|---|---|---|
+| **G1a** | ❌ **不成立** | `-task-templates` 的输出**就是**完整 JSON，`auto_advance` 在里面；真问题是**认知负荷**而非信息缺失 |
+| G1b | ✅ 成立 | — |
+| **G2** | ⚠️ **部分成立**（严重性上调） | 替换是**纯丢弃**，连 `## 父会话消息` 来源标记都一并删掉；agent 拿到的是**无阶段标记的裸文本** |
+| G3 / G4 | ✅ 成立 | — |
+| **G5** | ⚠️ 基本成立 | 「每发一条 ⇒ 新建 run」有条件：最新 run 为 `pending` 时**复用** |
+| G6 | ✅ 成立 | — |
+| **G7** | ⚠️ 成立（措辞收紧） | 「唯一清空点」→「唯一**无条件**清空点」；补上 `PatchTask` 门槛为何挡住 `-update` |
+| **G8** | ⚠️ 成立（措辞精确化） | 基线是 **`repoRoot` 当前 HEAD**，不是「主干」 |
+| **G9** | ❌ **不成立（撤回）** | 三条独立证据全反：正文上限 4 MiB、`persisted-output` 非本仓库、错误串来源不明 |
+| **G10** | ⚠️ 部分成立 | 「`-graph` 不含阶段状态」不成立 —— **数据在，缺的是渲染** |
+| **G11** | ❌ 不成立 | `-status` 已返回全部 stage_run（含 `trigger`）；应为「缺*人可读*输出」 |
+| G12 | ✅ 成立 | — |
+| **G13-5** | ⚠️ 成立（条件更窄） | 仅影响 `GroupID != "" && SchedulerAdmitted`；独立任务免疫 |
+| **G13b** | ⚠️ 成立（**改法重写**） | 定性从「能力缺失」改为「**投递 bug**」；三个改法收敛为一行修复 |
+| G14 | ✅ 成立 | — |
+
+**小结**:15 条断言中 **7 条完全成立、5 条需修正措辞、3 条不成立**。
+
+#### 复核之后实际改了什么（2026-10-01）
+
+复核结论落到代码与文档的**只有一处**，其余都是文字订正或明确不改：
+
+| 动作 | 内容 | 依据 |
+|---|---|---|
+| ✅ **改代码** | `nextManaged` 的交付守卫加「`run.Result` 非空」条件——此前守卫只查 `run.Status`，而该状态对未交付的 run 恒为 `success`，**永远拦不住** | G5 + 实测数据（见下） |
+| ✅ **改代码** | 同一处报错按 run 状态分两种回复，均给出替代动作 | G6 |
+| ✅ **改指南** | `orchestration_help.md` 补父会话推进步骤 + `-next`/`-prev` 命令项 + 分工警告 | G12 |
+| ⚪ **不改** | G7 —— 复核后发现 `-to-task` 本就能恢复（`deliverTaskMessages` 绕过 `SessionError` 检查），**不存在「只能改 SQLite」** | §G7 二次复核 |
+| ⚪ **不改** | G9 / G11 / G1a —— 断言不成立，无事可做 | §G16 表 |
+| ⚪ **不改** | G13b 原提的 `-reopen` 命令 —— 回退机制已存在（`orchestration_execution.go:70-88`），加新命令属重复实现 | §G13b 四 |
+| ❌ **试过已回退** | 让未交付的 run 不记 `success` —— 破坏上游 `TestManagedChildUsesMultipleTemplateStages` 与 fork `TestAutoAdvanceOnAgentStageSkipsWaitingUser`，三轮补丁均未收敛，判定为改状态机核心、风险过高 | 见 FORK.md |
+
+**推动 G5 定性为 bug 的关键证据**（此前只有推理）：
+直接读 vFlow 的 `task-kanban.db`，task #4 的 stage-1 末条 run
+**`result_len=0` 且 `status=success`**（2026-10-01 03:59:23 结束），
+紧接着 `user_approved` 事件（05:50:32），再往后 stage-2 首个 run 的 **`input` 长度为 0**。
+—— 空交付 → 人工推进 → 空 Input，三步齐全。
+
+> ⚠️ **未解决的相邻项**：`moveTo`（`service.go:1258-1267`）构造新 `StageRun` 时**不传 `Input`**，
+> 而 `advanceManagedStage` 会传 `result`。两条推进路径行为不一致：
+> 走 `-next` 时即便交付正常，`{previous_input}` 也是空的。
+> 蓝图模板因实现阶段靠读 `plan-{n}.md` 兜底而掩盖了它。**本次未动**，登记在 FORK.md。
+
+⚠️ **最值得注意的一条**:G13b 原稿给的三个改法**全部指向「加新命令」** ——
+如果按它排期，会开发出一个**上游早已实现**的功能（回退到最近 agent 阶段）。
+这正是文档 §G13b 五节自省的那个毛病的**又一次复现**:
+**先接受一个看起来合理的归因，再去为它设计解法。**
+
+⇒ **纪律**（与 G13b 第五节同源，此处再次适用）:
+在设计解法**之前**，先查「机制上是否已经能做这件事」。
+**「缺一个命令」是最容易被误判的形态** —— 它看起来像需求，实际常常是
+**已有机制被另一处代码挡住了**。
 
 ---
 
@@ -2637,10 +2962,10 @@ T4  current_stage_index = 3（验收）
 
 10. **`orchestration_help.md` 的 `-task-group -messages` / `-task -messages` 语义差别**（`orchestration_help.md:37-40`、`60`）在源码里是两条不同的 SQL（`orchestration_store.go:139-154` vs `156-175`），但帮助文本没有解释「组 messages = 待处理 inbox」而「任务 messages = 全部与任务相关的已接收事件」这一区别，容易误用。
 
-11. **文档缺口**：全仓没有任何官方文档说明 `-addr`/`-tls` 与 CLI 免鉴权 token 的关系（§F25），唯一的记录在 fork 自建的 `docs/blueprint-template-requirements.md:100`。任务会话里的 agent 若照 `CLAUDE.md` 示例直接跑 `mindfs -orchestration` 之外的任务命令而漏了 `-addr`，会静默连到 7331 失败。
+11. **文档缺口**：全仓没有任何**上游**文档说明 `-addr`/`-tls` 与 CLI 免鉴权 token 的关系（§F25），唯一的记录在 fork 自建的 `docs/blueprint-template-requirements.md`。~~任务会话里的 agent 若照 `CLAUDE.md` 示例直接跑 `mindfs -orchestration` 之外的任务命令而漏了 `-addr`，会静默连到 7331 失败。~~ **（2026-10-01 修订）该风险已消解**：fork 的启动配置默认路径 + 上游 v0.5.4 的 `resolveClientTLS` 使同机同用户下 `-addr`/`-tls` 均可省略，漏写不再静默连 7331（实测见 §F25 修订小节）。**唯一遗留的缺口是上游仓库内仍无任何说明**，换机/换用户或服务未用该 config.json 启动时仍会退回 7331。
 
 12. **CLI 的 root 参数位置约束（实测定论）**：`normalizeTaskRootFirstArgs`（`cli/cmd/mindfs.go:932-939`）
-    仅在 `args[0]` 不以 `-` 开头时把它挪到末尾。因此：
+    仅在 `args[0]` 不以 `-` 开头时把它挪到末尾。因此（下列均在带 `-addr` 的前提下实测，去掉 `-addr` 后形态不变）：
     - `mindfs <root> -addr X -tls -op`（root 最前）→ ✅ 有效
     - `-addr X -tls -op <root>`（root 末尾）→ ✅ 有效
     - `-addr X <root> -tls -op`（root 居中）→ ❌ 失败，退化成「启动服务 + 添加目录」，

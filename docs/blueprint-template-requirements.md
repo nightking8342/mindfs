@@ -212,8 +212,14 @@
 2. **`existing` 分支模式不能复用工作区**：git 禁止同一分支被两个 worktree 同时检出。
 3. **模板修改只影响新建任务**：任务创建时固化模板快照，已建任务不受影响。
 4. **`create_worktree` 是建任务时的参数**，不是模板字段 —— 模板无法规定是否开 worktree。
-5. **CLI 调用姿势**：`mindfs -addr <addr> -<操作> <root>`（flags 必须在 root 之前；
-   root 必须是注册表 id 而非路径）。v0.5.4 起 `-tls` 可省略（CLI 自动发现）。
+5. **CLI 调用姿势**：`mindfs -<操作> <root>`（flags 必须在 root 之前；
+   root 必须是注册表 id 而非路径）。**`-addr` 与 `-tls` 均可省略**：
+   - `-tls`：v0.5.4 起 `resolveClientTLS` 从 `local-cli-tokens.json` 的 `tls` 字段自动发现。
+   - `-addr`：fork 的启动配置默认路径生效——`-config` 未显式传时回落到
+     `%AppData%\mindfs\config.json`，其中的 `addr` 由 `applyStartupConfig` 填入。
+   **前提是同机同用户**（服务端与 CLI 共用同一个 `MindFSConfigDir()`），且服务须用
+   含上述改动的版本启动过一次以写入 `tls` 字段。跨机器或跨用户时仍需显式 `-addr`/`-tls`。
+   实测见 `task-orchestration-internals.md` §F25 修订小节。
 6. **停机时不会通知父会话**：`stage_done` + `auto_advance=true` 推进后任务为 `queued`，
    不满足通知条件（`t.Status == StatusWaitingUser`），父会话要等下一阶段结束才被唤醒。
 7. **组内任务不能主动 `fail`**：`Fail` 对 `Task.GroupID != ""` 直接返回
