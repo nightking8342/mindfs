@@ -281,6 +281,123 @@ if stage.Role == RoleUser {
 //   - false → 停下，任务进入 waiting_user 等用户推进
 ```
 
+#### A3.1 `auto_advance` 的第二个副作用：**它还决定通不通知父会话**
+
+`auto_advance` 不只控制「推不推进」——它**顺带决定了父会话会不会被唤醒**，
+因为通知判定读的是**推进之后**的状态（源码确证）：
+
+```go
+// orchestration_execution.go:515  —— 先推进（可能改掉 t.Status）
+if action == "stage_done" && tmpl.Stages[t.CurrentStageIndex].Snapshot.AutoAdvance {
+    if e = advanceManagedStage(ctx, tx, &t, tmpl, message); e != nil { return e }
+}
+// ... :543  —— 再判定要不要通知，读的是推进【之后】的 t.Status
+if (action == "fail" || (action == "waiting" && !reported) ||
+    (action == "stage_done" && t.Status == StatusWaitingUser)) && t.GroupID != "" {
+    ev.ReceiverTaskID = t.GroupID      // ← 进组 Inbox，才会唤醒父会话
+}
+```
+
+而 `advanceManagedStage` 会把状态改成下一阶段的形态：
+
+```go
+t.CurrentStageIndex = index
+t.Status = StatusQueued              // 下一阶段是 agent
+// 或
+t.Status = StatusWaitingUser         // 下一阶段是 user
+```
+
+⇒ **通知与否的完整对照**（`stage_done` 分支，即非末阶段的正常交付）：
+
+| 刚完成阶段 | `auto_advance` | 推进后 `t.Status` | 通知父会话 |
+|---|---|---|---|
+| agent | **`false`** | `waiting_user` | ✅ **通知**（需要人来推） |
+| agent | `true` + 下一阶段是 **agent** | `queued` | ❌ **不通知**（系统自己往下走） |
+| agent | `true` + 下一阶段是 **user** | `waiting_user` | ✅ 通知（要人来填输入） |
+
+**设计是自洽的**：`true` 且下一阶段是 agent ⇒ 系统能自己继续 ⇒ 不打扰；
+`false` ⇒ 需要人决定 ⇒ 唤醒。
+
+⚠️ **对蓝图的实际含义**：方案阶段 `auto_advance=false`，所以它**交付后一定会通知父会话**——
+这正是父会话该去 `-next` 的时机。而实现阶段 `auto_advance=true` 且下一阶段是 agent（验收），
+所以它交付后**静默推进**，父会话收不到通知。
+
+#### A3.2 交付与推进是**正交**的两件事
+
+这两件事常被混为一谈，但由**不同的主体**控制：
+
+| | 由谁决定 | 后果 |
+|---|---|---|
+| **交付** | **agent**（调不调 `-from-task` + `completed:true`） | 决定 `run.Result` 有没有内容、`action` 是不是 `complete` |
+| **推进** | **模板**（该阶段的 `auto_advance`） | 决定 `CurrentStageIndex` 走不走 |
+
+关键在于 `auto_advance` 的门槛是 `action == "stage_done"`，而 `action` 来自 agent 的交付行为：
+
+```go
+// :440
+if ... report.Completed { action = "complete" }        // agent 交付
+// :457
+if action == "complete" {
+    run.Result = message                                // 先保住交付正文
+    if t.CurrentStageIndex < len(tmpl.Stages)-1 {
+        action = "stage_done"                           // 非末阶段才转成 stage_done
+    }
+}
+// :515
+if action == "stage_done" && ...AutoAdvance { ... }     // 再决定推不推
+```
+
+⇒ **`auto_advance=false` 不阻止交付，它只阻止推进。** 该阶段**照样必须**走
+`-from-task completed:true`，否则 `run.Result` 为空、什么都没有留下。
+
+同一个 `auto_advance=false` 的 agent 阶段，agent 三种做法的对比：
+
+| agent 做法 | `action` | `run.Result` | 阶段 | 任务状态 | 通知父会话 |
+|---|---|---|---|---|---|
+| `-from-task` + `completed:true` | `complete`→`stage_done` | ✅ **有交付正文** | 停在原阶段 | `waiting_user` | ✅ 通知 |
+| `-from-task` + `completed:false` | `waiting` | ❌ 空 | 停在原阶段 | `waiting_user` | ❌ 被 `reported` 挡掉（见 A3.3） |
+| 不调命令，输出完就结束 | `waiting` | ❌ 空 | 停在原阶段 | `waiting_user` | ✅ 通知 |
+
+**三者都停在原阶段**（`auto_advance=false` 不推进），但**只有第一种留下了交付物**。
+
+#### A3.3 ⚠️ 末阶段的交付/通知矩阵（与上面**不同**，容易混）
+
+末阶段不产生 `stage_done`（走不到 `:515`），它走的是 `waiting` / `complete` 分支，
+所以通知条件也不同：
+
+| agent 做法 | `action` | 任务状态 | `reported` | 通知父会话 |
+|---|---|---|---|---|
+| `-from-task` + `completed:true` | `complete` | **`success`** | — | ❌ 不通知 |
+| `-from-task` + `completed:false` | `waiting` | `waiting_user` | **true** | ❌ **不通知** |
+| 不调命令，输出完就结束 | `waiting` | `waiting_user` | false | ✅ **通知** |
+
+`reported` 的定义（**反直觉**）：
+
+```go
+// :536-542
+reported := false
+for _, ev := range events {                 // 遍历【全部历史事件】，不是本轮
+    if ev.Type == "from-task" {
+        if report.ExecutionID == run.ID && !report.Completed {
+            reported = true                 // agent 报告过、但没声明完成
+        }
+    }
+}
+// :543
+if action == "fail" || (action == "waiting" && !reported) || ...
+```
+
+⇒ **agent 主动报告、但没声明完成时，反而不通知父会话。** 上游的意图大概是
+「agent 自己报告过了，父会话会看到，不必重复转达」——但末阶段没有任何机制
+保证父会话会去看，于是这条设计在实践中变成了「越主动越没回声」。
+
+⚠️ **这也是蓝图验收阶段曾经的坑**：模板让验收者「照常设置 `completed: true`」，
+于是**无论结论是通过还是不通过，任务都变 `success` 且不通知父会话**——
+父会话对「验收不通过」完全无感知，还可能直接按「已完成」收尾。
+**已修**：蓝图验收阶段提示词现在要求「结论不通过时**不要调** `-from-task`，
+直接输出报告后结束本轮」，这样任务停在验收阶段**且通知父会话**。
+详见本章 G4 与 FORK.md。
+
 ### A4. `session_reuse_policy` 三值的决策逻辑与优先级
 
 **源码确证** —— 决策函数是 `AppContext.EnsureAgentSession`（`appcontext.go:306-359`），任务编排侧的 resolve 就这一个，没有第二处：
@@ -331,6 +448,80 @@ if (strings.TrimSpace(stage.SessionReusePolicy) == "" || stage.SessionReusePolic
 **易错点**：`always_new` 并不会「每次都新建」——只要 `run.SessionKey` 已经存在（同一 run 重入，例如发消息重跑），① 的守卫被 `!= always_new` 挡住后落到 ④ **新建**。所以 `always_new` 的语义是「同一阶段内也不复用旧会话」。而 `same_stage` 与 `task_main` 在 **run.SessionKey 已存在时行为相同**，差异只在新建阶段时（`same_stage` 拿不到旧 key 就新建，不走 task 主会话）。
 
 `RunGroupTurn`（父会话轮次）**不使用**该策略，直接复用 `g.SessionKey`（`server/internal/api/task_group_runner.go:43`）。
+
+#### A4.1 返工场景下的会话选择：**实现复用、验收新开**
+
+「验收不通过 → 打回实现 → 改完再进验收」这条链上，两个阶段拿到的是**不同性质**的会话，
+而这恰好同时满足两个相反的要求：**返工要带上下文，复核要保独立**。
+
+**（1）打回到实现阶段 → 用实现阶段【原有】的会话**
+
+打回走的是 `-to-task`（messageTurn）路径，而 fork 对 messageTurn 的处理是
+`executeManagedTurn` **优先采用 `taskMessageTarget` 解析出的阶段会话**
+（见 FORK.md 的 `stage_index` 条目、A4.2），**不经过**上面那套 `session_reuse_policy` 决策。
+所以即使实现阶段配的是 `always_new`，返工也**复用**它自己的会话 —— 实现者带着
+「我当初为什么这么写」的完整上下文来改。
+
+**（2）改完再进验收阶段 → 【新建】验收会话**
+
+实现 `auto_advance=true`，交付后自动推进到验收（见 A3.1），而推进走 `moveTo`
+→ 新建一条 `SessionKey` 为空的 pending run → 走**普通执行路径**（非 messageTurn）
+→ 进入 `EnsureAgentSession`：`reusable(exec.Run.SessionKey)` 因 run 无 key 而为 false，
+`always_new` 又不匹配 switch 中任何 case → **落到 ④ 新建**。
+
+⇒ **新验收者没有参与过上一轮返工，不知道实现者改了什么**，独立性得以保持。
+如果用原来那个验收会话，它会记得自己提过哪些问题、甚至「知道」改动内容，复核价值就打折了。
+
+**小结**：
+
+| 环节 | 会话 | 效果 |
+|---|---|---|
+| 打回实现 | **复用**实现阶段会话 | 带上下文修正 |
+| 打回后再进验收 | **新建**验收会话 | 独立复核 |
+
+⚠️ **注意 `always_new` 是靠「不匹配任何 case」实现新建的** —— `switch` 里只有
+`task_main` / `same_stage` 两个分支，末尾兜底 ④ 才是新建。这个写法能工作，
+但依赖「函数末尾是 `CreateSession`」这一结构；日后若在 switch 后插入代码需留意。
+
+#### A4.2 messageTurn 的会话选择**不走**上述策略（fork 修改点）
+
+普通阶段执行与「给已有阶段发消息」是**两条不同的会话解析路径**，上面 A4 那套
+`session_reuse_policy` 只适用于**前者**。
+
+messageTurn 路径在 `executeManagedTurn` 里（fork 修改后）：
+
+```go
+key := t.MainSessionKey
+if !messageTurn {
+    key, e = s.Runner.EnsureAgentSession(ctx, exec)          // ← 普通执行：走 A4 的策略
+} else if target, _, terr := taskMessageTarget(ctx, store, t, tmpl); terr == nil && ... {
+    key = strings.TrimSpace(target)                          // ← fork：按阶段解析
+}
+```
+
+而 `taskMessageTarget` 的解析规则是「从 `CurrentStageIndex` 往回找最近的 agent 阶段，
+取它**最近一条有会话的记录**」：
+
+```go
+// task_messages.go（fork 去掉了上游的 if task.GroupID == "" 特判）
+run, err := store.LatestStageRunWithSession(ctx, task.ID, i)   // ← 按 session_key != '' 过滤
+if err == nil && strings.TrimSpace(run.SessionKey) != "" {
+    return strings.TrimSpace(run.SessionKey), stage, nil
+}
+```
+
+**两个要点**：
+
+1. **上游对组内任务直接回落 `MainSessionKey`**，而 `MainSessionKey` 被每个 managed turn
+   覆写成「最后跑过的阶段」的会话 —— 于是「发给当前阶段」的消息实际落到了**更靠后的阶段**。
+   fork 删掉了那个特判，组内任务改为按阶段查会话。
+2. **必须过滤掉没有 `session_key` 的 run**：`executeManagedTurn` 每次 message turn 都会
+   新建一条 `session_key` 为空的 pending run，它 `created_at` 最新会被 `LatestStageRun`
+   优先返回 → 取到空会话 → 又回落 `MainSessionKey`，等于绕回原 bug。故新增
+   `TaskStore.LatestStageRunWithSession` 做过滤。
+
+⇒ **返工时实现阶段能复用原会话，就是因为这条路径绕开了 `always_new`。**
+如果走 A4 那套策略，`always_new` 会新建会话，实现者就丢了上下文。
 
 ### A5. `role:user` 与 `role:agent` 的 `prompt_template` 语义是否不同
 
@@ -2315,6 +2506,26 @@ flowchart LR
 **最小改法**：任务的最终 `result`（验收阶段）**结构化** ——
 至少含 `{verdict: pass|fail, evidence: [...], rework_items: [...]}`，
 这样父会话可以**程序化判断**，不必读自然语言。
+
+> 🔴 **2026-10-02 补充：这个盲区比本文原稿写的更严重，而且根因在通知机制。**
+>
+> 原稿说的是「父会话读得到结论、但要读自然语言」；实际是
+> **父会话连「验收做完了」都不知道** —— 因为末阶段的交付走的是另一套通知条件
+> （见 **A3.3** 的末阶段矩阵）：
+>
+> | 验收者做法 | 任务状态 | 通知父会话 |
+> |---|---|---|
+> | `-from-task` + `completed:true` | **`success`** | ❌ 不通知 |
+> | `-from-task` + `completed:false` | `waiting_user` | ❌ 不通知（被 `reported` 挡掉） |
+> | 不调命令，输出完就结束 | `waiting_user` | ✅ 通知 |
+>
+> ⇒ **「结论不通过」只要被当成一次正常交付发出（带 `completed:true`），
+> 任务就变 `success` 且父会话收不到任何信号**，很可能直接按「已完成」收尾。
+>
+> **已修（模板层）**：蓝图验收阶段提示词现在明确要求
+> 「结论不通过时**不要调** `-from-task`，直接输出报告后结束本轮」——
+> 这样任务停在验收阶段**且**唤醒父会话。原稿建议的「结构化 result」
+> 仍值得做，但它解决的是「读得累」，不解决「根本不知道要读」。
 
 ---
 
