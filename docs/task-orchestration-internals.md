@@ -2667,12 +2667,24 @@ sqlite3 task-kanban.db "SELECT stage_index,status,trigger FROM stage_runs WHERE 
 | 4 | **`aux_session_error` 是 `NOT NULL`** | schema 限制；写 `NULL` 会 `IntegrityError` | ⚠️ 低（但直接改库时会绊） |
 | 5 | **进程重启把在跑任务判 `fail`** | 已知坑 8（`recovery.go:33-45`）；本次因 API 错误 + 重启叠加触发。<br>⚠️ 复核：触发条件比「在跑任务」更窄 —— 仅 **`GroupID != "" && SchedulerAdmitted`**（`recovery.go:37-50`），**独立任务免疫** | ⚠️ **中** |
 | 6 | **上游产出对下游不可见** | 任务独立 worktree + 无「交付即提交」约束 | ⚠️⚠️ **高**（三个任务各自绕） |
-| 7 | ⚠️⚠️ **`-to-task` 的返工消息投错阶段** ⇒ 落到**验收者**手里，它因此动手改代码，**损坏了验收的独立性** | `taskMessageTarget`（`task_messages.go:132`）对组内任务特判，直接回落到 `MainSessionKey`（= 最后阶段的会话），**无视 `:70-88` 已经回退的阶段指针**。<br>⚠️ 复核修正：**不是「无法指定阶段」的能力缺失**，而是**投递 bug** —— 回退机制已存在，只需删掉那个特判（一行）。**详见 G13b** | ⚠️⚠️ **高**（返工场景必然命中） |
+| 7 | ⚠️⚠️ **`-to-task` 无法把返工要求交给指定阶段的会话** ⇒ 落到**验收者**手里，它因此动手改代码，**损坏了验收的独立性** | 三重叠加：① 回退分支要求 `t.Status == StatusSuccess`（`orchestration_execution.go:71`），而返工的真实场景里任务停在 `waiting_user`，**守卫不成立、整段跳过**；② `taskMessageTarget`（`task_messages.go:132`）对组内任务特判，回落 `MainSessionKey`；③ `MainSessionKey` 被每个 managed turn 覆写（`:336`），最后跑过的阶段胜出 = 验收。<br>⚠️ **10-02 定性修正**：**不是「投递 bug」**（10-01 曾如此判断，前提有误），而是**能力不存在**——`success` 那条路只覆盖「整组做完后翻案」，覆盖不了「跑到一半就地返工」。实测见 G13b 四。 | ⚠️⚠️ **高**（返工场景必然命中） |
 | 8 | **`agent_session_error` 把传输层错误与任务内容失败混在同一字段** ⇒ 父会话拿到的错误与任务内容无关，**极易误判成「agent 写错了」** | `AuxFlags.SessionError` 单一字段承载所有失败原因（`appcontext.go:952-958` 等）。<br>（本条由 G9 复核后**独立出来** —— G9 的「大正文触发」已排除，但这个归因混淆问题是真的） | ⚠️ **中** |
 
 ---
 
 ### G13b. ⚠️⚠️ MindFS 缺口：`-to-task` **无法指定阶段** ⇒ 返工要求必然投给「当前阶段的会话」
+
+> ✅ **2026-10-02 已在 fork 实现**：`-to-task` 支持 `stage_index`，可把任务退回指定阶段
+> 并把消息投给**那个阶段自己的会话**。实现要点见 FORK.md 的「`-to-task` 支持指定目标阶段」条，
+> 其中第 ④ 条（`executeManagedTurn` 的 message turn 必须改用 `taskMessageTarget` 的结果）
+> 是**关键**——只改「按阶段选会话」会得到死代码，因为解析出的 key 在中途被丢弃。
+>
+> **同时定下一条策略**：**已完成（`success`）的任务不再允许打回**，返工走新建任务。
+> 这让下面的「下游影响」问题（本节未展开）**根本不会发生**——下游只在上游成功后才启动，
+> 而成功已不可回退。详见 FORK.md「已完成任务不可打回」。
+>
+> **实测**（本项目真实任务组，四阶段真实跑完，非伪造状态）：打回后阶段 3→2，
+> 新 run 的 `session_key` = 实现阶段的会话而非验收者的，该会话 agent 日志确认收到并执行。
 
 > ⚠️ **本条是本次实操里最后才查清的** —— 而我**先自我归因「我发错了」、查源码后才发现是机制问题**。
 > 这个「先下结论后查证据」的顺序本身就是教训（本次第三个同类错误），记在下文「五」里。
@@ -2740,67 +2752,99 @@ T4  current_stage_index = 3（验收）
 
 ⇒ 用户裁决「接受现状」（它已基本改完），但**这个缺口本身要修**。
 
-#### 四、⚠️ 2026-10-01 复核：**这不是「能力缺失」，是投递 bug**（改法重写）
+#### 四、⚠️ 2026-10-02 复核：**回退仅在 `success` 时触发，而返工几乎从不满足它**
 
-> 🔴 **原稿的三个改法全部基于一个错误前提** —— 「组内任务没有回退/重开阶段的能力，
-> 所以需要加新命令」。**复核后发现：回退机制早就存在。**
+> 🔴 **本节结论经过两轮反转，以 2026-10-02 的实测为准。**
+> 第一轮（10-01）判断为「投递 bug，回退机制已存在」——**该判断的前提是错的**，见下。
 
-**（1）「打回」能力已经有了，而且语义恰好就是「退回实现阶段」**
-（`orchestration_execution.go:70-88`）：
+**（1）回退分支确实存在，但它的条件是「任务已完成」**
+
+`orchestration_execution.go:70-88`：
 
 ```go
-if !t.SchedulerAdmitted && t.Status != StatusRunning {
-    if t.Status == StatusSuccess {           // 任务已完成（success）
+if !t.SchedulerAdmitted && t.Status != StatusRunning {   // 守卫 A
+    if t.Status == StatusSuccess {                        // 守卫 B ← 关键
         index := t.CurrentStageIndex
         for index >= 0 && tmpl.Stages[index].Snapshot.Role != RoleAgent {
-            index--                           // 回溯到最近的 agent 阶段
+            index--                                       // 回溯到最近的 agent 阶段
         }
-        t.CurrentStageIndex = index           // ← 3（验收）→ 2（实现）
+        t.CurrentStageIndex = index
     }
     t.BlockReason = ""
     t.CompletedAt = ""
-    t.AuxFlags = TaskAuxFlags{}               // 清空
+    t.AuxFlags = TaskAuxFlags{}
 }
 ```
 
-任务 `success` 后收到 `-to-task`，服务端**自动**把阶段指针退到最近的 agent 阶段
-（蓝图下正是「实现」），并把任务从 `success` 拉回 `pending`/`waiting_user`。
-**「验收发现问题 → 打回实现」这个需求，上游已经支持，不需要新命令。**
+上游写了测试固化它（`groups_test.go:327` 的 `{"already completed", StatusSuccess, 1, StatusQueued}`）——
+**「已完成的组任务收到 `-to-task` 会被重新激活」是有意设计**。
 
-**（2）真正坏的是投递对象。** `:70-88` 只改了**任务**的阶段指针，
-**没改 `taskMessageTarget` 的解析顺序**。而它对组内任务有特判
-（`task_messages.go:132`）:
+**（2）但返工的真实场景走不到 `StatusSuccess`**
 
-```go
-if task.GroupID == "" {          // ← 只有独立任务按阶段找会话
-    run, _ := store.LatestStageRun(ctx, task.ID, i)
-    if run.SessionKey != "" { return run.SessionKey, stage, nil }
-}
-break
-...
-return strings.TrimSpace(task.MainSessionKey), stage, nil   // ← 组内任务落这
+以 T4 实测为例（`task-kanban.db`，事件时间线）：
+
+```
+06:14:39  execution_stage_done   ← 实现交付，推进到验收(3)
+06:28:00  from-task              ← 验收结论：不通过
+06:34:07  to-task                ← 父会话发返工要求
+06:34:07  stage_started          ← 起的 run 仍是 stage=3
+07:26:00  from-task              ← 返工交付
 ```
 
-⇒ **阶段指针明明已经退到「实现」，消息却投给了 `MainSessionKey`（验收者）。**
-两个机制**互相打架**：一个把阶段往回拉，另一个固执地投给最后一个阶段。
+而 `stage_runs` 里那条返工 run 的记录是：
 
-**（3）最小修复 = 一行。**
+```
+2026-10-01T06:34:07  stage=3  trig=events  session=1790835279-15d3c27c6105
+                     ^^^^^^^                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                     仍是验收阶段            仍是【验收会话】
+```
 
-| # | 改法 | 评价 |
+**阶段没动、消息也没换人。**
+
+原因：蓝图的验收阶段 `auto_advance=false`，**交付后停在 `waiting_user`，不是 `success`**
+（`finishManagedRun` 的 `action="stage_done"` → `t.Status = StatusWaitingUser`）。
+⇒ 守卫 B 不成立 ⇒ **整个回退分支被跳过**。
+
+**（3）所以真实结论是：这不是「投递 bug」，是「能力不存在」**
+
+| 场景 | 回退 | 消息投给 |
 |---|---|---|
-| **1（推荐）** | 删掉 `task_messages.go:132` 的 `if task.GroupID == ""` 特判，让**组内任务也按阶段选会话**（复用 `:138` 已有的 `return run.SessionKey, ...`） | ✅ **一行修复**，直接解决返工投错人。⚠️ 需验证 `run.SessionKey` 在组内任务上是否可靠（这正是当初加特判的可能原因） |
-| 2 | `-to-task` 加可选 `stage` 参数，显式指定投给哪个阶段 | 更灵活，但**多数返工场景用不上**（自动退回最近 agent 阶段已覆盖） |
-| 3 | ~~加 `-reopen <id> -stage N` 命令~~ | ❌ **不必要** —— 回退能力已存在（见上），加它等于重复实现 |
+| 任务**整组 completed**（`success`）后打回 | ✅ 回退到最近 agent 阶段 | ⚠️ 仍投 `MainSessionKey`（最后跑过的阶段） |
+| **任务停在中间阶段**（`waiting_user`，T4 的实际情况） | ❌ **完全不回退** | 当前阶段 = 验收者 |
 
-> ⚠️ **原稿的参照点也需修正**：坑 16 记的「组内任务 `-prev`/`-jump` 被**静默**拒绝」措辞不准。
-> 实际会返回明确错误（`orchestration_execution.go:137`）：
+⇒ **「验收发现问题 → 把返工要求交给实现者」这个诉求，上游不支持。**
+第二行才是真实痛点，而它现在一点支持都没有。
+
+**（4）为什么 `-to-task` 无法表达「打回到哪个阶段」**
+
+前文已确认：**一个 task 只有一个 `task_id`，阶段是它内部的一个整数字段**
+（`tasks.current_stage_index`），没有独立的阶段标识。所以
+`-to-task <task-id>` 在语法上就**无法承载「目标阶段」这个信息**。
+
+⇒ **你的第 2 点（打回可指定阶段）不是锦上添花，而是这个能力的前置条件。**
+
+**（5）设计要回答的核心问题**
+
+`-to-task` 打到停在中间阶段的任务时，父会话的真实意图可能是：
+
+| 意图 | 现状 |
+|---|---|
+| 让**当前阶段**重做 | 现状即是（但会重跑一轮） |
+| 让它**回到某个更早的阶段**重做 | **无表达方式** |
+
+两者**无法从现有参数区分**——这正是需要显式 `-stage` 的原因。
+
+> ⚠️ **仍然成立的附带更正**：坑 16 记的「组内任务 `-prev`/`-jump` 被**静默**拒绝」措辞不准。
+> 实际返回明确错误（`orchestration_execution.go:137`）：
 > `unsupported task operation; use to-task, from-task or cancel`。
-> 它是**硬拒绝**，任务状态毫发无损 —— 问题不是「静默」，而是
-> **错误信息里没有替代方案**（与 G6 同源的毛病），且这里连可替代的操作都不存在。
+> 是**硬拒绝**，任务状态毫发无损；问题不在「静默」，而在**错误信息没给替代方案**
+> （与 G6 同源），且此处**连可替代的操作都不存在**。
 
-> **为什么上游禁用 `-prev` 是合理的**（回应「为什么不放开」）：组内任务共享同一份模板快照，
-> `-prev` 会让某个任务的阶段与模板进度脱节；而上游选的更窄入口 ——
-> 「只允许回到最近的 agent 阶段重做」—— 恰好匹配「返工的单位是*任务*，不是*阶段*」这个语义。
+> **为什么上游禁用 `-prev` 有其道理**：组内任务共享同一份模板快照，
+> 让某个任务自由游走会让它的阶段与模板进度脱节。但上游选的替代入口
+> （「只允许 `success` 任务回到最近 agent 阶段」）**覆盖面太窄**——
+> 它只覆盖「整组做完之后再翻案」，覆盖不了「跑到一半发现问题就地返工」。
+> **本节讨论的正是要补上后者。**
 > **所以该补的不是 `-prev`，是让消息跟着阶段走。**
 
 #### 五、⚠️ 我的归因错误（**顺序错**，值得单独记）
@@ -2852,7 +2896,7 @@ return strings.TrimSpace(task.MainSessionKey), stage, nil   // ← 组内任务�
 | G8 | 坑 19（worktree 相关） | **任务间可见性**，此前未记录 |
 | G9 | 无 | ~~大正文与 API 错误的可疑关联~~ **（已排除，见下）**；**保留下来的增量是「错误归因混淆」**（已移入 G13 表第 8 条） |
 | G10 / G11 / G12 | 无 | 可观测性与文档形态的建议 |
-| **G13b** | **无** | **返工消息投错阶段** —— 复核后定性从「无指定阶段的能力」改为「**投递 bug**」（回退机制已存在，`task_messages.go:132` 的特判让它失效） |
+| **G13b** | **无** | **返工无法指定阶段** —— 经两轮复核定性：**能力不存在**（10-01 曾判为「投递 bug / 回退机制已存在」，10-02 实测推翻——回退分支要求 `Status==Success`，而返工场景任务停在 `waiting_user`，整段被跳过）。真实痛点是「跑到一半就地返工」，上游无任何支持 |
 
 ### G16. 📌 本章的复核记录（2026-10-01）
 
@@ -2877,7 +2921,7 @@ return strings.TrimSpace(task.MainSessionKey), stage, nil   // ← 组内任务�
 | **G11** | ❌ 不成立 | `-status` 已返回全部 stage_run（含 `trigger`）；应为「缺*人可读*输出」 |
 | G12 | ✅ 成立 | — |
 | **G13-5** | ⚠️ 成立（条件更窄） | 仅影响 `GroupID != "" && SchedulerAdmitted`；独立任务免疫 |
-| **G13b** | ⚠️ 成立（**改法重写**） | 定性从「能力缺失」改为「**投递 bug**」；三个改法收敛为一行修复 |
+| **G13b** | ⚠️ 成立（**定性经两轮反转**） | 初版「能力缺失」→ 10-01 误判为「投递 bug」→ **10-02 实测推翻，回到「能力缺失」**：回退分支要求 `Status==Success`，返工场景却不满足，整段被跳过 |
 | G14 | ✅ 成立 | — |
 
 **小结**:15 条断言中 **7 条完全成立、5 条需修正措辞、3 条不成立**。
@@ -2893,7 +2937,7 @@ return strings.TrimSpace(task.MainSessionKey), stage, nil   // ← 组内任务�
 | ✅ **改指南** | `orchestration_help.md` 补父会话推进步骤 + `-next`/`-prev` 命令项 + 分工警告 | G12 |
 | ⚪ **不改** | G7 —— 复核后发现 `-to-task` 本就能恢复（`deliverTaskMessages` 绕过 `SessionError` 检查），**不存在「只能改 SQLite」** | §G7 二次复核 |
 | ⚪ **不改** | G9 / G11 / G1a —— 断言不成立，无事可做 | §G16 表 |
-| ⚪ **不改** | G13b 原提的 `-reopen` 命令 —— 回退机制已存在（`orchestration_execution.go:70-88`），加新命令属重复实现 | §G13b 四 |
+| 🔷 **待评估** | G13b 的「打回指定阶段」—— 10-01 曾因「回退机制已存在」判为不必做，**该理由已被 10-02 实测推翻**，重新列入待评估（见 §G13b 四）。设计要点：任务组状态联动、指定阶段的边界处理、下游依赖传播、worktree 已有改动如何交代 | §G13b 四 |
 | ❌ **试过已回退** | 让未交付的 run 不记 `success` —— 破坏上游 `TestManagedChildUsesMultipleTemplateStages` 与 fork `TestAutoAdvanceOnAgentStageSkipsWaitingUser`，三轮补丁均未收敛，判定为改状态机核心、风险过高 | 见 FORK.md |
 
 **推动 G5 定性为 bug 的关键证据**（此前只有推理）：

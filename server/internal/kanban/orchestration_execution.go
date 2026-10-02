@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -14,6 +15,13 @@ type ManagedInput struct {
 	Completed bool   `json:"completed,omitempty"`
 
 	PlanVersion *int `json:"plan_version"`
+
+	// fork: optional target stage for a -to-task message, addressed by stage
+	// index. Without it a message goes to the task's current stage. With it the
+	// task is moved back to that stage and the message is delivered to that
+	// stage's own session, so a rework request reaches whoever did the work
+	// instead of whoever happened to run last.
+	StageIndex *int `json:"stage_index,omitempty"`
 }
 
 // taskReport binds a stored report to its execution independently of the
@@ -58,6 +66,13 @@ func (s *Service) ManagedAction(ctx context.Context, root, id, action string, in
 				return TaskDetail{}, errors.New("recipient task is cancelled")
 			}
 			if owner == "" {
+				// fork: stage_index only means something for a grouped task, whose
+				// stages each get their own session. An ordinary task keeps one
+				// conversation, so accepting the field here would silently do
+				// nothing while the caller believed the stage had been chosen.
+				if in.StageIndex != nil {
+					return TaskDetail{}, errors.New("stage_index is only supported for tasks in a task group")
+				}
 				// Ordinary tasks receive user messages without changing their
 				// stage, completion state, or scheduler admission.
 				event.ReceiverTaskID = t.ID
@@ -67,17 +82,42 @@ func (s *Service) ManagedAction(ctx context.Context, root, id, action string, in
 				s.Schedule(root)
 				return s.changed(ctx, store, id)
 			}
-			if !t.SchedulerAdmitted && t.Status != StatusRunning {
-				if t.Status == StatusSuccess {
-					index := t.CurrentStageIndex
-					for index >= 0 && tmpl.Stages[index].Snapshot.Role != RoleAgent {
-						index--
-					}
-					if index < 0 {
-						return TaskDetail{}, errors.New("task template has no agent stage")
-					}
-					t.CurrentStageIndex = index
+			// fork: a task that already succeeded is NOT reopenable. Upstream reset
+			// it in place (stage pointer back to the nearest agent stage) but never
+			// touched its downstream tasks, so a reopened task could leave
+			// dependents holding results built on a superseded upstream. Policy
+			// here: a finished task stays finished; rework is a new task, which
+			// also removes the cascade question entirely.
+			if t.Status == StatusSuccess {
+				return TaskDetail{}, errors.New("task has already been completed; append a new task to the group instead of sending a message to a finished one")
+			}
+			// fork: an explicit stage rewinds the task to it before delivery, so
+			// the message reaches the session that did the work rather than
+			// whichever stage ran last. Validated before the run-state check so a
+			// bad index always gets an accurate message.
+			target := t.CurrentStageIndex
+			if in.StageIndex != nil {
+				want := *in.StageIndex
+				if want < 0 || want >= len(tmpl.Stages) {
+					return TaskDetail{}, fmt.Errorf("stage_index %d out of range (template has %d stages)", want, len(tmpl.Stages))
 				}
+				if want > t.CurrentStageIndex {
+					return TaskDetail{}, fmt.Errorf("stage_index %d is ahead of the current stage %d; use -next to advance", want, t.CurrentStageIndex)
+				}
+				if tmpl.Stages[want].Snapshot.Role != RoleAgent {
+					return TaskDetail{}, fmt.Errorf("stage_index %d is a %s stage; only agent stages can be addressed", want, tmpl.Stages[want].Snapshot.Role)
+				}
+				if t.SchedulerAdmitted || t.Status == StatusRunning {
+					return TaskDetail{}, errors.New("task is running; wait for the current stage to finish before addressing an earlier stage")
+				}
+				target = want
+			}
+			if !t.SchedulerAdmitted && t.Status != StatusRunning {
+				// A rewind is a correction on top of existing work: the stage
+				// pointer moves, but nothing about the work is discarded. The prior
+				// stage runs stay as history and the target stage's own run keeps
+				// its session, which is what the reply is delivered to.
+				t.CurrentStageIndex = target
 				if t.CurrentStageIndex == 0 || tmpl.Stages[t.CurrentStageIndex].Snapshot.Role == RoleAgent {
 					t.Status = StatusPending
 					if t.MainSessionKey != "" {
@@ -324,6 +364,15 @@ func (s *Service) executeManagedTurn(ctx context.Context, store *TaskStore, t Ta
 	key := t.MainSessionKey
 	if !messageTurn {
 		key, e = s.Runner.EnsureAgentSession(ctx, exec)
+	} else if target, _, terr := taskMessageTarget(ctx, store, t, tmpl); terr == nil && strings.TrimSpace(target) != "" {
+		// fork: a message turn goes to the session of the stage the task now sits
+		// on, not to MainSessionKey. Every managed turn overwrites
+		// MainSessionKey with the session of whichever stage ran last, so a
+		// rework request for an earlier stage was delivered to a later stage's
+		// session -- the acceptance reviewer -- regardless of stage_index.
+		// Resolving it here (rather than trusting the caller) keeps this the one
+		// place that decides delivery, so no path can bypass it.
+		key = strings.TrimSpace(target)
 	}
 	if e != nil {
 		s.opMu.Unlock()

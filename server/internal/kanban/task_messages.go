@@ -129,14 +129,25 @@ func taskMessageTarget(ctx context.Context, store *TaskStore, task Task, tmpl Ta
 			continue
 		}
 		stage = tmpl.Stages[i].Snapshot
-		if task.GroupID == "" {
-			run, err := store.LatestStageRun(ctx, task.ID, i)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return "", stage, err
-			}
-			if err == nil && strings.TrimSpace(run.SessionKey) != "" {
-				return strings.TrimSpace(run.SessionKey), stage, nil
-			}
+		// fork: look up the stage's own session for grouped tasks too. Upstream
+		// skipped this branch when GroupID != "", falling back to MainSessionKey
+		// -- which every managed turn overwrites with the session of whichever
+		// stage ran last, so a rework request addressed to the current stage
+		// landed on a later stage's session instead.
+		//
+		// The lookup takes the newest run that actually HAS a session, because a
+		// stage can hold several runs and the newest is not always the one that
+		// talked to an agent: executeManagedTurn creates a fresh pending run
+		// (empty SessionKey) for each message turn. Taking that run would make
+		// the caller fall through to MainSessionKey -- the same stage-jumping
+		// bug -- so the query filters on a non-empty session_key instead of
+		// relying on ORDER BY alone.
+		run, err := store.LatestStageRunWithSession(ctx, task.ID, i)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", stage, err
+		}
+		if err == nil && strings.TrimSpace(run.SessionKey) != "" {
+			return strings.TrimSpace(run.SessionKey), stage, nil
 		}
 		break
 	}

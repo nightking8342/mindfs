@@ -155,12 +155,14 @@ func TestGroupPublicationDependenciesAndNewInstructions(t *testing.T) {
 	if done.Task.Status != StatusSuccess {
 		t.Fatal("grouped task did not complete")
 	}
-	if _, e := s.ManagedAction(ctx, g.RootID, a.Task.ID, "to-task", ManagedInput{Message: "fix"}); e != nil {
-		t.Fatal(e)
+	// fork: a completed task is closed to further messages -- rework goes
+	// through a new task, not by reopening a delivered one.
+	if _, e := s.ManagedAction(ctx, g.RootID, a.Task.ID, "to-task", ManagedInput{Message: "fix"}); e == nil {
+		t.Fatal("completed task accepted new instructions")
 	}
-	blocked, _ = store.GetTask(ctx, b.Task.ID)
-	if blocked.BlockReason != "" || s.managedReady(ctx, store, blocked) {
-		t.Fatal("downstream must wait for dependency without a review state")
+	blocked, _ = store.GetTask(ctx, a.Task.ID)
+	if blocked.Status != StatusSuccess {
+		t.Fatal("rejected message still reopened the completed task")
 	}
 }
 func TestGroupMessagesReturnToOrdinarySession(t *testing.T) {
@@ -324,7 +326,6 @@ func TestReplyResumesWaitingTask(t *testing.T) {
 	}{
 		{"waiting for answer", StatusWaitingUser, 1, StatusQueued},
 		{"execution failed", StatusFail, 1, StatusQueued},
-		{"already completed", StatusSuccess, 1, StatusQueued},
 		{"not started", StatusPending, 0, StatusQueued},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -800,10 +801,30 @@ func TestGroupAcceptanceNotificationOncePerPlanVersion(t *testing.T) {
 	refresh()
 	refresh()
 	count(1)
-	if _, err := s.ManagedAction(ctx, g.RootID, d.Task.ID, "to-task", ManagedInput{Message: "verify again"}); err != nil {
+	// fork: reopening a delivered task via -to-task is no longer allowed, so the
+	// plan_version bump is exercised through the other route that produces one --
+	// appending work to the group (appendToGroup). The point of this test is the
+	// acceptance_ready dedup key, not the reopen mechanism.
+	more, err := s.CreateGroupTasks(ctx, g.RootID, g.ID, []ChildPlanItem{{
+		Ref:             "more",
+		CreateTaskInput: CreateTaskInput{RootID: g.RootID, GroupID: g.ID, TaskTemplateID: d.Task.TaskTemplateID, Input: "more work"},
+	}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	finish()
+	var appended string
+	for _, t := range more.Tasks {
+		if t.Task.ID != d.Task.ID {
+			appended = t.Task.ID
+		}
+	}
+	if appended == "" {
+		t.Fatalf("append did not create a task: %+v", more.Tasks)
+	}
+	// groupAcceptable requires the task to be published as well as successful.
+	if _, err := store.db.ExecContext(ctx, "UPDATE tasks SET published=1,current_stage_index=1,status='success',completed_at=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), appended); err != nil {
+		t.Fatal(err)
+	}
 	refresh()
 	count(2)
 	var payload string

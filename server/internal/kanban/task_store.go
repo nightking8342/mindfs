@@ -508,6 +508,17 @@ func (s *TaskStore) LatestStageRun(ctx context.Context, taskID string, stageInde
 	return scanStageRun(row)
 }
 
+// LatestStageRunWithSession returns the newest run of a stage that carries a
+// session key. A stage accumulates runs: the first is created when the stage
+// starts, and executeManagedTurn creates further pending runs for message turns,
+// which have no session of their own. Callers that need "the conversation this
+// stage talked to an agent in" must skip those, otherwise they see an empty key
+// and fall back to a different stage's session.
+func (s *TaskStore) LatestStageRunWithSession(ctx context.Context, taskID string, stageIndex int) (StageRun, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, task_id, stage_index, stage_name, role, status, session_key, input, rendered_prompt, started_at, finished_at, created_at, updated_at, trigger, result FROM stage_runs WHERE task_id = ? AND stage_index = ? AND session_key != '' ORDER BY created_at DESC LIMIT 1`, strings.TrimSpace(taskID), stageIndex)
+	return scanStageRun(row)
+}
+
 func (s *TaskStore) UpdateTaskStatus(ctx context.Context, taskID, status string, admitted *bool, completed bool) error {
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	set := []string{"status = ?", "updated_at = ?"}

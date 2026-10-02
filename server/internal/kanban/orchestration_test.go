@@ -167,7 +167,7 @@ func (r *orchestrationRunner) EnsureAgentSession(ctx context.Context, exec Agent
 func (r *orchestrationRunner) RunAgentStage(ctx context.Context, e AgentStageExecution) error {
 	return r.run(e)
 }
-func TestNewInstructionsReopenOnlyTargetAndPreserveResults(t *testing.T) {
+func TestCompletedTaskRejectsNewInstructions(t *testing.T) {
 	ctx := context.Background()
 	s, store, p := orchestrationFixture(t)
 	a := child(t, s, p, "a")
@@ -208,53 +208,34 @@ func TestNewInstructionsReopenOnlyTargetAndPreserveResults(t *testing.T) {
 	if done.Task.Status != StatusSuccess || done.Task.SchedulerAdmitted {
 		t.Fatal("completion not committed")
 	}
-	// Inspect message-driven reopening without asynchronous scheduling.
+	// fork: a delivered task is closed. Upstream reopened it here (stage pointer
+	// back to the nearest agent stage, status to waiting_user) while leaving its
+	// downstream tasks untouched; policy decision is that rework must be a new
+	// task instead, which also removes the downstream-cascade question entirely.
 	s.Runner = nil
 	b.Task, _ = store.GetTask(ctx, b.Task.ID)
 	b.Task.Status = StatusSuccess
 	b.Task.CompletedAt = time.Now().Format(time.RFC3339Nano)
 	_ = store.UpdateTask(ctx, b.Task)
-	if _, e := s.ManagedAction(ctx, p.Task.RootID, a.Task.ID, "to-task", ManagedInput{Message: "fix edge case"}); e != nil {
-		t.Fatal(e)
+	if _, e := s.ManagedAction(ctx, p.Task.RootID, a.Task.ID, "to-task", ManagedInput{Message: "fix edge case"}); e == nil {
+		t.Fatal("completed task accepted new instructions")
+	}
+
+	// Nothing moved: neither the finished task nor its finished dependent.
+	unchanged, _ := store.GetDetail(ctx, a.Task.ID)
+	if unchanged.Task.Status != StatusSuccess || unchanged.Task.CompletedAt != done.Task.CompletedAt || len(unchanged.StageRuns) != len(done.StageRuns) {
+		t.Fatalf("rejected message mutated the completed task: %+v", unchanged.Task)
 	}
 	downstream, _ := store.GetTask(ctx, b.Task.ID)
 	if downstream.Status != StatusSuccess || downstream.BlockReason != "" {
 		t.Fatal("unaddressed downstream task changed")
 	}
-	revised, _ := store.GetDetail(ctx, a.Task.ID)
-	if revised.Task.Status != StatusWaitingUser || revised.Task.CompletedAt != "" || len(revised.StageRuns) != len(done.StageRuns) || revised.StageRuns[1].Result == "" {
-		t.Fatal("new instructions lost history or kept target complete")
-	}
-	runner.run = func(exec AgentStageExecution) error {
-		if exec.Run.ID == done.StageRuns[1].ID || exec.Task.MainSessionKey != done.Task.MainSessionKey || !strings.Contains(exec.Prompt, "fix edge case") {
-			t.Error("follow-up did not reuse session with a new execution and message")
-		}
-		for _, redundant := range []string{`"message"`, "parent_task_id:", "parent_session_key:", "plan_version:", "Read mindfs -orchestration", "## 共享上下文", "## MindFS execution", "root_id:", "task_id:", "## 前置任务"} {
-			if strings.Contains(exec.Prompt, redundant) {
-				t.Errorf("redundant follow-up prompt content: %s", redundant)
-			}
-		}
-		if strings.Count(exec.Prompt, "fix edge case") != 1 {
-			t.Error("reply content duplicated")
-		}
-		_, err := s.ManagedAction(ctx, p.Task.RootID, a.Task.ID, "from-task", ManagedInput{Completed: true, Message: "edge case fixed"})
-		return err
-	}
-	s.Runner = runner
-	revised.Task.SchedulerAdmitted = false
-	if err := store.UpdateTask(ctx, revised.Task); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.executeTaskMessages(ctx, p.Task.RootID, a.Task.ID); err != nil {
-		t.Fatal(err)
-	}
-	latest, err := store.GetDetail(ctx, a.Task.ID)
-	if err != nil || latest.Task.Status != StatusSuccess || len(latest.StageRuns) != len(done.StageRuns)+1 || latest.StageRuns[1].Result != done.StageRuns[1].Result {
-		t.Fatalf("follow-up did not complete with preserved history: %+v err=%v", latest, err)
-	}
+
+	// The message is not silently swallowed either: delivery is refused up front,
+	// so the caller learns immediately rather than after execution.
 	inbox, err := store.Inbox(ctx, a.Task.ID)
 	if err != nil || len(inbox) != 0 {
-		t.Fatalf("successful follow-up did not consume message: %+v err=%v", inbox, err)
+		t.Fatalf("rejected message still queued: %+v err=%v", inbox, err)
 	}
 }
 
