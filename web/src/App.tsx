@@ -17,6 +17,7 @@ import { ProbePanel } from "./components/ProbePanel";
 import {
   logPending,
   logPendingValue,
+  logSendServerCheck,
   pendingProbeEnabled,
   registerProbeSources,
 } from "./services/pendingProbe";
@@ -1594,7 +1595,9 @@ export function App({ onGoHome }: AppProps) {
   // 临时诊断探针（pending）：把上面几份 state 副本的即时取值暴露给采样器。
   // 排查结束后连同 services/pendingProbe.ts 一起删除。
   useEffect(() => {
-    if (!pendingProbeEnabled()) return;
+    // 刻意不判断 pendingProbeEnabled：探针常在页面加载后才被开启，
+    // 若在此处早退，之后开启探针时快照源没注册，每条记录的五份副本取值
+    // 都会是空的。这里无条件注册（快照函数只在 enabled 时才被调用）。
     registerProbeSources({
       fetchServerView: async () => {
         const payload = await apiProtectedJSON<any>(appPath("/api/replying-sessions"));
@@ -3835,17 +3838,16 @@ export function App({ onGoHome }: AppProps) {
           sessionService.clearEventCursor(resolvedRoot, resolvedKey);
         }
       }
-      const serverPending =
-        typeof (fullSession as any)?.pending === "boolean"
-          ? !!(fullSession as any).pending
-          : undefined;
+      // 注意：这个值**不是服务端给的**。服务端的 session 响应里没有 pending
+      // 字段（全仓无 json:"pending"），它来自 syncSession 里
+      // withSessionMeta(base, incoming) 对 IndexedDB 缓存的展开。
+      // 缓存已被 getCachedSession/toPersistentSession 剥掉 pending，这里若
+      // 仍读到值，只可能是内存态，不能据此断定「服务端说在跑」。
+      const serverPending = undefined as boolean | undefined;
       if (serverPending === false) {
         clearLocalPendingForSession(resolvedRoot, resolvedKey);
       }
-      const pending =
-        serverPending === false
-          ? false
-          : resolvePendingForSession(resolvedRoot, resolvedKey, !!serverPending);
+      const pending = resolvePendingForSession(resolvedRoot, resolvedKey, false);
       sessionCacheRef.current[cacheKey] = {
         ...(fullSession as any),
         key: resolvedKey,
@@ -5924,14 +5926,14 @@ export function App({ onGoHome }: AppProps) {
         options?: { writeCache?: boolean },
       ) => {
         const shouldWriteCache = options?.writeCache !== false;
-        const serverPending =
-          typeof (fullSession as any)?.pending === "boolean"
-            ? !!(fullSession as any).pending
-            : undefined;
-        const pending =
-          serverPending !== undefined
-            ? serverPending
-            : resolvePendingForSession(targetRoot, key, preservePending);
+        // 这个值**不是服务端给的**。服务端 session 响应里没有 pending 字段
+        // （全仓无 json:"pending"），它来自 syncSession 里
+        // withSessionMeta(base, incoming) 对 IndexedDB 缓存的展开。
+        // 实测：它一旦是 false 就无条件覆盖本地状态，把正在跑的会话判成
+        // 「没在跑」——左下角状态消失、按钮从停止变回发送，而列表呼吸灯
+        // 因为走另一条数据源仍在闪。三处就此分叉。故不再采纳，一律用本地推断。
+        const serverPending = undefined as boolean | undefined;
+        const pending = resolvePendingForSession(targetRoot, key, preservePending);
         // 临时诊断探针（pending）：fullSession 来自 syncSession，而 syncSession
         // 会把 IndexedDB 里的旧 session 展开进来（withSessionMeta 是
         // {...base, ...incoming}），所以服务端不返回 pending 时，这里仍可能
@@ -5940,8 +5942,11 @@ export function App({ onGoHome }: AppProps) {
           serverPending,
           preservePending,
           resolvedPending: pending,
+          // rawPending 是 syncSession 送进来的原始值（含缓存残留），
+          // 单独记下来：它非 undefined 就说明那条合并路径仍在污染。
+          rawPending: (fullSession as any)?.pending,
           pendingSource:
-            serverPending === undefined ? "not-from-server" : "from-server",
+            serverPending === undefined ? "local-inference" : "from-server",
         });
         const normalized = {
           ...(fullSession as any),
@@ -6776,6 +6781,16 @@ export function App({ onGoHome }: AppProps) {
         currentSessionPending: currentSessionRef.current?.pending,
         hasSession: !!session,
       });
+      // 同时问一次服务端：界面说在跑、服务端却说没在跑，就是僵尸 pending 的直接证据。
+      void logSendServerCheck(
+        rootSessionKey(activeRoot, sendSessionKey || ""),
+        {
+          isQueueSend,
+          uiSaysPending:
+            (session as any)?.pending === true ||
+            currentSessionRef.current?.pending === true,
+        },
+      );
       if (sendSessionKey && session) {
         const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";

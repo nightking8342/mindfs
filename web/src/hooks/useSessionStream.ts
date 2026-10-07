@@ -465,6 +465,7 @@ export function useSessionStream(
   const [streamVersion, setStreamVersion] = useState(0);
   const [streamStatusText, setStreamStatusText] = useState("");
 
+
   const baseTimeline = useMemo(
     () =>
       applySessionContextWindow(
@@ -488,6 +489,25 @@ export function useSessionStream(
     const unsubscribe = sessionService.subscribe(sessionKey, {
       onStream: (event) => {
         setStreamVersion((value) => value + 1);
+        if (event.type === "error") {
+          setStreamStatusText("");
+          setIsStreaming(false);
+          return;
+        }
+        // 回合边界：本轮回复结束。这里必须清掉，否则 isStreaming 会一直停在
+        // true——残留的流事件（迟到的分片、子代理的块、重连回放）只要有一条
+        // 到达就把状态重新点亮，而清它的路径只有 session.done / error，太晚。
+        // 实测症状：Agent 已输出完毕、服务端也报 pending=false，左下角却仍在
+        // 显示「正在生成」（渲染条件是 isAwaiting || isStreaming）。
+        if (event.type === "message_done") {
+          setStreamStatusText("");
+          setIsStreaming(false);
+          return;
+        }
+        // 不再用「本地 pending 是否为空」来决定点不点亮：本地 pending 会被
+        // session.done / 对账 / 切会话清掉，而服务端可能仍在跑，那时每一条
+        // 真事件都被拦下 → 内容在涨、状态全灭（实测 500+ 条被拦）。
+        // 收到事件就点亮，收尾由 message_done / done / error 负责。
         if (event.type === "recovery") {
           setStreamStatusText(event.data?.message || translateNow("session.recovering"));
           setIsStreaming(true);
@@ -496,15 +516,7 @@ export function useSessionStream(
         if (event.type === "message_chunk") {
           setStreamStatusText("");
         }
-        if (event.type === "message_done") {
-          return;
-        }
-        if (event.type === "error") {
-          setStreamStatusText("");
-          setIsStreaming(false);
-        } else {
-          setIsStreaming(true);
-        }
+        setIsStreaming(true);
       },
       onDone: () => {
         setStreamStatusText("");
@@ -519,7 +531,11 @@ export function useSessionStream(
     return () => {
       unsubscribe();
     };
-  }, [sessionKey, sessionPending]);
+    // 依赖只留 sessionKey：sessionPending 通过 ref 读取。若把它放进依赖，
+    // 每次 pending 翻转都会重跑订阅——而 pending 恰恰是由流事件驱动的，
+    // 于是形成「事件改 pending → 重订阅 → 丢掉订阅间隙的事件」的循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey]);
 
   // Viewport-only rerenders must not look like new session content to the
   // viewer's tail-following effect.

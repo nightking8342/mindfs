@@ -465,6 +465,9 @@ class SessionService {
       if (this.ws !== ws) return;
       this.clearConnectTimeout();
       this.ws = null;
+      // 断连时清空流状态：activeStreams 是模块级单例，不清就会跨重连残留，
+      // 重连后任何迟到事件都能把旧会话重新点亮。
+      this.clearAllActiveStreams();
       this.emit({
         type: "ws.closed",
         payload: {
@@ -816,13 +819,20 @@ class SessionService {
     if (type !== "session.stream") return;
     const event = payload.event as StreamEvent | undefined;
     if (!event) return;
-    if (event.type === "error") {
+    // message_done 是本轮回复的结束信号：到了就该把「在流式」摘掉。
+    // 此前它什么都不做，只靠 session.done / session.error 清，而 session.done
+    // 会因队列续跑、replay 等原因迟迟不到甚至丢失 —— 残留下来后，只要任何
+    // 一条迟到的流事件到达（重连回放、子代理的块），就被重新点亮并永久停留。
+    if (event.type === "error" || event.type === "message_done") {
       this.activeStreams.delete(sessionKey);
       return;
     }
-    if (event.type !== "message_done") {
-      this.activeStreams.add(sessionKey);
-    }
+    this.activeStreams.add(sessionKey);
+  }
+
+  /** 连接断开时清空：activeStreams 是模块级单例，否则会跨重连残留。 */
+  clearAllActiveStreams() {
+    this.activeStreams.clear();
   }
 
   isSessionStreaming(sessionKey: string) {
@@ -1929,8 +1939,18 @@ function cloneSession(session: Session): Session {
 }
 
 function toPersistentSession(session: Session): Session {
+  // pending 是瞬态：它表示「此刻这一轮正在跑」，只在内存里有意义。
+  // 落盘后会变成永久残留 —— 下次 restoreActiveSession 读缓存时，
+  // withSessionMeta/base 的展开会把这条陈旧 true 一起合并回来，
+  // 而服务端响应里根本没有 pending 字段，于是被误当成「服务端说在跑」采纳，
+  // 屏幕就一直显示「正在生成」，连刷新都修不好（刷新只清内存，不清 IDB）。
+  // 实测证据：restoreActiveSession 日志出现 serverPending:true 且
+  // pendingSource:"from-server"，但服务端从不返回该字段。
+  const { pending: _transientPending, ...rest } = session as Session & {
+    pending?: boolean;
+  };
   return {
-    ...session,
+    ...rest,
     exchanges: Array.isArray(session.exchanges)
       ? session.exchanges.filter((exchange) => {
           const seq = Number((exchange as any)?.seq || 0);
@@ -1946,7 +1966,14 @@ export async function getCachedSession(
   sessionKey: string,
 ): Promise<Session | null> {
   const cached = await loadCachedSession(rootId, sessionKey);
-  return cached ? cloneSession(cached) : null;
+  if (!cached) {
+    return null;
+  }
+  // 剥掉历史遗留的 pending（见 toPersistentSession 的说明）：旧版本写进
+  // IndexedDB 的那条 true 会让会话永远显示「正在生成」，且刷新修不好。
+  // 读取侧兜底，保证已存在的脏缓存也能自愈，不必等用户清缓存。
+  const { pending: _stale, ...rest } = cached as Session & { pending?: boolean };
+  return cloneSession(rest as Session);
 }
 
 export async function setCachedSessionRelatedFiles(
