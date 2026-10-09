@@ -36,6 +36,7 @@ import {
   sessionService,
   setCachedSessionRelatedFiles,
   syncSession,
+  truncateSessionHistory,
   type MultiRootSessionGroup,
   type SyncSessionResult,
   type RelatedFile,
@@ -73,6 +74,11 @@ import {
   persistSendShortcut,
   type SendShortcut,
 } from "./services/sendShortcut";
+import {
+  loadBlueRingGestureConfig,
+  persistBlueRingGestureConfig,
+  type BlueRingGestureConfig,
+} from "./services/quickSwitch";
 import {
   loadFontSizePreferences,
   persistFontSizePreferences,
@@ -1767,6 +1773,11 @@ export function App({ onGoHome }: AppProps) {
   const taskCreateTemplateMenuRef = useRef<HTMLDivElement | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AgentStatus[]>([]);
   const [scheduledAgentDialogOpen, setScheduledAgentDialogOpen] = useState(false);
+  const [scheduledAgentSession, setScheduledAgentSession] = useState<SessionItem | null>(null);
+  const openSessionScheduledTask = (session: SessionItem) => {
+    setScheduledAgentSession({ ...session, root_id: session.root_id || currentRootId || undefined });
+    setScheduledAgentDialogOpen(true);
+  };
   const [taskTemplates, setTaskTemplates] = useState<TaskTemplate[]>([]);
   const [taskTemplateDialogOpen, setTaskTemplateDialogOpen] = useState(false);
   const [taskTemplateDialogTemplate, setTaskTemplateDialogTemplate] = useState<TaskTemplate | null>(null);
@@ -1842,6 +1853,7 @@ export function App({ onGoHome }: AppProps) {
   const { isMobile, isTablet } = useResponsive();
   const [mobileEnterKeySends, setMobileEnterKeySends] = useState(loadMobileEnterKeySends);
   const [sendShortcut, setSendShortcut] = useState<SendShortcut | null>(loadSendShortcut);
+  const [blueRingGestures, setBlueRingGestures] = useState<BlueRingGestureConfig>(loadBlueRingGestureConfig);
   const [sidebarsSwapped, setSidebarsSwapped] = useState(loadSidebarsSwapped);
   const [fontSizePreferences, setFontSizePreferences] = useState<FontSizePreferences>(loadFontSizePreferences);
   const [gitDiffSideBySide, setGitDiffSideBySide] = useState(loadGitDiffSideBySide);
@@ -2562,6 +2574,10 @@ export function App({ onGoHome }: AppProps) {
   useEffect(() => {
     persistSendShortcut(sendShortcut);
   }, [sendShortcut]);
+
+  useEffect(() => {
+    persistBlueRingGestureConfig(blueRingGestures);
+  }, [blueRingGestures]);
 
   useEffect(() => {
     persistFontSizePreferences(fontSizePreferences);
@@ -3809,10 +3825,12 @@ export function App({ onGoHome }: AppProps) {
       }
       const syncResult = await request;
       let fullSession = syncResult?.session;
+      const latestAfterSync = sessionCacheRef.current[cacheKey];
+      if (Number(latestAfterSync?.history_revision || 0) > Number(fullSession?.history_revision || 0)) return latestAfterSync;
       if (!fullSession) {
         return null;
       }
-      if (resumeCursor) {
+      if (resumeCursor && Number(cachedBeforeSync?.history_revision || 0) === Number(fullSession.history_revision || 0)) {
         const incomingExchanges = Array.isArray((fullSession as any).exchanges)
           ? ((fullSession as any).exchanges as Exchange[])
           : [];
@@ -10590,6 +10608,7 @@ export function App({ onGoHome }: AppProps) {
           ) {
             const rootID = payload.root_id;
             const sessionKey = payload.session_key;
+            setSelectedPendingByKey(sessionKey, true);
             setMultiProjectSessionPending(rootID, sessionKey, true);
             const exchange = payload.exchange;
             const sessionMeta = payload.session;
@@ -10694,11 +10713,15 @@ export function App({ onGoHome }: AppProps) {
                       pending_ack: false,
                     },
                   ],
+              pending: true,
               updated_at:
                 sessionMeta?.updated_at ||
                 exchange?.timestamp ||
                 new Date().toISOString(),
             } as Session;
+            if (boundSessionByRootRef.current[rootID] === sessionKey) {
+              setDrawerSessionForRoot(rootID, sessionCacheRef.current[cacheKey]);
+            }
             const runtimeAgent = sessionMeta?.agent || exchange?.agent || "";
             if (runtimeAgent) {
               updateSessionAgentForKey(
@@ -10756,6 +10779,26 @@ export function App({ onGoHome }: AppProps) {
             }
           }
           break;
+        case "session.truncated": {
+          const rootID = String(payload?.root_id || "");
+          const key = String(payload?.session_key || "");
+          if (rootID && key) {
+            const cacheKey = rootSessionKey(rootID, key);
+            const cached = sessionCacheRef.current[cacheKey];
+            if (cached && Number(cached.history_revision || 0) >= Number(payload.history_revision)) break;
+            const truncated = truncateSessionHistory(cached, payload);
+            const next = truncated || payload.recovered_session || {
+              ...cached, key, root_id: rootID, history_revision: payload.history_revision,
+              exchanges: [], exchange_aux: {}, pending: false, context_window: undefined,
+            };
+            sessionCacheRef.current[cacheKey] = next;
+            loadedSessionRef.current[cacheKey] = !!(truncated || payload.recovered_session);
+            if (boundSessionByRootRef.current[rootID] === key) setDrawerSessionForRoot(rootID, next);
+            bumpCacheVersion();
+            if (!truncated && !payload.recovered_session) void restoreActiveSession(rootID, key);
+          }
+          break;
+        }
         case "session.meta.updated":
           if (
             typeof payload?.root_id === "string" &&
@@ -11273,6 +11316,9 @@ export function App({ onGoHome }: AppProps) {
   const describeE2EEPromptError = useCallback((err: unknown) => {
     const code = err instanceof Error ? String(err.message || "").trim() : "";
     switch (code) {
+      case "e2ee_rate_limited":
+      case "e2ee_open_failed_429":
+        return t("e2ee.rateLimited");
       case "e2ee_proof_invalid":
         return t("e2ee.invalidProof");
       case "e2ee_secure_context_required":
@@ -11291,7 +11337,8 @@ export function App({ onGoHome }: AppProps) {
   }, [t]);
 
   const submitE2EESecret = useCallback(async () => {
-    const trimmed = e2eeSecretInput.trim();
+    const trimmed = e2eeSecretInput.trim() ||
+      (bootstrapState.error === "e2ee_rate_limited" ? e2eeService.getSecret() : "");
     if (!trimmed) {
       setE2eePromptError(t("e2ee.codeRequired"));
       return;
@@ -11307,7 +11354,7 @@ export function App({ onGoHome }: AppProps) {
     } finally {
       setE2eePromptBusy(false);
     }
-  }, [describeE2EEPromptError, e2eeSecretInput, t]);
+  }, [bootstrapState.error, describeE2EEPromptError, e2eeSecretInput, t]);
 
   useEffect(() => {
     if (!isRelayPWAContext()) {
@@ -14475,7 +14522,10 @@ export function App({ onGoHome }: AppProps) {
         onCreateWorktree={handleOpenWorktreeLocation}
         onSwitchWorktree={handleSwitchWorktreeStart}
         onRemoveWorktree={handleRemoveCurrentWorktree}
-        onOpenScheduledAgentTasks={() => setScheduledAgentDialogOpen(true)}
+        onOpenScheduledAgentTasks={() => {
+          setScheduledAgentSession(null);
+          setScheduledAgentDialogOpen(true);
+        }}
         menuOverlay={
           projectAddMode === "worktree_location"
             ? projectAddOverlay
@@ -14914,6 +14964,7 @@ export function App({ onGoHome }: AppProps) {
         onSync={handleSyncSession}
         onPin={handlePinSession}
         onRename={handleRenameSession}
+        onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
         onProjectClick={(rootId) => {
           actionHandlers.open_dir({
@@ -15000,6 +15051,7 @@ export function App({ onGoHome }: AppProps) {
         onSync={handleSyncSession}
         onPin={handlePinSession}
         onRename={handleRenameSession}
+        onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
         onLoadChildren={
           sessionSearchOpen && sessionSearchResultsMode
@@ -15285,6 +15337,8 @@ export function App({ onGoHome }: AppProps) {
             onSendShortcutChange={setSendShortcut}
             sidebarsSwapped={sidebarsSwapped}
             onSidebarsSwappedChange={setSidebarsSwapped}
+            blueRingGestures={blueRingGestures}
+            onBlueRingGesturesChange={setBlueRingGestures}
             gitDiffSideBySide={gitDiffSideBySide}
             onGitDiffSideBySideChange={setGitDiffSideBySide}
             multiProjectSessionsEnabled={multiProjectSessionsEnabled}
@@ -15411,6 +15465,7 @@ export function App({ onGoHome }: AppProps) {
               onToggleLeftSidebar={() => setIsLeftOpen((v) => !v)}
               onToggleRightSidebar={() => setIsRightOpen((v) => !v)}
               sidebarsSwapped={sidebarsSwapped}
+              blueRingGestures={blueRingGestures}
             />
           </div>
         }
@@ -15570,9 +15625,9 @@ export function App({ onGoHome }: AppProps) {
                 outline: "none",
               }}
             />
-            {e2eePromptError ? (
+            {e2eePromptError || bootstrapState.error === "e2ee_rate_limited" ? (
               <div style={{ color: "#dc2626", fontSize: "13px" }}>
-                {e2eePromptError}
+                {e2eePromptError || t("e2ee.rateLimited")}
               </div>
             ) : null}
             <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
@@ -16098,7 +16153,8 @@ export function App({ onGoHome }: AppProps) {
       ) : null}
       <ScheduledAgentTaskDialog
         open={scheduledAgentDialogOpen}
-        rootId={currentRootId}
+        rootId={scheduledAgentSession?.root_id || currentRootId}
+        session={scheduledAgentSession}
         agents={availableAgents}
         onClose={() => setScheduledAgentDialogOpen(false)}
       />

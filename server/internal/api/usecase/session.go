@@ -698,9 +698,10 @@ func copyForkHistory(ctx context.Context, manager *session.Manager, from, to *se
 }
 
 type GetSessionInput struct {
-	RootID string
-	Key    string
-	Seq    int
+	RootID          string
+	Key             string
+	Seq             int
+	HistoryRevision int
 }
 
 func (s *Service) GetSession(ctx context.Context, in GetSessionInput) (*session.Session, error) {
@@ -711,13 +712,35 @@ func (s *Service) GetSession(ctx context.Context, in GetSessionInput) (*session.
 	if err != nil {
 		return nil, err
 	}
-	return manager.Get(ctx, in.Key, in.Seq)
+	current, err := manager.Get(ctx, in.Key, in.Seq)
+	if err == nil && in.Seq > 0 && current.HistoryRevision != in.HistoryRevision {
+		return manager.Get(ctx, in.Key, 0)
+	}
+	return current, err
 }
 
 type GetSessionExchangeAuxInput struct {
 	RootID string
 	Key    string
 	Seq    int
+}
+
+func (s *Service) GetSessionLogPath(ctx context.Context, in GetSessionInput) (string, error) {
+	if err := s.ensureRegistry(); err != nil {
+		return "", err
+	}
+	manager, err := s.Registry.GetSessionManager(in.RootID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := manager.Get(ctx, in.Key, 0); err != nil {
+		return "", err
+	}
+	path := manager.ExchangeLogAbsolutePath(in.Key)
+	if path == "" {
+		return "", errors.New("session log path unavailable")
+	}
+	return path, nil
 }
 
 func (s *Service) GetSessionExchangeAux(ctx context.Context, in GetSessionExchangeAuxInput) (map[int][]session.ExchangeAux, error) {
@@ -1112,7 +1135,7 @@ func (s *Service) BuildPrompt(in BuildPromptInput) string {
 		if in.Session.TaskID != "" {
 			prompt += " task_id=" + in.Session.TaskID
 		}
-		prompt += ". If asked to orchestrate tasks, read mindfs -orchestration; create a task group with this parent session_key, then create ordinary template tasks in that group.\n"
+		prompt += ". Use MindFS task orchestration only when the user explicitly requests it or clearly expresses intent to use it. General requests to plan, split, or execute work, task complexity, and the presence of this context do not imply that intent. Only when that intent is clear, read mindfs -orchestration; create a task group with this parent session_key, then create ordinary template tasks in that group.\n"
 	}
 	return prependSwitchHint(in, prompt)
 }

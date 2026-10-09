@@ -5,6 +5,9 @@ import { rootBadgeButtonStyle, rootBadgeStyle } from "./rootBadgeStyle";
 import { useI18n, type Locale } from "../i18n";
 // 临时诊断探针（pending），排查结束后连同调用点一起删除。
 import { logPendingValue, pendingProbeEnabled } from "../services/pendingProbe";
+import { copyText } from "../services/clipboard";
+import { reportError } from "../services/error";
+import { sessionService } from "../services/session";
 
 export type SessionType = "chat" | "plugin" | "command";
 
@@ -50,6 +53,7 @@ type SessionListProps = {
   onSync?: (session: SessionItem) => Promise<void> | void;
   onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
+  onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
   onLoadChildren?: (
     session: SessionItem,
@@ -97,6 +101,7 @@ type ProjectSessionListProps = {
   onSync?: (session: SessionItem) => Promise<void> | void;
   onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
+  onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
   onProjectClick?: (rootId: string) => void;
   onLoadMoreProject?: (group: ProjectSessionGroup) => Promise<void> | void;
@@ -313,6 +318,7 @@ export function SessionList({
   onSync,
   onPin,
   onRename,
+  onScheduledTask,
   onDelete,
   onLoadChildren,
   onLoadOlder,
@@ -694,6 +700,7 @@ export function SessionList({
                   onSync={onSync}
                   onPin={onPin}
                   onRename={onRename}
+                  onScheduledTask={onScheduledTask}
                   onDelete={onDelete}
                 />
               );
@@ -747,6 +754,7 @@ export function MultiProjectSessionList({
   onSync,
   onPin,
   onRename,
+  onScheduledTask,
   onDelete,
   onProjectClick,
   onLoadMoreProject,
@@ -1168,6 +1176,7 @@ export function MultiProjectSessionList({
                           onSync={onSync}
                           onPin={onPin}
                           onRename={onRename}
+                          onScheduledTask={onScheduledTask}
                           onDelete={onDelete}
                         />
                       );
@@ -1224,6 +1233,7 @@ function SessionCard({
   onSync,
   onPin,
   onRename,
+  onScheduledTask,
   onDelete,
   __probeSource = "list",
 }: {
@@ -1240,6 +1250,7 @@ function SessionCard({
   onSync?: (session: SessionItem) => Promise<void> | void;
   onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
+  onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
 }) {
   const { locale, t } = useI18n();
@@ -1265,6 +1276,8 @@ function SessionCard({
   const snippet = (session.search_snippet || "").trim();
   const isSearchResult = !!session.search_match_type;
   const [menuOpen, setMenuOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyingPath, setCopyingPath] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(storedName);
   const [saving, setSaving] = useState(false);
@@ -1277,6 +1290,22 @@ function SessionCard({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const submittingRef = useRef(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copySessionValue = (value: string) => {
+    setMenuOpen(false);
+    setCopied(false);
+    void copyText(value)
+      .then(() => setCopied(true))
+      .catch((err) => {
+        reportError("clipboard.write_failed", String((err as Error)?.message || t("session.copyFailed")));
+      });
+  };
 
   useEffect(() => {
     if (!editing) {
@@ -1799,13 +1828,18 @@ function SessionCard({
             </span>
           ) : null}
         </button>
+        {copied ? (
+          <span role="status" style={{ position: "absolute", right: 0, top: "100%", whiteSpace: "nowrap", padding: "4px 8px", borderRadius: "6px", background: "var(--menu-bg)", color: "var(--text-primary)", fontSize: "12px", zIndex: 21 }}>
+            {t("session.copied")}
+          </span>
+        ) : null}
         {menuOpen ? (
           <div
             style={{
               position: "absolute",
               top: "calc(100% + 6px)",
               right: 0,
-              minWidth: "120px",
+              minWidth: "170px",
               padding: "6px",
               borderRadius: "10px",
               border: "1px solid var(--border-color)",
@@ -1831,6 +1865,22 @@ function SessionCard({
               </span>
               {isPinned ? t("sessionList.unpin") : t("sessionList.pin")}
             </button>
+            {onScheduledTask && !session.pending && (!session.type || session.type === "chat") ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMenuOpen(false);
+                  onScheduledTask(session);
+                }}
+                style={{ ...menuItemStyle, color: "var(--text-primary)" }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+                </svg>
+                {t("scheduled.title")}
+              </button>
+            ) : null}
             <button
               type="button"
               disabled={syncing}
@@ -1888,6 +1938,42 @@ function SessionCard({
                 <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
               </svg>
               {t("sessionList.rename")}
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                copySessionValue(session.session_key || session.key);
+              }}
+              style={{ ...menuItemStyle, color: "var(--text-primary)", whiteSpace: "nowrap" }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <rect x="9" y="9" width="12" height="12" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              {t("sessionList.copyId")}
+            </button>
+            <button
+              type="button"
+              disabled={copyingPath || !session.root_id || session.pending}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!session.root_id || copyingPath) return;
+                setCopyingPath(true);
+                void sessionService.getSessionLogPath(session.root_id, session.session_key || session.key)
+                  .then(copySessionValue)
+                  .catch((err) => {
+                    reportError("clipboard.write_failed", String((err as Error)?.message || t("session.copyFailed")));
+                  })
+                  .finally(() => setCopyingPath(false));
+              }}
+              style={{ ...menuItemStyle, color: "var(--text-primary)", whiteSpace: "nowrap", opacity: copyingPath || !session.root_id || session.pending ? 0.55 : 1 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M8 13h8M8 17h8" />
+              </svg>
+              {copyingPath ? t("common.loading") : t("sessionList.copyPath")}
             </button>
             <button
               type="button"
