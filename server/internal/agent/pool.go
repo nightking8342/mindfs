@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -140,7 +141,7 @@ retryExisting:
 	p.mu.Unlock()
 
 	// openSession starts subprocesses and can be slow, so keep it outside the pool lock.
-	sess, err := p.openSession(ctx, protocol, def, in)
+	sess, err := p.openSessionGuarded(ctx, protocol, def, in)
 	if err != nil {
 		return nil, err
 	}
@@ -351,6 +352,72 @@ func (p *Pool) StartIdleReleaseLoop(ctx context.Context, idleFor func() time.Dur
 			}
 		}
 	}()
+}
+
+// openSessionTimeout bounds how long a single session open (subprocess spawn +
+// protocol handshake) may hold its per-runtime-group lock.
+//
+// The handshakes are not cancellable through the context handed to openSession
+// in every runtime: the claude SDK captures that ctx for the whole lifetime of
+// the stream, and the ACP runtime initializes its shared process against the
+// pool context. So a hung handshake used to pin the runtime lock forever —
+// every later GetOrCreate / Close / idle-release for that agent queued behind
+// it and the server stopped serving sessions entirely, with no error logged.
+// Bounding the wait (and discarding whatever the abandoned open eventually
+// produces) keeps the lock from being held indefinitely.
+const openSessionTimeout = 3 * time.Minute
+
+type openSessionResult struct {
+	sess agenttypes.Session
+	err  error
+}
+
+func (p *Pool) openSessionGuarded(ctx context.Context, protocol Protocol, def Definition, in agenttypes.OpenSessionInput) (agenttypes.Session, error) {
+	return awaitOpenSession(ctx, openSessionTimeout, in, func() (agenttypes.Session, error) {
+		return p.openSession(ctx, protocol, def, in)
+	})
+}
+
+// awaitOpenSession runs open with a bound so that a hung handshake cannot pin
+// the caller's runtime lock forever.
+func awaitOpenSession(ctx context.Context, timeout time.Duration, in agenttypes.OpenSessionInput, open func() (agenttypes.Session, error)) (agenttypes.Session, error) {
+	done := make(chan openSessionResult, 1)
+	go func() {
+		sess, err := open()
+		done <- openSessionResult{sess: sess, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case result := <-done:
+		return result.sess, result.err
+	case <-ctx.Done():
+		go discardOpenSession(done, in)
+		return nil, ctx.Err()
+	case <-timer.C:
+		go discardOpenSession(done, in)
+		err := fmt.Errorf("agent session open timed out after %s: agent=%s session=%s", timeout, in.AgentName, in.SessionKey)
+		log.Printf("[agent/pool] open_session.timeout %v", err)
+		return nil, err
+	}
+}
+
+// discardOpenSession drains an abandoned openSession so that a runtime session
+// which eventually comes up is closed instead of leaking a subprocess after
+// the caller has already given up on it.
+//
+// If the underlying handshake never returns, this goroutine stays parked on the
+// channel — that is unavoidable, since the runtimes expose no way to cancel a
+// spawn already in flight. One parked goroutine per timed-out open is a far
+// better failure mode than a permanently held runtime lock.
+func discardOpenSession(done <-chan openSessionResult, in agenttypes.OpenSessionInput) {
+	result := <-done
+	if result.sess != nil {
+		_ = result.sess.Close()
+	}
+	log.Printf("[agent/pool] open_session.abandoned agent=%s session=%s err=%v", in.AgentName, in.SessionKey, result.err)
 }
 
 func (p *Pool) openSession(ctx context.Context, protocol Protocol, def Definition, in agenttypes.OpenSessionInput) (agenttypes.Session, error) {
