@@ -83,6 +83,16 @@ type ActionBarProps = {
   onNewSession: SessionQuickActionsProps["onNewSession"];
   onSelectProject: SessionQuickActionsProps["onSelectProject"];
   onSelectSession: SessionQuickActionsProps["onSelectSession"];
+  currentDirPath?: SessionQuickActionsProps["currentDirPath"];
+  roots?: SessionQuickActionsProps["roots"];
+  onOpenRecentDirectory?: SessionQuickActionsProps["onOpenRecentDirectory"];
+  onToggleMultiProjectSessions?: SessionQuickActionsProps["onToggleMultiProjectSessions"];
+  onToggleEnterKeySends?: SessionQuickActionsProps["onToggleEnterKeySends"];
+  onCycleMainFontScale?: SessionQuickActionsProps["onCycleMainFontScale"];
+  onToggleMainContentView?: SessionQuickActionsProps["onToggleMainContentView"];
+  onCycleKanbanTemplate?: SessionQuickActionsProps["onCycleKanbanTemplate"];
+  onCreateTask?: SessionQuickActionsProps["onCreateTask"];
+  onOpenScheduledTasks?: SessionQuickActionsProps["onOpenScheduledTasks"];
   taskGroupBadge?: React.ReactNode;
   status?: WSStatus;
   agentsVersion?: number;
@@ -101,6 +111,7 @@ type ActionBarProps = {
   editDraftRequest?: {
     id: number;
     content: string;
+    mode?: "replace" | "append";
   } | null;
   queuedMessages?: QueuedMessageInfo[];
   inputHistory?: string[];
@@ -446,6 +457,16 @@ export function ActionBar({
   sendShortcut = null,
   sidebarsSwapped = false,
   blueRingGestures,
+  currentDirPath,
+  roots,
+  onOpenRecentDirectory,
+  onToggleMultiProjectSessions,
+  onToggleEnterKeySends,
+  onCycleMainFontScale,
+  onToggleMainContentView,
+  onCycleKanbanTemplate,
+  onCreateTask,
+  onOpenScheduledTasks,
 }: ActionBarProps) {
   const { t } = useI18n();
   const [modelSelectorSignal, setModelSelectorSignal] = useState(0);
@@ -567,6 +588,41 @@ export function ActionBar({
     }
     syncedSessionSignatureRef.current = "";
   }, [agent, agents]);
+
+  // Blue-ring agent quick switch: ping-pong between the two most recently used
+  // agents. Switching always applies the target agent's default model/effort —
+  // nothing else is touched.
+  const lastAgentRef = useRef("");
+  const applyAgentSelection = useCallback((name: string) => {
+    const nextStatus = agents.find((item) => item.name === name);
+    if (!nextStatus) return false;
+    const defaults = getAgentDefaults(nextStatus);
+    setAgent(nextStatus.name);
+    setModel(defaults.model);
+    setAgentMode("");
+    setEffort(defaults.effort);
+    setFastService(defaults.fastService);
+    return true;
+  }, [agents]);
+  const toggleRecentAgent = useCallback(() => {
+    if (!agent) return;
+    // 上一个 agent 可能已被卸载/改名，失效时回退到第一个可用的其他 agent
+    const lastValid = lastAgentRef.current && lastAgentRef.current !== agent && agents.some((item) => item.name === lastAgentRef.current)
+      ? lastAgentRef.current
+      : "";
+    const target = lastValid || (agents.find((item) => item.available && item.name !== agent)?.name || "");
+    if (!target || !applyAgentSelection(target)) return;
+    lastAgentRef.current = agent;
+  }, [agent, agents, applyAgentSelection]);
+  const pickAgent = useCallback((name: string) => {
+    // 绑定的 pick 可能因 agent 卸载/改名而失效，回退到第一个可用 agent，避免手势静默无效
+    const status = name ? agents.find((item) => item.name === name) : null;
+    const target = status ? name : (agents.find((item) => item.available)?.name || "");
+    if (!target || target === agent) return;
+    if (applyAgentSelection(target)) {
+      lastAgentRef.current = agent;
+    }
+  }, [agent, agents, applyAgentSelection]);
 
   useEffect(() => {
     const sessionKey = currentSession?.key || currentSession?.session_key || null;
@@ -720,7 +776,8 @@ export function ActionBar({
   useEffect(() => {
     if (currentSession || agents.length === 0) return;
     if (agents.some((a) => a.name === agent)) return;
-    const preferred = agents.find((a) => a.available) ?? agents[0];
+    const preferred = agents.find((a) => a.last_used && a.available)
+      ?? agents.find((a) => a.available) ?? agents[0];
     if (!preferred) {
       return;
     }
@@ -907,13 +964,21 @@ export function ActionBar({
     if (!editDraftRequest) {
       return;
     }
-    const nextText = editDraftRequest.content || "";
+    const incoming = editDraftRequest.content || "";
+    // append 模式（接力包填入）：已有草稿时拼在后面，空草稿才直接放入
+    const existing = serializedInput.trim();
+    const nextText = editDraftRequest.mode === "append" && existing
+      ? `${serializedInput.replace(/\s+$/, "")}\n\n${incoming}`
+      : incoming;
     editorRef.current?.setText(nextText);
     setSerializedInput(nextText);
     setActiveToken(null);
     setCandidates([]);
     setActiveCandidateIndex(0);
-    requestAnimationFrame(syncEditorHeight);
+    requestAnimationFrame(() => {
+      syncEditorHeight();
+      editorRef.current?.focus();
+    });
   }, [editDraftRequest, syncEditorHeight]);
 
   const appendPendingAttachments = useCallback((files: File[]) => {
@@ -1938,7 +2003,7 @@ export function ActionBar({
             />
 
             <div data-onboarding="input-controls" style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
-              <SessionQuickActions currentRootId={currentRootId} currentSessionKey={currentSession?.key || currentSession?.session_key} gestureConfig={blueRingGestures} onNewSession={() => { resetForNewSession(); onNewSession(); }} onSelectProject={onSelectProject} onSelectSession={onSelectSession} onToggleFileSidebar={onToggleLeftSidebar} onToggleSessionSidebar={onToggleRightSidebar} onOpenModelSelector={() => setModelSelectorSignal((value) => value + 1)} />
+              <SessionQuickActions currentRootId={currentRootId} currentSessionKey={currentSession?.key || currentSession?.session_key} currentDirPath={currentDirPath} gestureConfig={blueRingGestures} roots={roots} onNewSession={() => { resetForNewSession(); onNewSession(); }} onSelectProject={onSelectProject} onSelectSession={onSelectSession} onToggleFileSidebar={onToggleLeftSidebar} onToggleSessionSidebar={onToggleRightSidebar} onOpenModelSelector={() => setModelSelectorSignal((value) => value + 1)} onToggleRecentAgent={toggleRecentAgent} onPickAgent={pickAgent} onOpenRecentDirectory={onOpenRecentDirectory} onToggleMultiProjectSessions={onToggleMultiProjectSessions} onToggleEnterKeySends={onToggleEnterKeySends} onCycleMainFontScale={onCycleMainFontScale} onToggleMainContentView={onToggleMainContentView} onCycleKanbanTemplate={onCycleKanbanTemplate} onCreateTask={onCreateTask} onOpenScheduledTasks={onOpenScheduledTasks} />
               <>
                 <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" viewportMenu />
                 {mode !== "command" ? (
@@ -1953,6 +2018,9 @@ export function ActionBar({
                     onAgentChange={(nextAgent, nextModel) => {
                       const nextStatus = agents.find((item) => item.name === nextAgent);
                       const defaults = getAgentDefaults(nextStatus);
+                      if (nextAgent && nextAgent !== agent) {
+                        lastAgentRef.current = agent;
+                      }
                       setAgent(nextAgent);
                       setModel(nextModel || defaults.model);
                       setAgentMode("");

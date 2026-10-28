@@ -21,6 +21,7 @@ import {
   pendingProbeEnabled,
   registerProbeSources,
 } from "./services/pendingProbe";
+import { useProjectSessionView } from "./hooks/useProjectSessionView";
 import { FileEditStore, fileEditKey } from "./services/fileEditing";
 import { normalizePathForRoot, shouldRedirectToRelayNodes } from "./services/fileNavigation";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
@@ -76,9 +77,11 @@ import {
 } from "./services/sendShortcut";
 import {
   loadBlueRingGestureConfig,
+  nextFontCycleScale,
   persistBlueRingGestureConfig,
   type BlueRingGestureConfig,
 } from "./services/quickSwitch";
+import { recordRecentDir } from "./services/recentDirs";
 import {
   loadFontSizePreferences,
   persistFontSizePreferences,
@@ -179,6 +182,8 @@ import { GitStatusPanel } from "./components/GitStatusPanel";
 import { SessionViewer } from "./components/SessionViewer";
 import { DefaultListView, type MainContentViewMode } from "./components/DefaultListView";
 import { MultiProjectSessionList, SessionList, type ProjectSessionGroup } from "./components/SessionList";
+import { HandoffPackDialog } from "./components/HandoffPackDialog";
+import { DeleteSessionDialog } from "./components/DeleteSessionDialog";
 import { ExternalSessionList } from "./components/ExternalSessionList";
 import { InlineTokenText } from "./components/InlineTokenText";
 import { AgentIcon } from "./components/AgentIcon";
@@ -239,7 +244,9 @@ const CHILD_SESSION_PAGE_SIZE = 100;
 const MULTI_PROJECT_SESSION_LIMIT = 6;
 const SESSION_PAGE_SIZE = 50;
 const MULTI_PROJECT_SESSION_STORAGE_KEY = "mindfs-multi-project-session-list";
-const APP_DOCUMENT_TITLE = "MindFS";
+// Capture the server-rendered title before relay status updates add a node name.
+const APP_DOCUMENT_TITLE =
+  (typeof document !== "undefined" ? document.title.trim() : "") || "MindFS";
 
 function formatDocumentTitle(relayStatus: RelayStatusPayload | null): string {
   if (!isRelayNodePage()) {
@@ -686,6 +693,8 @@ function relatedFileSelectionKey(file: RelatedFileClickTarget | null | undefined
 type URLState = {
   root: string;
   file: string;
+  /** 目录视图深链（相对 root 的路径）；undefined/"."/"" = 不在目录视图，replaceState 时自动从 URL 消失 */
+  dir?: string;
   session: string;
   cursor: number;
   pluginQuery: Record<string, string>;
@@ -1029,6 +1038,7 @@ function readURLState(): URLState {
   return {
     root: params.get("root") || "",
     file: params.get("file") || "",
+    dir: params.get("dir") || "",
     session: params.get("session") || "",
     cursor: parseCursor(params.get("cursor")),
     pluginQuery: parsePluginQuery(window.location.search),
@@ -1039,6 +1049,7 @@ function buildURLSearch(next: URLState): string {
   const params = new URLSearchParams();
   if (next.root) params.set("root", next.root);
   if (next.file) params.set("file", next.file);
+  if (next.dir && next.dir !== ".") params.set("dir", next.dir);
   if (next.session) params.set("session", next.session);
   if (next.cursor > 0) params.set("cursor", String(next.cursor));
   Object.entries(next.pluginQuery).forEach(([key, value]) => {
@@ -1572,6 +1583,9 @@ export function App({ onGoHome }: AppProps) {
   const managedRootIdsRef = useRef<Set<string>>(new Set());
   const expandedRef = useRef<string[]>([]);
   const selectedDirRef = useRef<string | null>(null);
+  // selectedDir 属于哪个 root 的凭证：open_dir 换 root 时 setSelectedDir 要等 /api/tree
+  // 返回才更新，这段窗口里 selectedDirRef 还是旧 root 的目录；保存 ?dir= 前先对 key。
+  const selectedDirKeyRef = useRef<string | null>(null);
   const fileRef = useRef<FilePayload | null>(null);
   const selectedSessionRef = useRef<SessionItem | null>(null);
   const lastMainSessionSnapshotRef = useRef<Session | null>(null);
@@ -1724,6 +1738,7 @@ export function App({ onGoHome }: AppProps) {
     return window.localStorage.getItem(MULTI_PROJECT_SESSION_STORAGE_KEY) === "1";
   });
   const [multiProjectSessionGroups, setMultiProjectSessionGroups] = useState<MultiProjectSessionGroup[]>([]);
+  const [projectSessionView, setProjectSessionView] = useProjectSessionView();
   const [multiProjectSessionsLoading, setMultiProjectSessionsLoading] = useState(false);
   const [multiProjectPendingByKey, setMultiProjectPendingByKey] = useState<Record<string, boolean>>({});
   const multiProjectPendingRef = useRef<Record<string, boolean>>({});
@@ -2583,6 +2598,22 @@ export function App({ onGoHome }: AppProps) {
     persistFontSizePreferences(fontSizePreferences);
   }, [fontSizePreferences]);
 
+  // Blue-ring font cycle: main session font walks 100%→140% then back down,
+  // looping; the walk direction lives for the session only. State updater must
+  // stay pure, so the walking value/direction live in refs and the updater
+  // only applies the precomputed result.
+  const mainFontCycleDirectionRef = useRef<"up" | "down">("up");
+  const mainFontCycleScaleRef = useRef(fontSizePreferences.main);
+  useEffect(() => {
+    mainFontCycleScaleRef.current = fontSizePreferences.main;
+  }, [fontSizePreferences.main]);
+  const cycleMainFontScale = useCallback(() => {
+    const next = nextFontCycleScale(mainFontCycleScaleRef.current, mainFontCycleDirectionRef.current);
+    mainFontCycleDirectionRef.current = next.direction;
+    mainFontCycleScaleRef.current = next.scale;
+    setFontSizePreferences((prev) => ({ ...prev, main: next.scale }));
+  }, []);
+
   useEffect(() => {
     return () => {
       Object.values(slashCopyResetTimersRef.current).forEach((timer) =>
@@ -2707,7 +2738,24 @@ export function App({ onGoHome }: AppProps) {
   const [editDraftRequest, setEditDraftRequest] = useState<{
     id: number;
     content: string;
+    mode?: "replace" | "append";
   } | null>(null);
+  const [handoffPackSession, setHandoffPackSession] = useState<SessionItem | null>(null);
+  const handleHandoffPack = useCallback((session: SessionItem) => {
+    setHandoffPackSession(session);
+  }, []);
+  const handleHandoffPackInsert = useCallback((pack: string) => {
+    // append：输入框已有草稿时由 ActionBar 拼接，避免静默覆盖
+    setEditDraftRequest((prev) => ({
+      id: (prev?.id || 0) + 1,
+      content: pack,
+      mode: "append",
+    }));
+    // 手机上会话列表在右侧抽屉里，填入后收起让用户看到输入框
+    if (isMobile) {
+      setIsRightOpen(false);
+    }
+  }, [isMobile]);
   const [entriesByPath, setEntriesByPath] = useState<
     Record<string, FileEntry[]>
   >({});
@@ -3046,6 +3094,9 @@ export function App({ onGoHome }: AppProps) {
     selectedDirRef.current = selectedDir;
   }, [selectedDir]);
   useEffect(() => {
+    selectedDirKeyRef.current = selectedDirKey;
+  }, [selectedDirKey]);
+  useEffect(() => {
     entriesByPathRef.current = entriesByPath;
   }, [entriesByPath]);
   useEffect(() => {
@@ -3260,6 +3311,51 @@ export function App({ onGoHome }: AppProps) {
     setMainContentViewForRoot(rootID, mode);
     setDefaultMainContentView(mode);
   }, [setMainContentViewForRoot]);
+
+  // Blue-ring actions over the home middle section: view toggle, kanban
+  // template cycle, task creation and the scheduled tasks dialog. The toggle
+  // reads the same effective view the middle pane renders (onboarding override
+  // included) so it always flips what the user is actually looking at.
+  const toggleMainContentView = useCallback(() => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    const current = rootID && onboardingMainContentViewRoot === rootID
+      ? "task-kanban"
+      : mainContentViewByRoot[rootID] || defaultMainContentView;
+    if (onboardingMainContentViewRoot === rootID) setOnboardingMainContentViewRoot(null);
+    setMainContentViewForRoot(rootID, current === "task-kanban" ? "file-browser" : "task-kanban");
+  }, [onboardingMainContentViewRoot, mainContentViewByRoot, defaultMainContentView, setMainContentViewForRoot]);
+  const cycleKanbanTemplate = useCallback(() => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    // 主视图不在看板时先切过去，否则手势改了过滤器用户却看不到任何反应。
+    if (onboardingMainContentViewRoot === rootID) {
+      setOnboardingMainContentViewRoot(null);
+      // 引导态清掉后露出的是该 root 记住的上次视图，可能不是看板——一并固化成看板，
+      // 与 toggleMainContentView 的持久化语义一致，避免过滤器在背后盲转。
+      setMainContentViewForRoot(rootID, "task-kanban");
+    } else if ((mainContentViewByRoot[rootID] || defaultMainContentView) !== "task-kanban") {
+      setMainContentViewForRoot(rootID, "task-kanban");
+    }
+    const order = [TASK_TEMPLATE_ALL_FILTER, ...taskTemplates.map((template) => template.id || "").filter(Boolean)];
+    if (order.length < 2) return;
+    const index = order.indexOf(taskTemplateFilter);
+    setTaskTemplateFilter(order[(index + 1) % order.length]);
+  }, [onboardingMainContentViewRoot, mainContentViewByRoot, defaultMainContentView, setMainContentViewForRoot, taskTemplateFilter, taskTemplates]);
+  const createTaskFromQuickAction = useCallback((templateId?: string) => {
+    const template = (templateId && taskTemplates.find((item) => item.id === templateId))
+      || (taskTemplateFilter && taskTemplateFilter !== TASK_TEMPLATE_ALL_FILTER
+        ? taskTemplates.find((item) => item.id === taskTemplateFilter)
+        : null)
+      || taskTemplates[0]
+      || null;
+    if (!template) return;
+    openTaskCreateDialog(template);
+  }, [taskTemplates, taskTemplateFilter, openTaskCreateDialog]);
+  const openScheduledTasksFromQuickAction = useCallback(() => {
+    setScheduledAgentSession(null);
+    setScheduledAgentDialogOpen(true);
+  }, []);
   const currentDirectorySortMode = currentDirectorySortOverride || treeSortMode;
 
   const replaceURLState = useCallback((next: URLState) => {
@@ -5292,7 +5388,10 @@ export function App({ onGoHome }: AppProps) {
           ...payload.pinnedItems,
         ].map((item) => toSessionItem(rootID, item)).filter((item): item is SessionItem => !!item);
         if (!options?.force && currentRootIdRef.current !== rootID) return;
-        setHasMoreSessions(payload.totalCount > payload.items.length);
+        // Newer-session counts say nothing about unloaded older sessions.
+        if (!options?.afterTime) {
+          setHasMoreSessions(payload.totalCount > payload.items.length);
+        }
         if (shouldReplace) {
           setSessions(applyPinnedSnapshotToSessions(mergeSessionItems([], next), rootID, payload.pinnedKeys));
           void saveCachedSessionList(rootID, payload);
@@ -6122,17 +6221,24 @@ export function App({ onGoHome }: AppProps) {
     [handleSelectSession, isMobile, rootSessionKey, bumpCacheVersion],
   );
 
-  const handleDeleteSession = useCallback(
-    async (session: SessionItem) => {
+  const [deleteSessionTarget, setDeleteSessionTarget] = useState<SessionItem | null>(null);
+  const closeDeleteSessionDialog = useCallback(() => setDeleteSessionTarget(null), []);
+  const handleDeleteSession = useCallback((session: SessionItem) => {
+    const rootId = session.root_id || currentRootIdRef.current;
+    if (rootId) setDeleteSessionTarget({ ...session, root_id: rootId });
+  }, []);
+
+  const performDeleteSession = useCallback(
+    async (session: SessionItem, keepChildren = false): Promise<boolean> => {
       const sessionKey = session?.key || session?.session_key;
       const rootID =
         (session?.root_id as string | undefined) || currentRootIdRef.current;
-      if (!rootID || !sessionKey) return;
+      if (!rootID || !sessionKey) return false;
 
-      const deleted = await sessionService.deleteSession(rootID, sessionKey);
+      const deleted = await sessionService.deleteSession(rootID, sessionKey, keepChildren);
       if (!deleted) {
         reportError("session.delete_failed", t("session.deleteFailed"));
-        return;
+        return false;
       }
 
       const deletedKeys = new Set<string>();
@@ -6141,7 +6247,7 @@ export function App({ onGoHome }: AppProps) {
         deletedKeys.add(key);
         for (const item of sessionsRef.current) {
           const itemKey = item.key || item.session_key || "";
-          if (String(item.parent_session_key || "").trim() === key) {
+          if (!keepChildren && (!item.root_id || item.root_id === rootID) && String(item.parent_session_key || "").trim() === key) {
             collectDeletedKeys(itemKey);
           }
         }
@@ -6149,8 +6255,18 @@ export function App({ onGoHome }: AppProps) {
       collectDeletedKeys(sessionKey);
 
       setSessions((prev) =>
-        prev.filter((item) => !deletedKeys.has(item.key || item.session_key || "")),
+        prev.filter((item) => (item.root_id && item.root_id !== rootID) || !deletedKeys.has(item.key || item.session_key || ""))
+          .map(item => keepChildren && (!item.root_id || item.root_id === rootID) && item.parent_session_key === sessionKey ? { ...item, parent_session_key: "" } : item),
       );
+
+      if (keepChildren) {
+        for (const [cacheKey, cached] of Object.entries(sessionCacheRef.current)) {
+          if (cacheKey.startsWith(`${rootID}::`) && cached.parent_session_key === sessionKey) {
+            sessionCacheRef.current[cacheKey] = { ...cached, parent_session_key: "", parent_tool_call_id: "" };
+            void deleteCachedSession(rootID, cached.key);
+          }
+        }
+      }
 
       for (const deletedKey of deletedKeys) {
         const cacheKey = rootSessionKey(rootID, deletedKey);
@@ -6180,7 +6296,7 @@ export function App({ onGoHome }: AppProps) {
           }
           const sessions = group.sessions.filter(
             (item) => !deletedKeys.has(item.key || item.session_key || ""),
-          );
+          ).map(item => keepChildren && item.parent_session_key === sessionKey ? { ...item, parent_session_key: "" } : item);
           return {
             ...group,
             sessions,
@@ -6211,6 +6327,8 @@ export function App({ onGoHome }: AppProps) {
       }
 
       bumpCacheVersion();
+      void loadSessionsForRoot(rootID, { replace: true, force: true });
+      return true;
     },
     [
       bumpCacheVersion,
@@ -6221,6 +6339,7 @@ export function App({ onGoHome }: AppProps) {
       setDrawerOpenForRoot,
       setDrawerSessionForRoot,
       setMultiProjectSessionPending,
+      loadSessionsForRoot,
     ],
   );
 
@@ -6313,6 +6432,39 @@ export function App({ onGoHome }: AppProps) {
     },
     [bumpCacheVersion, rootSessionKey, setDrawerSessionForRoot],
   );
+
+  const detachingSessionKeysRef = useRef(new Set<string>());
+  const handleDetachSession = useCallback(async (session: SessionItem) => {
+    const rootID = session.root_id || currentRootIdRef.current;
+    const sessionKey = session.key || session.session_key;
+    if (!rootID || !sessionKey || !session.parent_session_key) return;
+    const cacheKey = rootSessionKey(rootID, sessionKey);
+    if (detachingSessionKeysRef.current.has(cacheKey)) return;
+    detachingSessionKeysRef.current.add(cacheKey);
+    try {
+      const detached = await sessionService.detachSession(rootID, sessionKey);
+      const metadata = { parent_session_key: "", parent_tool_call_id: "", updated_at: detached.updated_at };
+      const matches = (item: SessionItem) => (item.key || item.session_key) === sessionKey && (!item.root_id || item.root_id === rootID);
+      setSessions(prev => prev.map(item => matches(item) ? { ...item, ...metadata } : item));
+      setMultiProjectSessionGroups(prev => prev.map(group => group.rootId === rootID ? {
+        ...group,
+        totalCount: group.totalCount + (group.sessions.some(item => matches(item) && item.parent_session_key) ? 1 : 0),
+        sessions: group.sessions.map(item => matches(item) ? { ...item, ...metadata } : item),
+      } : group));
+      const cached = sessionCacheRef.current[cacheKey];
+      if (cached) sessionCacheRef.current[cacheKey] = { ...cached, ...metadata };
+      void deleteCachedSession(rootID, sessionKey);
+      setSelectedSession(prev => prev && matches(prev) ? { ...prev, ...metadata } : prev);
+      const drawer = drawerSessionByRootRef.current[rootID];
+      if (drawer?.key === sessionKey) setDrawerSessionForRoot(rootID, { ...drawer, ...metadata });
+      bumpCacheVersion();
+      void loadSessionsForRoot(rootID, { replace: true, force: true });
+    } catch (error) {
+      reportError("session.sync_failed", `${t("session.detachFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      detachingSessionKeysRef.current.delete(cacheKey);
+    }
+  }, [bumpCacheVersion, loadSessionsForRoot, rootSessionKey, setDrawerSessionForRoot, t]);
 
   const handlePinSession = useCallback(
     async (session: SessionItem, pinned: boolean) => {
@@ -6458,6 +6610,7 @@ export function App({ onGoHome }: AppProps) {
       rootID: string | null | undefined,
       sessionKey: string | null | undefined,
       seq: number,
+      independent = false,
     ) => {
       const resolvedRoot = String(rootID || currentRootIdRef.current || "").trim();
       const resolvedKey = String(sessionKey || "").trim();
@@ -6467,7 +6620,7 @@ export function App({ onGoHome }: AppProps) {
       }
       let result: Awaited<ReturnType<typeof sessionService.forkSession>>;
       try {
-        result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
+        result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq, independent);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         reportError("session.sync_failed", `${t("session.forkFailed")}: ${detail}`);
@@ -7803,6 +7956,7 @@ export function App({ onGoHome }: AppProps) {
           replaceURLState({
             root,
             file: "",
+            dir: targetIsRoot ? "" : targetPath,
             session: "",
             cursor: 0,
             pluginQuery: nextPluginQuery,
@@ -9417,8 +9571,10 @@ export function App({ onGoHome }: AppProps) {
       if (!file) return;
       const root = file.root || currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -9441,9 +9597,11 @@ export function App({ onGoHome }: AppProps) {
     (path: string) => {
       const root = currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       setGitDiff(null);
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -9456,8 +9614,10 @@ export function App({ onGoHome }: AppProps) {
     (path: string) => {
       const root = currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -11218,6 +11378,18 @@ export function App({ onGoHome }: AppProps) {
             preservePluginQuery: true,
           });
         } else {
+          if (urlState.dir && urlState.dir !== ".") {
+            // 深链 ?root=<id>&dir=<相对路径>：直接落到 root 下的子目录（外部入口如 AIOS 项目卡）
+            await ensurePluginsLoaded(preferredRoot);
+            if (cancelled) return;
+            actionHandlersRef.current.open_dir({
+              path: urlState.dir,
+              root: preferredRoot,
+              forceDirectory: true,
+              preservePluginQuery: true,
+            });
+            return;
+          }
           const restored = await tryShowBoundSessionForRoot(preferredRoot, {
             pluginQuery: urlState.pluginQuery,
           });
@@ -11414,6 +11586,15 @@ export function App({ onGoHome }: AppProps) {
             preservePluginQuery: true,
           });
         }
+        return;
+      }
+      if (state.dir && state.dir !== ".") {
+        actionHandlers.open_dir({
+          path: state.dir,
+          root: state.root,
+          forceDirectory: true,
+          preservePluginQuery: true,
+        });
         return;
       }
       void (async () => {
@@ -12056,6 +12237,11 @@ export function App({ onGoHome }: AppProps) {
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
+      onRenameSession={selectedSessionSnapshot ? (name) => handleRenameSession(selectedSessionSnapshot, name) : undefined}
+      onDeleteSession={selectedSessionSnapshot ? () => void handleDeleteSession(selectedSessionSnapshot) : undefined}
+      onDetachSession={selectedSessionSnapshot?.parent_session_key ? () => void handleDetachSession(selectedSessionSnapshot) : undefined}
+      onHandoffPack={selectedSessionSnapshot ? () => handleHandoffPack(selectedSessionSnapshot) : undefined}
+      onScheduledTask={selectedSessionSnapshot ? () => openSessionScheduledTask(selectedSessionSnapshot) : undefined}
       agents={availableAgents}
       slashCommandResult={slashCommandResultForSession(
         selectedSession?.root_id || currentRootId,
@@ -12094,11 +12280,12 @@ export function App({ onGoHome }: AppProps) {
       }
       onAskUserAnswer={handleAskUserAnswer}
       onEditUserMessage={handleEditUserMessage}
-      onForkAgentMessage={(seq) =>
+      onForkAgentMessage={(seq, independent) =>
         void handleForkAgentMessage(
           selectedSession?.root_id || currentRootId,
           selectedSessionSnapshot?.key || selectedSessionSnapshot?.session_key,
           seq,
+          independent,
         )
       }
     />
@@ -14942,6 +15129,7 @@ export function App({ onGoHome }: AppProps) {
       />
     ) : multiProjectSessionsEnabled && !sessionSearchOpen && !sessionSearchResultsMode ? (
       <MultiProjectSessionList
+        viewMode={projectSessionView}
         groups={multiProjectSessionGroups}
         selectedKey={selectedSession?.key}
         selectedRootId={(selectedSession?.root_id as string | undefined) || currentRootId || ""}
@@ -14966,6 +15154,7 @@ export function App({ onGoHome }: AppProps) {
         onRename={handleRenameSession}
         onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
+        onDetach={handleDetachSession}
         onProjectClick={(rootId) => {
           actionHandlers.open_dir({
             path: rootId,
@@ -14977,6 +15166,7 @@ export function App({ onGoHome }: AppProps) {
         }}
         onLoadMoreProject={loadMoreMultiProjectSessions}
         onLoadChildren={loadChildSessionsForParent}
+        onHandoffPack={handleHandoffPack}
       />
     ) : (
       <SessionList
@@ -15053,6 +15243,7 @@ export function App({ onGoHome }: AppProps) {
         onRename={handleRenameSession}
         onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
+        onDetach={handleDetachSession}
         onLoadChildren={
           sessionSearchOpen && sessionSearchResultsMode
             ? undefined
@@ -15073,6 +15264,7 @@ export function App({ onGoHome }: AppProps) {
             ? false
             : hasMoreSessions
         }
+        onHandoffPack={handleHandoffPack}
       />
     );
   const tokenStationBalanceText = tokenStationLoading
@@ -15284,14 +15476,15 @@ export function App({ onGoHome }: AppProps) {
               actionHandlers.open({ path: e.path, root: r });
               if (isMobile) setIsLeftOpen(false);
             }}
-            onSelectRoot={(e, r) =>
+            onSelectRoot={(e, r) => {
+              recordRecentDir({ rootId: r, path: e.path });
               actionHandlers.open_dir({
                 path: e.path,
                 root: r,
                 isRoot: e.is_root === true,
                 suppressTreeExpand: true,
-              })
-            }
+              });
+            }}
             onToggleDir={(e, r) =>
               actionHandlers.open_dir({
                 path: e.path,
@@ -15339,10 +15532,13 @@ export function App({ onGoHome }: AppProps) {
             onSidebarsSwappedChange={setSidebarsSwapped}
             blueRingGestures={blueRingGestures}
             onBlueRingGesturesChange={setBlueRingGestures}
+            taskTemplates={taskTemplates.map((template) => ({ id: template.id || "", name: template.name || "" }))}
             gitDiffSideBySide={gitDiffSideBySide}
             onGitDiffSideBySideChange={setGitDiffSideBySide}
             multiProjectSessionsEnabled={multiProjectSessionsEnabled}
             onMultiProjectSessionsChange={setMultiProjectSessionsEnabled}
+            projectSessionView={projectSessionView}
+            onProjectSessionViewChange={setProjectSessionView}
             fontSizePreferences={fontSizePreferences}
             onFontSizePreferencesChange={setFontSizePreferences}
             onRunAgentLifecycleCommand={handleRunAgentLifecycleCommand}
@@ -15430,6 +15626,21 @@ export function App({ onGoHome }: AppProps) {
                 currentSessionRef.current = null;
                 selectedSessionByRootRef.current[root] = null;
                 setSelectedSession(null);
+                setSelectedSessionLoading(false);
+                // 新建会话 = 回到空白首页：文件预览/diff 也一并退出，否则预览态无法快速返回
+                setFile(null);
+                setGitDiff(null);
+                setRelatedSelectedFileKey("");
+                // 目录视图保留 ?dir=：界面还停在原目录，URL 抹掉 dir 会让 F5 跳回根目录。
+                // key 对不上说明 selectedDirRef 还挂着旧 root 的目录（open_dir 拉树未返回），
+                // 此时宁可不带 dir，也不能把旧 root 的绝对路径塞进新 root 的 URL。
+                const dirCandidate = selectedDirRef.current && selectedDirRef.current !== root && selectedDirRef.current !== "."
+                  ? selectedDirRef.current
+                  : "";
+                const dir = dirCandidate && selectedDirKeyRef.current === buildDirectorySelectionKey(root, dirCandidate, false)
+                  ? dirCandidate
+                  : "";
+                replaceURLState({ root, file: "", session: "", cursor: 0, pluginQuery: {}, dir });
                 setDrawerSessionForRoot(root, null);
                 interactionModeRef.current = "main";
                 setInteractionMode("main");
@@ -15439,6 +15650,26 @@ export function App({ onGoHome }: AppProps) {
                 void actionHandlers.open_dir({ path: root, root, isRoot: true, suppressTreeExpand: true });
               }}
               onSelectSession={(session) => { void handleSelectSession(session); }}
+              currentDirPath={selectedDir}
+              roots={managedRootIds.map((id) => ({ id, name: managedRootByIdRef.current[id]?.display_name || id }))}
+              onOpenRecentDirectory={(target) => {
+                if (!managedRootIdsRef.current.has(target.rootId)) return;
+                // 轮切目标不回写最近列表：该列表只收“手动点击”的目录，
+                // 否则每次轮切都会把目标顶到队首，永远在两个目录之间打转。
+                void actionHandlers.open_dir({
+                  path: target.path,
+                  root: target.rootId,
+                  isRoot: target.path === target.rootId,
+                  forceDirectory: true,
+                });
+              }}
+              onToggleMultiProjectSessions={() => setMultiProjectSessionsEnabled((value) => !value)}
+              onToggleEnterKeySends={() => setMobileEnterKeySends((value) => !value)}
+              onCycleMainFontScale={cycleMainFontScale}
+              onToggleMainContentView={toggleMainContentView}
+              onCycleKanbanTemplate={cycleKanbanTemplate}
+              onCreateTask={createTaskFromQuickAction}
+              onOpenScheduledTasks={openScheduledTasksFromQuickAction}
               taskGroupBadge={actionBarSessionKey ? <TaskGroupPanel key={`${actionBarSession?.root_id || currentRootId}:${actionBarSessionKey}`} rootId={actionBarSession?.root_id || currentRootId || ""} sessionKey={actionBarSessionKey} renderTask={(detail, close) => renderKanbanTaskCard(detail.task, isTerminalKanbanTask(detail.task) ? t("task.column.done") : t("task.column.running"), detail, true, close)} /> : null}
               status={status}
               agentsVersion={agentsVersion}
@@ -15530,11 +15761,12 @@ export function App({ onGoHome }: AppProps) {
                 }
                 onAskUserAnswer={handleAskUserAnswer}
                 onEditUserMessage={handleEditUserMessage}
-                onForkAgentMessage={(seq) =>
+                onForkAgentMessage={(seq, independent) =>
                   void handleForkAgentMessage(
                     currentRootId,
                     drawerSessionSnapshot?.key || drawerSessionSnapshot?.session_key,
                     seq,
+                    independent,
                   )
                 }
               />
@@ -15545,6 +15777,19 @@ export function App({ onGoHome }: AppProps) {
             )}
           </BottomSheet>
         }
+      />
+      {deleteSessionTarget && <DeleteSessionDialog
+        key={`${deleteSessionTarget.root_id}:${deleteSessionTarget.key || deleteSessionTarget.session_key}`}
+        rootId={String(deleteSessionTarget.root_id)}
+        sessionKey={String(deleteSessionTarget.key || deleteSessionTarget.session_key)}
+        name={deleteSessionTarget.name}
+        onClose={closeDeleteSessionDialog}
+        onConfirm={(keepChildren) => performDeleteSession(deleteSessionTarget, keepChildren)}
+      />}
+      <HandoffPackDialog
+        session={handoffPackSession}
+        onClose={() => setHandoffPackSession(null)}
+        onInsert={handleHandoffPackInsert}
       />
       {!isMobile ? <OnboardingTour
         open={onboardingOpen}

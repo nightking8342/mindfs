@@ -5,11 +5,15 @@ import React, {
   useLayoutEffect,
   useCallback,
   useMemo,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 import { AgentIcon } from "./AgentIcon";
+import { PinIcon } from "./PinIcon";
 import type { AgentStatus } from "../services/agents";
-import { filterAgentModels } from "./modelFiltering";
+import { filterAgentModels, orderPinnedModels } from "./modelFiltering";
+import { getModelPins, getModelPinsRevision, setModelPinned, subscribeModelPins } from "../services/preferences";
+import { appPath } from "../services/base";
 import { useI18n } from "../i18n";
 
 type AgentSelectorProps = {
@@ -186,6 +190,37 @@ export function AgentSelector({
   const [restartingAgent, setRestartingAgent] = useState<string | null>(null);
   const [menuBodyHeight, setMenuBodyHeight] = useState<number | null>(null);
   const [modelSearch, setModelSearch] = useState("");
+  useSyncExternalStore(subscribeModelPins, getModelPinsRevision, getModelPinsRevision);
+  const [pinsSaving, setPinsSaving] = useState(false);
+  const [pinsError, setPinsError] = useState(false);
+  const pinsVersion = useRef(0);
+  const pinsSavingRef = useRef(false);
+  const pinsScope = isOpen && submenuAgent ? `${appPath("/")}\u0000${submenuAgent}` : "";
+  useEffect(() => {
+    ++pinsVersion.current;
+    pinsSavingRef.current = false;
+    setPinsSaving(false);
+    setPinsError(false);
+    return () => { pinsVersion.current++; };
+  }, [pinsScope, submenuAgent]);
+  const pinReady = !!pinsScope;
+  const toggleModelPin = async (id: string) => {
+    if (!pinReady || !submenuAgent || pinsSavingRef.current) return;
+    const version = pinsVersion.current;
+    pinsSavingRef.current = true;
+    setPinsSaving(true);
+    setPinsError(false);
+    try {
+      await setModelPinned(submenuAgent, id, !pinnedModelIDs.includes(id));
+    } catch {
+      if (version === pinsVersion.current) setPinsError(true);
+    } finally {
+      if (version === pinsVersion.current) {
+        pinsSavingRef.current = false;
+        setPinsSaving(false);
+      }
+    }
+  };
   const [menuHorizontalOffset, setMenuHorizontalOffset] = useState(0);
   const [viewportMenuPosition, setViewportMenuPosition] = useState<{
     top: number;
@@ -236,9 +271,10 @@ export function AgentSelector({
     [submenuAgentStatus],
   );
   const enableModelSearch = submenuModels.length > AGENT_MODEL_SEARCH_THRESHOLD;
+  const pinnedModelIDs = getModelPins(submenuAgent || "", submenuAgentStatus?.pinned_models);
   const filteredSubmenuModels = useMemo(
-    () => filterAgentModels(submenuModels, modelSearch),
-    [submenuModels, modelSearch],
+    () => orderPinnedModels(filterAgentModels(submenuModels, modelSearch), pinnedModelIDs),
+    [submenuModels, modelSearch, pinnedModelIDs],
   );
   useEffect(() => {
     if (!isOpen || !submenuAgent) {
@@ -995,6 +1031,7 @@ export function AgentSelector({
                 />
                 {modelSectionExpanded ? (
                   <>
+                    {pinsError ? <div role="alert" style={{ padding: "8px 12px", fontSize: 12, color: "var(--text-secondary)" }}>{t("agent.modelPinsSaveFailed")}</div> : null}
                     {enableModelSearch ? (
                       <div
                         style={{
@@ -1073,6 +1110,9 @@ export function AgentSelector({
                           }
                           onSelect={handleAgentSelect}
                           agentName={submenuAgentStatus.name}
+                          pinned={pinnedModelIDs.includes(item.id)}
+                          pinDisabled={!pinReady || pinsSaving}
+                          onTogglePin={() => void toggleModelPin(item.id)}
                         />
                       ))
                     )}
@@ -1404,18 +1444,27 @@ function ModelMenuItem({
   topBorder,
   onSelect,
   agentName,
+  pinned,
+  pinDisabled,
+  onTogglePin,
 }: {
   item: NonNullable<AgentStatus["models"]>[number];
   selected: boolean;
   topBorder: boolean;
   onSelect: (agent: string, model?: string) => void;
   agentName: string;
+  pinned: boolean;
+  pinDisabled: boolean;
+  onTogglePin: () => void;
 }) {
+  const { t } = useI18n();
+  const pinLabel = `${t(pinned ? "agent.unpinModel" : "agent.pinModel")}：${item.name || item.id}`;
   return (
+    <div style={{ display: "flex", alignItems: "flex-start", borderTop: topBorder ? "1px solid var(--menu-divider)" : undefined, background: selected ? "rgba(59, 130, 246, 0.08)" : "transparent", opacity: item.hidden ? 0.66 : 1 }}>
     <button
       type="button"
       onClick={() => onSelect(agentName, item.id)}
-      style={sectionItemStyle(selected, topBorder, item.hidden ? 0.66 : 1)}
+      style={{ ...sectionItemStyle(selected), flex: "1 1 auto", background: "transparent", paddingRight: 4 }}
       title={item.description || item.id}
     >
       <span style={{ fontSize: "13px", fontWeight: 500 }}>
@@ -1444,5 +1493,17 @@ function ModelMenuItem({
         </span>
       ) : null}
     </button>
+    <button
+      type="button"
+      aria-label={pinLabel}
+      title={pinLabel}
+      aria-pressed={pinned}
+      disabled={pinDisabled}
+      onClick={(event) => { event.stopPropagation(); onTogglePin(); }}
+      style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, margin: "4px 6px 0 0", padding: 6, border: 0, borderRadius: 6, background: "transparent", color: pinned ? "var(--accent-color, #3b82f6)" : "var(--text-secondary)", cursor: pinDisabled ? "default" : "pointer", opacity: pinDisabled ? 0.5 : 1 }}
+    >
+      <span style={{ display: "inline-flex", fontSize: 12 }}><PinIcon pinned={pinned} /></span>
+    </button>
+    </div>
   );
 }

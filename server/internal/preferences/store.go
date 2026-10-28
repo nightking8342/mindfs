@@ -25,8 +25,10 @@ type Store struct {
 }
 
 type UserPreferences struct {
+	AgentPinnedModels               map[string][]string      `json:"agent_pinned_models,omitempty"`
 	LauncherNodes                   []LauncherNode           `json:"launcher_nodes,omitempty"`
 	Agents                          map[string]AgentDefaults `json:"agents,omitempty"`
+	LastAgent                       string                   `json:"last_agent,omitempty"`
 	SessionNaming                   SessionNamingDefaults    `json:"session_naming,omitempty"`
 	IdleSessionResourceReleaseHours int                      `json:"idle_session_resource_release_hours,omitempty"`
 	NewProjectMetaLocation          string                   `json:"new_project_meta_location,omitempty"`
@@ -45,9 +47,9 @@ func (s *Store) LauncherNodes() []LauncherNode {
 	return append([]LauncherNode{}, s.data.LauncherNodes...)
 }
 
-func (s *Store) UpdateLauncherNodes(nodes []LauncherNode) error {
+func normalizeLauncherNodes(nodes []LauncherNode) ([]LauncherNode, error) {
 	if len(nodes) > 1000 {
-		return errors.New("too many nodes")
+		return nil, errors.New("too many nodes")
 	}
 	next := append([]LauncherNode{}, nodes...)
 	ids, urls := map[string]bool{}, map[string]bool{}
@@ -56,12 +58,20 @@ func (s *Store) UpdateLauncherNodes(nodes []LauncherNode) error {
 		n.ID, n.Name, n.URL = strings.TrimSpace(n.ID), strings.TrimSpace(n.Name), strings.TrimSpace(n.URL)
 		u, err := url.Parse(n.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || n.ID == "" || n.Name == "" || n.CreatedAt == "" {
-			return errors.New("invalid node: name, id, creation time and HTTP(S) URL are required")
+			return nil, errors.New("invalid node: name, id, creation time and HTTP(S) URL are required")
 		}
 		if ids[n.ID] || urls[n.URL] {
-			return errors.New("duplicate node")
+			return nil, errors.New("duplicate node")
 		}
 		ids[n.ID], urls[n.URL] = true, true
+	}
+	return next, nil
+}
+
+func (s *Store) UpdateLauncherNodes(nodes []LauncherNode) error {
+	next, err := normalizeLauncherNodes(nodes)
+	if err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,11 +230,20 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastServi
 	if fastService != "" {
 		next.FastService = fastService
 	}
-	if s.data.Agents[agentName] == next {
+	if s.data.Agents[agentName] == next && s.data.LastAgent == agentName {
 		return false, nil
 	}
+	previousDefaults, existed := s.data.Agents[agentName]
+	previousAgent := s.data.LastAgent
 	s.data.Agents[agentName] = next
+	s.data.LastAgent = agentName
 	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.data.Agents[agentName] = previousDefaults
+		} else {
+			delete(s.data.Agents, agentName)
+		}
+		s.data.LastAgent = previousAgent
 		return false, err
 	}
 	return true, nil
@@ -349,11 +368,13 @@ func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.data.Agents) == 0 {
+	if len(s.data.Agents) == 0 && s.data.LastAgent == "" && len(s.data.AgentPinnedModels) == 0 {
 		return statuses
 	}
 	out := append([]agent.Status(nil), statuses...)
 	for i := range out {
+		out[i].PinnedModels = append([]string{}, s.data.AgentPinnedModels[strings.TrimSpace(out[i].Name)]...)
+		out[i].LastUsed = s.data.LastAgent == strings.TrimSpace(out[i].Name)
 		defaults := s.data.Agents[strings.TrimSpace(out[i].Name)]
 		if defaults.Model != "" {
 			out[i].DefaultModelID = defaults.Model

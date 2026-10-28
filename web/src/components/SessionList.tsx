@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "./AgentIcon";
+import { PinIcon } from "./PinIcon";
 import { ModeIcon } from "./ModeIcon";
 import { rootBadgeButtonStyle, rootBadgeStyle } from "./rootBadgeStyle";
 import { useI18n, type Locale } from "../i18n";
@@ -8,6 +9,7 @@ import { logPendingValue, pendingProbeEnabled } from "../services/pendingProbe";
 import { copyText } from "../services/clipboard";
 import { reportError } from "../services/error";
 import { sessionService } from "../services/session";
+import type { ProjectSessionView } from "../hooks/useProjectSessionView";
 
 export type SessionType = "chat" | "plugin" | "command";
 
@@ -55,6 +57,8 @@ type SessionListProps = {
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
+  onDetach?: (session: SessionItem) => void;
+  onHandoffPack?: (session: SessionItem) => void;
   onLoadChildren?: (
     session: SessionItem,
     options?: { beforeTime?: string },
@@ -90,6 +94,7 @@ export type ProjectSessionGroup = {
 
 type ProjectSessionListProps = {
   groups: ProjectSessionGroup[];
+  viewMode?: ProjectSessionView;
   selectedKey?: string;
   selectedRootId?: string;
   headerAction?: React.ReactNode;
@@ -103,6 +108,8 @@ type ProjectSessionListProps = {
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
+  onDetach?: (session: SessionItem) => void;
+  onHandoffPack?: (session: SessionItem) => void;
   onProjectClick?: (rootId: string) => void;
   onLoadMoreProject?: (group: ProjectSessionGroup) => Promise<void> | void;
   onLoadChildren?: (
@@ -210,21 +217,6 @@ function ToggleRowButton({
   );
 }
 
-function PinIcon({ pinned }: { pinned: boolean }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M0 0h24v24H0z" fill="none" />
-      <path
-        fill="currentColor"
-        fillRule="evenodd"
-        d="m16.219 4.838l2.964 2.967c2.012 2.014 3.018 3.021 2.784 4.107c-.235 1.085-1.567 1.585-4.23 2.586l-1.845.693c-.713.268-1.07.402-1.345.64q-.181.158-.322.352c-.212.297-.313.664-.515 1.4c-.46 1.672-.69 2.508-1.239 2.821c-.23.132-.492.2-.758.2c-.63 0-1.243-.614-2.469-1.84l-1.466-1.468l-1.079-1.08L5.285 14.8c-1.218-1.219-1.827-1.828-1.83-2.455a1.53 1.53 0 0 1 .203-.773c.313-.543 1.143-.772 2.803-1.23c.737-.203 1.105-.304 1.402-.517q.199-.144.36-.332c.236-.278.368-.637.63-1.355l.669-1.823c.987-2.693 1.48-4.04 2.568-4.28s2.102.774 4.129 2.803"
-        clipRule="evenodd"
-        opacity={pinned ? 1 : 0.5}
-      />
-      <path fill="currentColor" d="m3.302 21.776l4.476-4.48l-1.079-1.08l-4.476 4.48a.764.764 0 0 0 1.08 1.08" />
-    </svg>
-  );
-}
 
 function shellBadgeLabel(shell?: string): string {
   const normalized = String(shell || "").trim().replace(/\\/g, "/");
@@ -320,6 +312,8 @@ export function SessionList({
   onRename,
   onScheduledTask,
   onDelete,
+  onDetach,
+  onHandoffPack,
   onLoadChildren,
   onLoadOlder,
   loadingOlder = false,
@@ -702,6 +696,8 @@ export function SessionList({
                   onRename={onRename}
                   onScheduledTask={onScheduledTask}
                   onDelete={onDelete}
+                  onDetach={onDetach}
+                  onHandoffPack={onHandoffPack}
                 />
               );
             })}
@@ -743,6 +739,7 @@ export function SessionList({
 
 export function MultiProjectSessionList({
   groups,
+  viewMode = "grouped",
   selectedKey = "",
   selectedRootId = "",
   headerAction,
@@ -756,11 +753,43 @@ export function MultiProjectSessionList({
   onRename,
   onScheduledTask,
   onDelete,
+  onDetach,
+  onHandoffPack,
   onProjectClick,
   onLoadMoreProject,
   onLoadChildren,
 }: ProjectSessionListProps) {
   const { t } = useI18n();
+  const [loadingFlat, setLoadingFlat] = useState(false);
+  const flatSessions = useMemo(() => groups.flatMap((group) =>
+    group.sessions.map((session) => ({
+      session: { ...session, root_id: session.root_id || group.rootId },
+    })),
+  ).sort((left, right) => {
+    const time = (session: SessionItem) => Date.parse(session.updated_at || "") || Date.parse(session.created_at || "") || 0;
+    const pinnedTime = (session: SessionItem) => Date.parse(session.pinned_at || "") || 0;
+    return pinnedTime(right.session) - pinnedTime(left.session)
+      || time(right.session) - time(left.session)
+      || left.session.root_id.localeCompare(right.session.root_id)
+      || left.session.key.localeCompare(right.session.key);
+  }), [groups]);
+  const remainingGroups = groups.filter((group) =>
+    group.totalCount > group.sessions.filter((session) => !session.parent_session_key).length,
+  );
+  const loadMoreFlat = async () => {
+    if (!onLoadMoreProject || loadingFlat) return;
+    setLoadingFlat(true);
+    try {
+      const results = await Promise.allSettled(remainingGroups.map((group) => onLoadMoreProject(group)));
+      for (const result of results) {
+        if (result.status === "rejected") {
+          reportError("session.sync_failed", String(result.reason));
+        }
+      }
+    } finally {
+      setLoadingFlat(false);
+    }
+  };
   const effectiveEmptyText = emptyText || t("sessionList.empty");
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [loadingProjects, setLoadingProjects] = useState<Record<string, boolean>>({});
@@ -925,7 +954,7 @@ export function MultiProjectSessionList({
 
   const handleProjectToggle = async (group: ProjectSessionGroup) => {
     const expanded = !!expandedProjects[group.rootId];
-    const remaining = Math.max(0, group.totalCount - group.sessions.length);
+    const remaining = Math.max(0, group.totalCount - topLevelSessionsForGroup(group.sessions).length);
     if (!expanded) {
       setExpandedProjects((prev) => ({ ...prev, [group.rootId]: true }));
       if (remaining > 0 && onLoadMoreProject) {
@@ -1022,6 +1051,36 @@ export function MultiProjectSessionList({
         ) : groups.length === 0 ? (
           <div style={{ fontSize: "12px", color: "var(--text-secondary)", minHeight: "100%", padding: "12px 18px", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", lineHeight: 1.6 }}>
             {effectiveEmptyText}
+          </div>
+        ) : viewMode === "flat" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+            {flatSessions.map(({ session }) => (
+              <div key={`${session.root_id}:${session.key}`} data-session-root={session.root_id} data-session-key={session.key}>
+                <SessionCard
+                  session={session}
+                  sessionByKey={sessionByKey}
+                  selected={session.key === selectedKey && session.root_id === selectedRootId}
+                  syncing={isSessionSyncing(session, syncingSessionKeys)}
+                  onSelect={onSelect}
+                  onSync={onSync}
+                  onPin={onPin}
+                  onRename={onRename}
+                  onScheduledTask={onScheduledTask}
+                  onDelete={onDelete}
+                  onDetach={onDetach}
+                  onHandoffPack={onHandoffPack}
+                />
+              </div>
+            ))}
+            {remainingGroups.length > 0 && onLoadMoreProject ? (
+              <ToggleRowButton
+                label={t(loadingFlat ? "sessionList.loading" : "sessionList.loadMore")}
+                loading={loadingFlat}
+                marginLeft={MAIN_SESSION_ICON_OFFSET}
+                showExpandIcon={!loadingFlat}
+                onClick={() => void loadMoreFlat()}
+              />
+            ) : null}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
@@ -1178,6 +1237,8 @@ export function MultiProjectSessionList({
                           onRename={onRename}
                           onScheduledTask={onScheduledTask}
                           onDelete={onDelete}
+                          onDetach={onDetach}
+                          onHandoffPack={onHandoffPack}
                         />
                       );
                     })}
@@ -1236,6 +1297,8 @@ function SessionCard({
   onScheduledTask,
   onDelete,
   __probeSource = "list",
+  onDetach,
+  onHandoffPack,
 }: {
   /** 临时诊断探针（pending）：标记这个卡片的数据来自哪套列表。 */
   __probeSource?: string;
@@ -1252,6 +1315,8 @@ function SessionCard({
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onScheduledTask?: (session: SessionItem) => void;
   onDelete?: (session: SessionItem) => void;
+  onDetach?: (session: SessionItem) => void;
+  onHandoffPack?: (session: SessionItem) => void;
 }) {
   const { locale, t } = useI18n();
   const isClosed = !!session.closed_at;
@@ -1961,7 +2026,7 @@ function SessionCard({
                 if (!session.root_id || copyingPath) return;
                 setCopyingPath(true);
                 void sessionService.getSessionLogPath(session.root_id, session.session_key || session.key)
-                  .then(copySessionValue)
+                  .then(({ path }) => copySessionValue(path))
                   .catch((err) => {
                     reportError("clipboard.write_failed", String((err as Error)?.message || t("session.copyFailed")));
                   })
@@ -1975,6 +2040,33 @@ function SessionCard({
               </svg>
               {copyingPath ? t("common.loading") : t("sessionList.copyPath")}
             </button>
+            {isSubagent && onDetach ? <button type="button"
+              onClick={(event) => { event.stopPropagation(); setMenuOpen(false); onDetach(session); }}
+              style={{ ...menuItemStyle, color: "var(--text-primary)", whiteSpace: "nowrap" }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14 3h7v7M21 3l-9 9M10 3H3v18h18v-7" />
+              </svg>
+              {t("session.detach")}
+            </button> : null}
+            {onHandoffPack ? (
+              <button
+                type="button"
+                disabled={!session.root_id || session.pending}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuOpen(false);
+                  onHandoffPack(session);
+                }}
+                style={{ ...menuItemStyle, color: "var(--text-primary)", whiteSpace: "nowrap", opacity: !session.root_id || session.pending ? 0.55 : 1 }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                  <path d="M10 17l5-5-5-5" />
+                  <path d="M15 12H3" />
+                </svg>
+                {t("sessionList.handoffPack")}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={(e) => {

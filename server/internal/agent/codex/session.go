@@ -93,6 +93,7 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 		threadID = strings.TrimSpace(*id)
 	}
 	sess = &session{
+		agentName:     strings.TrimSpace(opts.AgentName),
 		client:        client,
 		thread:        thread,
 		threadOpts:    threadOptions,
@@ -199,6 +200,7 @@ func newClient(opts OpenOptions) *codexsdk.Codex {
 }
 
 type session struct {
+	agentName  string
 	client     *codexsdk.Codex
 	thread     *codexsdk.Thread
 	threadOpts codexsdk.ThreadOptions
@@ -759,6 +761,7 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	if strings.TrimSpace(defaults.Model) != "" {
 		currentModelID = strings.TrimSpace(defaults.Model)
 	}
+	models = supplementSavedProviderModels(s.agentName, models)
 	return types.ModelList{
 		CurrentModelID: currentModelID,
 		Models:         models,

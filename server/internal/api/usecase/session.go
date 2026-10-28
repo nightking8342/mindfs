@@ -409,9 +409,10 @@ func (s *Service) CreateSession(ctx context.Context, in CreateSessionInput) (*se
 }
 
 type ForkSessionInput struct {
-	RootID string
-	Key    string
-	Seq    int
+	RootID      string
+	Key         string
+	Seq         int
+	Independent bool
 }
 
 type ForkSessionOutput struct {
@@ -492,9 +493,13 @@ func (s *Service) ForkSession(ctx context.Context, in ForkSessionInput) (ForkSes
 	if err != nil {
 		return ForkSessionOutput{}, err
 	}
+	parentKey := current.Key
+	if in.Independent {
+		parentKey = ""
+	}
 	created, err := manager.Create(ctx, session.CreateInput{
 		Type:             session.TypeChat,
-		ParentSessionKey: current.Key,
+		ParentSessionKey: parentKey,
 		Source:           string(sourceJSON),
 		Agent:            agentName,
 		Model:            resolveForkModel(current, target),
@@ -725,22 +730,39 @@ type GetSessionExchangeAuxInput struct {
 	Seq    int
 }
 
-func (s *Service) GetSessionLogPath(ctx context.Context, in GetSessionInput) (string, error) {
+type SessionLogPath struct {
+	Path           string
+	AgentSessionID string
+}
+
+func (s *Service) GetSessionLogPath(ctx context.Context, in GetSessionInput) (SessionLogPath, error) {
 	if err := s.ensureRegistry(); err != nil {
-		return "", err
+		return SessionLogPath{}, err
 	}
 	manager, err := s.Registry.GetSessionManager(in.RootID)
 	if err != nil {
-		return "", err
+		return SessionLogPath{}, err
 	}
-	if _, err := manager.Get(ctx, in.Key, 0); err != nil {
-		return "", err
+	current, err := manager.Get(ctx, in.Key, 0)
+	if err != nil {
+		return SessionLogPath{}, err
 	}
 	path := manager.ExchangeLogAbsolutePath(in.Key)
 	if path == "" {
-		return "", errors.New("session log path unavailable")
+		return SessionLogPath{}, errors.New("session log path unavailable")
 	}
-	return path, nil
+	out := SessionLogPath{Path: path}
+	agentName := strings.TrimSpace(session.InferAgentFromSession(current))
+	if agentName != "" {
+		binding, err := manager.FindAgentBinding(ctx, in.Key, agentName)
+		if err != nil {
+			// 静默降级为空 agent_session_id，但留日志便于排查接力包缺 ID 的反馈
+			log.Printf("[session] FindAgentBinding failed for %s/%s: %v", in.RootID, in.Key, err)
+		} else if binding != nil {
+			out.AgentSessionID = strings.TrimSpace(binding.AgentSessionID)
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) GetSessionExchangeAux(ctx context.Context, in GetSessionExchangeAuxInput) (map[int][]session.ExchangeAux, error) {
@@ -937,8 +959,9 @@ func (s *Service) CloseSession(ctx context.Context, in CloseSessionInput) (*sess
 }
 
 type DeleteSessionInput struct {
-	RootID string
-	Key    string
+	RootID       string
+	Key          string
+	KeepChildren bool
 }
 
 func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) error {
@@ -956,6 +979,9 @@ func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) erro
 	keys, err := deleteSessionCascadeKeys(ctx, manager, in.Key)
 	if err != nil {
 		return err
+	}
+	if in.KeepChildren {
+		keys = []string{strings.TrimSpace(in.Key)}
 	}
 	for _, key := range keys {
 		cancelActiveSessionTurn(in.RootID, key)
@@ -982,6 +1008,9 @@ func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) erro
 			seen[key] = true
 		}
 		for _, key := range executionKeys {
+			if in.KeepChildren {
+				continue
+			}
 			if !existing[key] || seen[key] {
 				continue
 			}
@@ -995,6 +1024,11 @@ func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) erro
 					seen[child] = true
 				}
 			}
+		}
+	}
+	if in.KeepChildren {
+		if err := manager.DetachChildren(ctx, in.Key); err != nil {
+			return err
 		}
 	}
 	for _, key := range keys {
@@ -1070,6 +1104,22 @@ func cancelActiveSessionTurn(rootID, sessionKey string) {
 			log.Printf("[session] turn.cancel.error root=%s session=%s err=%v", rootID, sessionKey, err)
 		}
 	}
+}
+
+type DetachSessionInput struct {
+	RootID string
+	Key    string
+}
+
+func (s *Service) DetachSession(ctx context.Context, in DetachSessionInput) (*session.Session, error) {
+	if err := s.ensureRegistry(); err != nil {
+		return nil, err
+	}
+	manager, err := s.Registry.GetSessionManager(in.RootID)
+	if err != nil {
+		return nil, err
+	}
+	return manager.Detach(ctx, in.Key)
 }
 
 type RenameSessionInput struct {

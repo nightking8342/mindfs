@@ -125,7 +125,7 @@ func (h *HTTPHandler) handleAgentAPIProvidersList(w http.ResponseWriter, r *http
 
 func (h *HTTPHandler) handleAgentAPIProviderCreate(w http.ResponseWriter, r *http.Request) {
 	var req agentAPIProviderCreateRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -143,7 +143,7 @@ func (h *HTTPHandler) handleAgentAPIProviderCreate(w http.ResponseWriter, r *htt
 
 func (h *HTTPHandler) handleAgentAPIProvidersSync(w http.ResponseWriter, r *http.Request) {
 	var req agentAPIProviderSyncRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -174,7 +174,7 @@ func (h *HTTPHandler) handleAgentAPIProvidersSyncAll(w http.ResponseWriter, r *h
 
 func (h *HTTPHandler) handleAgentAPIProviderTest(w http.ResponseWriter, r *http.Request) {
 	var req agentAPIProviderTestRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -206,7 +206,7 @@ func (h *HTTPHandler) handleAgentAPIProviderDelete(w http.ResponseWriter, r *htt
 
 func (h *HTTPHandler) handleAgentAPIProviderSwitch(w http.ResponseWriter, r *http.Request) {
 	var req agentAPIProviderSwitchRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -1092,89 +1092,6 @@ func tomlStringValue(value string) string {
 		return strings.TrimSpace(value[1 : len(value)-1])
 	}
 	return strings.TrimSpace(value)
-}
-
-// preserveCodexModelProviderKey aligns the selected provider key and table.
-func preserveCodexModelProviderKey(existing, stableProvider string) string {
-	stableProvider = strings.TrimSpace(stableProvider)
-	if stableProvider == "" {
-		return existing
-	}
-	currentProvider := codexModelProviderFromConfig(existing)
-	if currentProvider == stableProvider {
-		return existing
-	}
-	if currentProvider == "" {
-		// Add the provider selector before the first table.
-		return addCodexModelProviderKey(existing, stableProvider)
-	}
-	stableTable := tomlDottedTable("model_providers", stableProvider)
-	lines := strings.Split(strings.ReplaceAll(existing, "\r\n", "\n"), "\n")
-	currentTableFound, stableTableFound := false, false
-	for _, line := range lines {
-		tableProvider, ok := codexModelProviderTableKey(line)
-		if ok && tableProvider == currentProvider {
-			currentTableFound = true
-		}
-		if ok && tableProvider == stableProvider {
-			stableTableFound = true
-		}
-	}
-	// Keep the configuration unchanged when neither provider table exists.
-	if !currentTableFound && !stableTableFound {
-		return existing
-	}
-	out := make([]string, 0, len(lines))
-	inTable := false
-	skipStableTable := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		header := tomlTableHeader(line)
-		if header != "" {
-			inTable = true
-			tableProvider, isProviderTable := codexModelProviderTableKey(line)
-			skipStableTable = currentTableFound && isProviderTable && tableProvider == stableProvider
-			if skipStableTable {
-				continue
-			}
-			if isProviderTable && tableProvider == currentProvider {
-				line = stableTable
-			}
-		}
-		if skipStableTable {
-			continue
-		}
-		if !inTable && strings.HasPrefix(trimmed, "model_provider") {
-			if key, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(key) == "model_provider" {
-				line = fmt.Sprintf("model_provider = %q", stableProvider)
-			}
-		}
-		out = append(out, line)
-	}
-	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
-}
-
-func addCodexModelProviderKey(existing, providerName string) string {
-	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(existing, "\r\n", "\n"), "\n"), "\n")
-	if len(lines) == 1 && lines[0] == "" {
-		lines = nil
-	}
-	insertAt := len(lines)
-	for i, line := range lines {
-		if tomlTableHeader(line) != "" {
-			insertAt = i
-			break
-		}
-	}
-	top := append([]string(nil), lines[:insertAt]...)
-	top = append(top, fmt.Sprintf("model_provider = %q", providerName))
-	if insertAt < len(lines) {
-		if len(top) > 0 && strings.TrimSpace(top[len(top)-1]) != "" {
-			top = append(top, "")
-		}
-		top = append(top, lines[insertAt:]...)
-	}
-	return strings.TrimSpace(strings.Join(top, "\n")) + "\n"
 }
 
 func insertCodexTopLevelProviderConfig(existing, model, providerName string) string {

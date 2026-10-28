@@ -197,6 +197,7 @@ function useSwipeRevealSidebar(
     // 触摸起点落在「自带横向手势的控件」内时不接管侧栏滑动。这些控件自己处理
     // 触摸（如输入框小蓝圈的「左滑新建会话」），否则两个手势抢同一 touch 事件，
     // 会既新建会话又误关侧边栏。用 closest 判断起点是否落在这些标记内。
+    // 对话框同理：弹层内的横向滑动属于弹层自己，不能被抽屉手势抢走。
     const isOwnGestureTarget = (target: Element | null): boolean => {
       if (!target) {
         return false;
@@ -205,7 +206,8 @@ function useSwipeRevealSidebar(
       return !!(
         el.closest('[data-onboarding="session-ring"]') ||
         el.closest('[data-onboarding="action-bar"]') ||
-        el.closest('[data-fork-region="footer"]')
+        el.closest('[data-fork-region="footer"]') ||
+        el.closest('[role="dialog"], [aria-modal="true"]')
       );
     };
 
@@ -400,6 +402,11 @@ function useSwipeRevealSidebar(
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("touchend", onTouchEnd);
       el.removeEventListener("touchcancel", onTouchEnd);
+      // 断点切换/卸载时清掉拖拽中间态，避免 data-dragging 残留把过渡永久关掉
+      left.ref.current?.removeAttribute("data-dragging");
+      right.ref.current?.removeAttribute("data-dragging");
+      left.wallpaperRef?.current?.removeAttribute("data-dragging");
+      right.wallpaperRef?.current?.removeAttribute("data-dragging");
     };
   }, [mainRef, left.ref, left.wallpaperRef, left.onOpen, left.onClose, left.open, left.closedPercent, left.hasGap, right.ref, right.wallpaperRef, right.onOpen, right.onClose, right.open, right.closedPercent, right.hasGap, splitAtCenter]);
 }
@@ -501,6 +508,8 @@ function useDrawerDrag(
       aside.removeEventListener("touchmove", onMove);
       aside.removeEventListener("touchend", onEnd);
       aside.removeEventListener("touchcancel", onEnd);
+      aside.removeAttribute("data-dragging");
+      wallpaper?.removeAttribute("data-dragging");
     };
   }, [isMobile, asideRef, wallpaperRef, side, onClose]);
 }
@@ -757,7 +766,7 @@ export function ForkShell(props: ForkShellProps) {
     top: "var(--mindfs-safe-area-top, env(safe-area-inset-top, 0px))",
     bottom: 0,
     [side]: 0,
-    width: "var(--fork-mobile-drawer-width, 75vw)",
+    width: "var(--fork-mobile-drawer-width, min(85vw, 360px))",
     zIndex: 2000,
     // 抽屉是半透明玻璃板，透出背后 drawerWallpaperStyle 铺的壁纸（与 main 同一坐标系），
     // 与桌面侧栏同款材质：background 走 --fork-sidebar-bg（噪点 + 半透明白），
@@ -770,7 +779,10 @@ export function ForkShell(props: ForkShellProps) {
     transform: open
       ? "translateX(0) translateZ(0)"
       : `translateX(${side === "left" ? "-100%" : "100%"}) translateZ(0)`,
-    transition: "transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
+    // visibility 随 transform 同步过渡：关闭动画结束后才移出命中测试与无障碍树，
+    // 展开瞬间立即恢复可见（与上游 v0.5.8 的抽屉处理一致）。
+    transition: "transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0.22s linear",
+    visibility: open ? "visible" : "hidden",
     display: "flex",
     flexDirection: "column",
     overflow: "hidden",
@@ -799,7 +811,7 @@ export function ForkShell(props: ForkShellProps) {
     top: "var(--mindfs-safe-area-top, env(safe-area-inset-top, 0px))",
     bottom: 0,
     [side]: 0,
-    width: "var(--fork-mobile-drawer-width, 75vw)",
+    width: "var(--fork-mobile-drawer-width, min(85vw, 360px))",
     backgroundImage: "var(--fork-mobile-drawer-wallpaper-image, none)",
     backgroundColor: "var(--fork-mobile-drawer-wallpaper-color, transparent)",
     backgroundAttachment: "fixed",
@@ -866,6 +878,7 @@ export function ForkShell(props: ForkShellProps) {
               data-mindfs-font-scale-region="sidebar"
               data-fork-region="left"
               data-fork-open={physicalLeftOpen ? "" : undefined}
+              aria-hidden={!physicalLeftOpen ? true : undefined}
               ref={leftDrawerRef}
               style={{ ...mobileSidebarStyle("left", physicalLeftOpen), ...fontScaleStyle(physicalLeftFontScale) }}
             >
@@ -954,6 +967,7 @@ export function ForkShell(props: ForkShellProps) {
               data-mindfs-font-scale-region="sidebar"
               data-fork-region="right"
               data-fork-open={physicalRightOpen ? "" : undefined}
+              aria-hidden={!physicalRightOpen ? true : undefined}
               ref={rightDrawerRef}
               style={{ ...mobileSidebarStyle("right", physicalRightOpen), ...fontScaleStyle(physicalRightFontScale) }}
             >

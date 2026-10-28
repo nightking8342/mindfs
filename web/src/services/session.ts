@@ -1255,7 +1255,7 @@ class SessionService {
   async fetchChildSessions(
     rootId: string,
     parentSessionKey: string,
-    options?: { beforeTime?: string; limit?: number },
+    options?: { beforeTime?: string; limit?: number; throwOnError?: boolean },
   ): Promise<Session[]> {
     try {
       const params = new URLSearchParams({
@@ -1272,6 +1272,7 @@ class SessionService {
       return Array.isArray(data) ? data : [];
     } catch (err) {
       console.error("[Session] Failed to fetch child sessions:", err);
+      if (options?.throwOnError) throw err;
       return [];
     }
   }
@@ -1306,11 +1307,11 @@ class SessionService {
     }
   }
 
-  async getSessionLogPath(rootId: string, sessionKey: string): Promise<string> {
-    const data = await protectedJSON<{ path: string }>(
+  async getSessionLogPath(rootId: string, sessionKey: string): Promise<{ path: string; agentSessionId: string }> {
+    const data = await protectedJSON<{ path: string; agent_session_id?: string }>(
       appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/log-path`, new URLSearchParams({ root: rootId })),
     );
-    return data.path;
+    return { path: data.path, agentSessionId: data.agent_session_id || "" };
   }
 
   async getSession(
@@ -1438,9 +1439,10 @@ class SessionService {
     }
   }
 
-  async deleteSession(rootId: string, sessionKey: string): Promise<boolean> {
+  async deleteSession(rootId: string, sessionKey: string, keepChildren = false): Promise<boolean> {
     try {
       const params = new URLSearchParams({ root: rootId });
+      if (keepChildren) params.set("keep_children", "1");
       const res = await protectedFetch(
         appURL(`/api/sessions/${encodeURIComponent(sessionKey)}`, params),
         { method: "DELETE" },
@@ -1482,6 +1484,11 @@ class SessionService {
     }
   }
 
+  async detachSession(rootId: string, sessionKey: string): Promise<Session> {
+    const params = new URLSearchParams({ root: rootId });
+    return protectedJSON<Session>(appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/detach`, params), { method: "POST" });
+  }
+
   async setSessionPinned(
     rootId: string,
     sessionKey: string,
@@ -1513,6 +1520,7 @@ class SessionService {
     rootId: string,
     sessionKey: string,
     seq: number,
+    independent = false,
   ): Promise<{ session_key: string; session?: Session } | null> {
     try {
       if (!rootId || !sessionKey || !seq) {
@@ -1529,6 +1537,7 @@ class SessionService {
             root_id: rootId,
             session_key: sessionKey,
             seq,
+            independent,
           }),
         },
       );

@@ -208,7 +208,7 @@ func (h *HTTPHandler) handleAgentConfigBackupsList(w http.ResponseWriter, r *htt
 
 func (h *HTTPHandler) handleAgentConfigBackupCreate(w http.ResponseWriter, r *http.Request) {
 	var req agentConfigBackupRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -226,7 +226,7 @@ func (h *HTTPHandler) handleAgentConfigBackupCreate(w http.ResponseWriter, r *ht
 
 func (h *HTTPHandler) handleAgentConfigBackupUpdate(w http.ResponseWriter, r *http.Request) {
 	var req agentConfigBackupUpdateRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -287,7 +287,7 @@ func (h *HTTPHandler) handleAgentConfigBackupFileGet(w http.ResponseWriter, r *h
 
 func (h *HTTPHandler) handleAgentConfigBackupFilePut(w http.ResponseWriter, r *http.Request) {
 	var req agentConfigFileRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -335,7 +335,7 @@ func (h *HTTPHandler) handleAgentConfigBackupEnvGet(w http.ResponseWriter, r *ht
 
 func (h *HTTPHandler) handleAgentConfigPreviewFile(w http.ResponseWriter, r *http.Request) {
 	var req agentConfigPreviewRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -357,7 +357,7 @@ func (h *HTTPHandler) handleAgentConfigPreviewFile(w http.ResponseWriter, r *htt
 
 func (h *HTTPHandler) handleAgentConfigSwitch(w http.ResponseWriter, r *http.Request) {
 	var req agentConfigSwitchRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -385,7 +385,7 @@ func (h *HTTPHandler) handleAgentConfigSwitch(w http.ResponseWriter, r *http.Req
 
 func (h *HTTPHandler) handleAgentRestart(w http.ResponseWriter, r *http.Request) {
 	var req agentRestartRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONRequestBytes)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
 		return
 	}
@@ -874,34 +874,14 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		return rec.result(noEntry, false), err
 	}
 	restored := 0
-	// Preserve the selected Codex provider key while restoring config.toml.
-	var codexStableProvider string
-	var codexConfigPath string
 	cfg, err := agent.LoadConfig("")
 	if err != nil {
 		rec.fail(switchStepRestoreFiles, restoreStart, err)
 		return rec.result(noEntry, false), err
 	}
-	def, ok := cfg.GetAgent(entry.Agent)
-	if !ok {
+	if _, ok := cfg.GetAgent(entry.Agent); !ok {
 		rec.fail(switchStepRestoreFiles, restoreStart, fmt.Errorf("agent not configured: %s", entry.Agent))
 		return rec.result(noEntry, false), fmt.Errorf("agent not configured: %s", entry.Agent)
-	}
-	isCodex := def.Protocol == agent.ProtocolCodexSDK
-	if isCodex {
-		if home, homeErr := os.UserHomeDir(); homeErr == nil {
-			codexConfigPath = filepath.Clean(filepath.Join(home, ".codex", "config.toml"))
-		}
-		for _, source := range entry.Sources {
-			sourcePath, pathErr := expandUserPath(source.SourcePath)
-			if pathErr != nil || codexConfigPath == "" || filepath.Clean(sourcePath) != codexConfigPath {
-				continue
-			}
-			if payload, readErr := os.ReadFile(sourcePath); readErr == nil {
-				codexStableProvider = codexModelProviderFromConfig(string(payload))
-			}
-			break
-		}
 	}
 	for _, source := range entry.Sources {
 		// Legacy entries may still list ~/.claude/settings.json as a regular source.
@@ -918,18 +898,6 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		if err := copyFile(backupPath, sourcePath); err != nil {
 			rec.fail(switchStepRestoreFiles, restoreStart, err)
 			return rec.result(noEntry, false), err
-		}
-		if codexStableProvider != "" && isCodex && codexConfigPath != "" && filepath.Clean(sourcePath) == codexConfigPath {
-			payload, readErr := os.ReadFile(sourcePath)
-			if readErr != nil {
-				rec.fail(switchStepRestoreFiles, restoreStart, readErr)
-				return rec.result(noEntry, false), apperr.Wrap("read", sourcePath, readErr)
-			}
-			normalized := preserveCodexModelProviderKey(string(payload), codexStableProvider)
-			if err := os.WriteFile(sourcePath, []byte(normalized), 0o600); err != nil {
-				rec.fail(switchStepRestoreFiles, restoreStart, err)
-				return rec.result(noEntry, false), apperr.Wrap("write", sourcePath, err)
-			}
 		}
 		restored++
 	}

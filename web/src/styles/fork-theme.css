@@ -23,7 +23,7 @@
   --fork-right-width-tablet: 240px;
 
   /* 移动端抽屉 */
-  --fork-mobile-drawer-width: 75vw;
+  --fork-mobile-drawer-width: min(85vw, 360px);
   --fork-mobile-drawer-radius: 14px;
 
   /* 侧栏展开/收起动画 */
