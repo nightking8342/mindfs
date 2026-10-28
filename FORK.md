@@ -66,6 +66,8 @@
 | v0.5.6 上游 AgentSelector 重构的 fork 适配 | 上游 `feat: float-ball gesture extensions` 把 `AgentSelector` 的菜单重置逻辑抽成 `resetMenuState(open)`（含 `openSignal` 蓝环手势开门）。fork 的「Agent 预设」分区有额外的 `presetSectionExpanded` 状态，上游的 `resetMenuState` 不含它 → 直接取上游版本会导致折叠状态跨开关残留。fork 在 `resetMenuState` 内补一行 `setPresetSectionExpanded(false)`（与既有的 `handleModeSelect`/`handlePresetSelect` 等 7 处调用一致）；toggle 分支整体改走上游的 `resetMenuState(next)`，fork 原有的内联重置块删除 | 我方（`web/src/components/AgentSelector.tsx` 的 `resetMenuState` 内一行。属「DSH agent 预设」功能范围。上游若日后自行支持 preset，合并时确认其重置逻辑覆盖 preset 折叠状态） |
 | `release-notes.md` | 跟随上游发版记录，fork 不自行发版 | 上游 || `go.mod` / `go.sum` 的 `replace` 指令 | 指向 `github.com/yandc/*`，由上游维护 | 上游 |
 
+| `web/tests/drawer-edit-viewport.e2e.test.mjs` 的 locale | 上游用例用中文 aria-label 查找「编辑消息」，但 `browser.newPage` 未固定 locale；CI 的 Chromium 默认 `en-US`，按钮渲染成 “Edit message”，两个用例均 30s 超时。fork 在两处 `newPage` 补 `locale: "zh-CN"` | 我方（上游若固定 locale 或改成与语言无关的 locator，随上游并删除本行） |
+
 ### 暂未分歧、但日后改动时须登记的敏感点
 
 以下是上游与 a9gent.com 商业服务的挂钩点。目前 fork **尚未改动**它们；一旦改动（如指向自建服务），必须在上表登记：

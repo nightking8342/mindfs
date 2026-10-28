@@ -41,7 +41,9 @@ async function geometry(page) {
 }
 
 test("IME overlay keeps the drawer and last user inline editor inside the resized main view", async () => {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
+  // 断言使用中文 aria-label，必须固定 locale；CI 的 Chromium 默认 en-US
+  // 会把按钮渲染成 "Edit message" 导致找不到。
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, locale: "zh-CN" });
   try {
     await page.goto(`${server.resolvedUrls.local[0]}tests/session-edit.html?drawer`);
     await page.getByRole("button", { name: "编辑消息", exact: true }).click();
@@ -77,7 +79,7 @@ test("IME overlay keeps the drawer and last user inline editor inside the resize
 });
 
 test("desktop drawer retains its 75vh height", async () => {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 844 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 844 }, locale: "zh-CN" });
   try {
     await page.goto(`${server.resolvedUrls.local[0]}tests/session-edit.html?drawer`);
     await page.getByRole("button", { name: "编辑消息", exact: true }).click();
